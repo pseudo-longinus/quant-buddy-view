@@ -273,6 +273,11 @@ For more dashboard examples, integration questions, the roadmap and real researc
         <sub>Personal WeChat</sub>
       </td>
       <td align="center">
+        <img src="assets/wechat_group_qr8.jpg" width="180" alt="WeChat group QR" />
+        <br/>
+        <sub>WeChat group</sub>
+      </td>
+      <td align="center">
         <img src="assets/feishu_group_qr2.png" width="180" alt="Feishu group QR" />
         <br/>
         <sub>Feishu group</sub>

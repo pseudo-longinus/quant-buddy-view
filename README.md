@@ -272,6 +272,11 @@ npx skills add pseudo-longinus/quant-buddy-view -g -a claude-code -s quant-buddy
         <sub>个人微信</sub>
       </td>
       <td align="center">
+        <img src="assets/wechat_group_qr8.jpg" width="180" alt="微信交流群二维码" />
+        <br/>
+        <sub>微信群</sub>
+      </td>
+      <td align="center">
         <img src="assets/feishu_group_qr2.png" width="180" alt="飞书群二维码" />
         <br/>
         <sub>飞书群</sub>
