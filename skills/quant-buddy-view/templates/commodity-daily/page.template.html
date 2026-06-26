@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>__PAGE_TITLE__</title>
+<!--
+  商品期货日报模板（bespoke 页面）。
+  形状：板块多空主导矛盾 + 今日异动双向分布 + 板块条 + 头部品种 sparkline。
+  生成前替换 CONFIG 与标题占位；发布前用 scripts/compile_bespoke_page.py 内联公共 shell 与运行时资产。
+-->
+<style>
+  :root{
+    --bg:#0e1726; --bg2:#0a111d; --panel:#15202f; --panel2:#1a2738;
+    --line:#26323f; --ink:#e7eef6; --mut:#90a0b3; --dim:#5e6b7c;
+    --up:#ef4f56; --upbg:rgba(239,79,86,.14);
+    --dn:#23b07a; --dnbg:rgba(35,176,122,.14);
+    --flat:#7f8c9c; --gold:#cba14a; --blue:#5b9bd5;
+    --brand:#101827; --brand-ink:#e8eef7; --brand-mut:#9fb0c6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--ink);
+    font-family:"PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .mono{font-family:"SF Mono","Roboto Mono","Consolas",ui-monospace,monospace;
+    font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:24px 26px 52px}
+
+  /* ===== hero 能力标签条 ===== */
+  .hero{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:20px}
+  .tag{font-size:11px;letter-spacing:.4px;padding:5px 11px;border-radius:999px;
+    border:1px solid var(--line);color:var(--mut);background:var(--panel)}
+  .tag.kind{color:var(--gold);border-color:rgba(203,161,74,.4)}
+  .tag.gen{color:#0e1726;background:var(--gold);border-color:var(--gold);font-weight:700}
+
+  /* ===== masthead ===== */
+  .mast{display:flex;justify-content:space-between;align-items:flex-start;
+    border-bottom:2px solid var(--gold);padding-bottom:14px;margin-bottom:22px;flex-wrap:wrap;gap:18px}
+  .kicker{font-size:11px;letter-spacing:3.5px;color:var(--gold);font-weight:600;margin-bottom:6px}
+  .title{font-family:"Songti SC",Georgia,"Times New Roman",serif;font-size:33px;font-weight:700;letter-spacing:1px}
+  .title small{font-size:15px;color:var(--mut);font-weight:400;margin-left:8px;letter-spacing:0}
+  .sub{font-size:13.5px;color:var(--mut);margin-top:8px;line-height:1.6;max-width:640px}
+  .mast-r{display:flex;align-items:flex-start;gap:14px}
+  .mast-meta{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  .asof{font-size:12px;color:var(--mut)}
+  .asof b{color:var(--ink)}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    padding:7px 16px;border-radius:6px;font-size:12.5px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:7px}
+  .btn:hover{border-color:var(--gold);color:var(--gold)}
+  .btn[disabled]{opacity:.55;cursor:wait}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dn);box-shadow:0 0 7px var(--dn)}
+  .err{background:var(--upbg);border:1px solid var(--up);color:#ffb9bc;padding:11px 16px;border-radius:8px;margin-bottom:18px;font-size:13px;display:none}
+
+  /* ===== 通用面板 ===== */
+  .card{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:10px}
+  .sec-h{display:flex;justify-content:space-between;align-items:baseline;margin:26px 2px 12px}
+  .sec-h .t{font-size:15px;font-weight:700}
+  .sec-h .t .ic{color:var(--gold);margin-right:7px;font-weight:700}
+  .sec-h .s{font-size:11.5px;color:var(--dim)}
+
+  /* ===== 主导矛盾 ===== */
+  .conflict{padding:20px 22px 22px}
+  .conflict .topline{display:flex;justify-content:space-between;align-items:baseline;
+    font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin-bottom:18px}
+  .vs-grid{display:grid;grid-template-columns:1fr 52px 1fr;align-items:center;gap:4px}
+  .force{text-align:center;padding:0 14px}
+  .force .side{font-size:11px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:8px;font-weight:600}
+  .force.long .side{color:var(--up)} .force.long .big{color:var(--up)}
+  .force.short .side{color:var(--dn)} .force.short .big{color:var(--dn)}
+  .force .name{font-size:25px;font-weight:700;color:var(--ink);line-height:1.15}
+  .force .drv{font-size:12.5px;color:var(--mut);margin-top:8px;line-height:1.5}
+  .force .drv b{color:var(--ink)}
+  .force .big{font-size:38px;font-weight:800;margin-top:12px;line-height:1}
+  .force .leg{font-size:11px;color:var(--dim);margin-top:3px}
+  .vs{font-family:"Songti SC",Georgia,serif;font-style:italic;font-size:20px;color:var(--dim);text-align:center}
+  .readout{margin-top:20px;padding-top:15px;border-top:1px solid var(--line);font-size:13.5px;color:var(--mut);line-height:1.7}
+  .readout b{color:var(--ink)}
+
+  /* ===== 今日异动 SVG ===== */
+  .chartcard{padding:8px 14px 4px}
+  svg{display:block;width:100%;height:auto;font-family:inherit}
+  .axis-line{stroke:var(--line);stroke-width:1.2}
+  .zero{stroke:var(--dim);stroke-width:1;stroke-dasharray:3 3}
+  .dot-up{fill:var(--up)} .dot-down{fill:var(--dn)} .dot-flat{fill:var(--flat)}
+  .lbl-name{font-size:11px;font-weight:600;fill:var(--ink)}
+  .lbl-code{font-size:9.5px;fill:var(--dim)}
+  .lbl-val{font-size:10px;font-weight:700}
+  .lbl-up{fill:var(--up)} .lbl-down{fill:var(--dn)} .lbl-flat{fill:var(--flat)}
+  .stem{stroke:var(--dim);stroke-width:.8;opacity:.4}
+
+  /* ===== 板块条 ===== */
+  .sectors{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:14px}
+  .sectors .cell{padding:14px 10px;text-align:center;background:var(--panel)}
+  .s-name{font-size:14px;font-weight:700;color:var(--ink)}
+  .s-val{font-size:21px;font-weight:800;margin-top:5px}
+  .s-meta{font-size:10.5px;color:var(--dim);margin-top:4px}
+
+  /* ===== 头部走势 sparkline ===== */
+  .sparks{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:14px}
+  .spark{padding:16px 18px}
+  .spark .head{display:flex;justify-content:space-between;align-items:baseline}
+  .spark .nm{font-size:16px;font-weight:700;color:var(--ink)}
+  .spark .nm small{font-size:10.5px;color:var(--dim);margin-left:6px;font-weight:400}
+  .spark .px{font-size:18px;font-weight:700}
+  .spark .rng{font-size:11px;color:var(--dim);margin-top:4px}
+  .spark .spk{margin-top:10px}
+  .spark .spk svg{height:48px}
+
+  .bone{display:block;border-radius:999px;background:linear-gradient(90deg,#223043 0%,#314058 38%,#223043 76%);background-size:220% 100%;animation:shimmer 1.25s ease-in-out infinite}
+  @keyframes shimmer{0%{background-position:120% 0}100%{background-position:-120% 0}}
+
+  @media(max-width:880px){
+    .chartcard svg{height:220px}
+    .sparks{grid-template-columns:1fr}
+    .title{font-size:26px}
+    .force .name{font-size:20px}
+    .force .big{font-size:30px}
+    .vs-grid{grid-template-columns:1fr 36px 1fr}
+    .mast-r{gap:0}
+  }
+  @media(max-width:420px){
+    .chartcard{padding:6px 8px 4px}
+    .chartcard svg{height:240px}
+  }
+</style>
+<!-- QB_SHARED_SHELL_CSS -->
+</head>
+<body>
+
+<!-- QB_SHARED_SHELL_HEADER -->
+
+<div class="wrap">
+
+  <div class="hero">
+    <span class="tag kind">期货日报</span>
+    <span class="tag gen">Agent + Skill 生成</span>
+    <span class="tag" id="modetag">实时 HTML</span>
+  </div>
+
+  <div class="mast">
+    <div>
+      <div class="kicker">QUANTBUDDY · 商品期货当日异动</div>
+      <div class="title" id="title">商品期货日报<small id="title-en">CN Futures Daily</small></div>
+      <div class="sub" id="subhead">国内商品期货当日异动 · 板块多空力量对比、今日涨跌分布与头部品种走势。</div>
+    </div>
+    <div class="mast-r">
+      <div class="mast-meta">
+        <div class="asof">数据截至 <b id="asof">—</b> · 收盘口径</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="err" id="err"></div>
+
+  <!-- 主导矛盾 -->
+  <div class="card conflict">
+    <div class="topline"><span>主导矛盾 · Main Conflict</span><span id="conflict-date">—</span></div>
+    <div class="vs-grid">
+      <div class="force long">
+        <div class="side">▲ 多方力量 · 领涨板块</div>
+        <div class="name" id="long-name">—</div>
+        <div class="drv" id="long-drv">—</div>
+        <div class="big mono" id="long-big">—</div>
+        <div class="leg">板块平均涨跌幅</div>
+      </div>
+      <div class="vs">vs</div>
+      <div class="force short">
+        <div class="side">▼ 空方力量 · 领跌板块</div>
+        <div class="name" id="short-name">—</div>
+        <div class="drv" id="short-drv">—</div>
+        <div class="big mono" id="short-big">—</div>
+        <div class="leg">板块平均涨跌幅</div>
+      </div>
+    </div>
+    <div class="readout" id="conflict-readout">正在凭 package_id + signature 取数渲染……</div>
+  </div>
+
+  <!-- 今日异动 -->
+  <div class="sec-h">
+    <div class="t"><span class="ic">◆</span>今日异动 <span style="color:var(--mut);font-weight:400">Today&#39;s Movers</span></div>
+    <div class="s">收盘涨跌幅 · 红涨绿跌 · 横轴 = 涨跌幅</div>
+  </div>
+  <div class="card chartcard"><svg id="movers-svg" viewBox="0 0 1000 320" preserveAspectRatio="xMidYMid meet"></svg></div>
+  <div class="sectors" id="sector-strip"></div>
+
+  <!-- 头部走势 -->
+  <div class="sec-h">
+    <div class="t"><span class="ic">◆</span>头部品种走势 <span style="color:var(--mut);font-weight:400">Headline Trends</span></div>
+    <div class="s">近一个月主连收盘价 · range_data 直出</div>
+  </div>
+  <div class="sparks" id="sparks"></div>
+  <!-- QB_SHARED_SHELL_FOOTER -->
+</div>
+
+<!-- QB_SHARED_SHELL_MODAL -->
+
+<!-- QB_SHARED_QR_MINI -->
+<!-- QB_DATA_KERNEL -->
+<!-- QB_SHARED_SHELL_JS -->
+<script>
+/* ============================================================
+   CONFIG：本次生成时填入真实公式任务包凭证。
+   signature 不要在面向最终用户的对话里展示；内联进已发布 HTML 是允许的。
+   ============================================================ */
+const CONFIG = {
+  endpoint: "https://www.quantbuddy.cn/skill",
+  package_id: "pkg_xxxxxxxx",
+  signature: "replace_with_signature"
+};
+
+/* 今日异动 + 板块聚合用的品种（*_ret，read_mode=last_day_stats，data 内部用 last_value 读取）。 */
+const MOVERS = [
+  {k:"SC_ret", code:"SC", name:"原油", sector:"能化"},
+  {k:"LU_ret", code:"LU", name:"低硫燃油", sector:"能化"},
+  {k:"BR_ret", code:"BR", name:"丁二烯橡胶", sector:"能化"},
+  {k:"MA_ret", code:"MA", name:"甲醇", sector:"能化"},
+  {k:"AG_ret", code:"AG", name:"沪银", sector:"贵金属"},
+  {k:"AU_ret", code:"AU", name:"沪金", sector:"贵金属"},
+  {k:"CU_ret", code:"CU", name:"沪铜", sector:"有色"},
+  {k:"AL_ret", code:"AL", name:"沪铝", sector:"有色"},
+  {k:"SN_ret", code:"SN", name:"沪锡", sector:"有色"},
+  {k:"RB_ret", code:"RB", name:"螺纹", sector:"黑色"},
+  {k:"I_ret", code:"I", name:"铁矿", sector:"黑色"},
+  {k:"SF_ret", code:"SF", name:"硅铁", sector:"黑色"},
+  {k:"J_ret", code:"J", name:"焦炭", sector:"黑色"},
+  {k:"AP_ret", code:"AP", name:"苹果", sector:"农产品"},
+  {k:"M_ret", code:"M", name:"豆粕", sector:"农产品"},
+  {k:"EC_ret", code:"EC", name:"欧线集运", sector:"集运"}
+];
+const SECTOR_ORDER = ["能化","贵金属","有色","黑色","农产品","集运"];
+/* 头部走势 sparkline 用的价格序列（*_px，range_data）。 */
+const SPARKS = [
+  {k:"SC_px", code:"SC", name:"原油", unit:"元/桶"},
+  {k:"AG_px", code:"AG", name:"沪银", unit:"元/千克"},
+  {k:"CU_px", code:"CU", name:"沪铜", unit:"元/吨"},
+  {k:"RB_px", code:"RB", name:"螺纹钢", unit:"元/吨"}
+];
+const FLAT_EPS = 0.05;
+let currentRows = [], currentSectors = [], currentAsof = "—";
+const SVGNS = "http://www.w3.org/2000/svg";
+const $ = id => document.getElementById(id);
+const fmtPct = v => (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+const cls = v => v > FLAT_EPS ? "up" : v < -FLAT_EPS ? "down" : "flat";
+
+function showErr(msg){ const e=$("err"); e.textContent="取数失败：" + msg; e.style.display="block"; }
+function clearErr(){ $("err").style.display="none"; }
+function configReady(){
+  return CONFIG.package_id.indexOf("pkg_xxx") !== 0 &&
+    CONFIG.signature.indexOf("replace_") !== 0;
+}
+function refreshButtonLabel(btn){ return btn ? (btn.querySelector(".action-label") || btn) : {textContent:""}; }
+
+async function load(){
+  const btn=$("refresh"), bt=refreshButtonLabel(btn);
+  if(btn) btn.disabled=true; bt.textContent="取数中"; clearErr();
+  if(!configReady()){ bt.textContent="等待配置"; if(btn) btn.disabled=false; return; }
+  try{
+    const out = await QB.query(CONFIG);
+    render(out);
+  }catch(e){
+    showErr(e.message || String(e));
+  }finally{
+    if(btn) btn.disabled=false; bt.textContent="刷新数据";
+  }
+}
+
+function render(out){
+  const rows = [];
+  for(const m of MOVERS){
+    const ret = QB.lastValue(out, m.k);
+    if(ret == null) continue;
+    rows.push({...m, ret, date: QB.lastDate(out, m.k)});
+  }
+  if(!rows.length){ showErr("MOVERS 全部为空，检查公式 output 命名与 read_mode。"); return; }
+  rows.sort((a,b) => b.ret - a.ret);
+  const asOf = rows.reduce((d,r) => r.date && (!d || r.date > d) ? r.date : d, null);
+  currentRows = rows;
+  currentAsof = QB.fmtDate(asOf, ".");
+  $("asof").textContent = currentAsof;
+  $("conflict-date").textContent = QB.fmtDate(asOf) + " 收盘口径";
+
+  const secMap = {};
+  for(const r of rows) (secMap[r.sector] = secMap[r.sector] || []).push(r);
+  const sectors = SECTOR_ORDER.filter(s => secMap[s]).map(s => {
+    const arr = secMap[s];
+    const avg = arr.reduce((a,b) => a + b.ret, 0) / arr.length;
+    return {
+      sector:s, avg,
+      up: arr.filter(x => x.ret > FLAT_EPS).length,
+      dn: arr.filter(x => x.ret < -FLAT_EPS).length,
+      n: arr.length,
+      leader: arr.reduce((a,b) => b.ret > a.ret ? b : a),
+      laggard: arr.reduce((a,b) => b.ret < a.ret ? b : a)
+    };
+  });
+  currentSectors = sectors;
+  const secByAvg = [...sectors].sort((a,b) => b.avg - a.avg);
+  renderConflict(rows, secByAvg);
+  renderMovers(rows);
+  renderSectors(sectors);
+  renderSparks(out);
+}
+
+function renderConflict(rows, secByAvg){
+  if(!secByAvg.length) return;
+  const top = secByAvg[0], bot = secByAvg[secByAvg.length - 1];
+  const gainer = rows[0], loser = rows[rows.length - 1];
+  $("long-name").textContent = top.sector;
+  $("long-drv").innerHTML = "领涨 <b>" + top.leader.name + "</b> " + fmtPct(top.leader.ret) + " · " + top.up + " 涨 / " + top.dn + " 跌";
+  $("long-big").textContent = fmtPct(top.avg);
+  $("short-name").textContent = bot.sector;
+  $("short-drv").innerHTML = "领跌 <b>" + bot.laggard.name + "</b> " + fmtPct(bot.laggard.ret) + " · " + bot.up + " 涨 / " + bot.dn + " 跌";
+  $("short-big").textContent = fmtPct(bot.avg);
+  const breadthUp = rows.filter(r => r.ret > FLAT_EPS).length;
+  const breadthDn = rows.filter(r => r.ret < -FLAT_EPS).length;
+  $("conflict-readout").innerHTML = "全场 <b>" + rows.length + "</b> 个品种：<b>" + breadthUp + "</b> 涨 / <b>" + breadthDn + "</b> 跌。最大上行动能来自 <b>" + gainer.name + "</b>（" + fmtPct(gainer.ret) + "），最大下行动能来自 <b>" + loser.name + "</b>（" + fmtPct(loser.ret) + "）。";
+  $("subhead").textContent = "国内商品期货当日异动 · " + top.sector + " 领涨，" + bot.sector + " 领跌。";
+}
+
+function renderMovers(rows){
+  const svg = $("movers-svg");
+  svg.innerHTML = "";
+  if(!rows.length) return;
+  const W = 1000, H = 320, padX = 70, axisY = 162;
+  const maxAbs = Math.max(1, ...rows.map(r => Math.abs(r.ret))) * 1.15;
+  const xOf = v => padX + (v + maxAbs) / (2 * maxAbs) * (W - padX * 2);
+  add(svg, "line", {x1:padX, y1:axisY, x2:W-padX, y2:axisY, class:"axis-line"});
+  add(svg, "line", {x1:xOf(0), y1:48, x2:xOf(0), y2:H-44, class:"zero"});
+  const placed = [];
+  rows.forEach((r, i) => {
+    const x = xOf(r.ret), c = cls(r.ret);
+    const lane = placed.filter(p => Math.abs(p.x - x) < 56).length;
+    const ly = axisY + (i % 2 ? 38 + lane * 23 : -30 - lane * 23);
+    add(svg, "line", {x1:x, y1:axisY + (ly > axisY ? 8 : -8), x2:x, y2:ly + (ly > axisY ? -14 : 14), class:"stem"});
+    add(svg, "circle", {cx:x, cy:axisY, r:6, class:"dot-" + c});
+    const t = add(svg, "text", {x, y:ly, "text-anchor":"middle", class:"lbl-name"});
+    t.textContent = r.name + " ";
+    const code = add(t, "tspan", {class:"lbl-code"});
+    code.textContent = r.code;
+    const v = add(svg, "text", {x, y:ly + 14, "text-anchor":"middle", class:"lbl-val lbl-" + c});
+    v.textContent = fmtPct(r.ret);
+    placed.push({x, ly});
+  });
+}
+
+function renderSectors(sectors){
+  const wrap = $("sector-strip");
+  wrap.innerHTML = "";
+  const cols = window.innerWidth <= 420 ? 1 : (window.innerWidth <= 880 ? 2 : Math.max(1, sectors.length));
+  wrap.style.gridTemplateColumns = "repeat(" + cols + ",1fr)";
+  sectors.forEach(s => {
+    const div = document.createElement("div");
+    div.className = "cell";
+    div.innerHTML = "<div class='s-name'>" + s.sector + "</div>" +
+      "<div class='s-val mono lbl-" + cls(s.avg) + "'>" + fmtPct(s.avg) + "</div>" +
+      "<div class='s-meta'>" + s.up + " 涨 / " + s.dn + " 跌 · n=" + s.n + "</div>";
+    wrap.appendChild(div);
+  });
+}
+
+function renderSparks(out){
+  const wrap = $("sparks");
+  wrap.innerHTML = "";
+  SPARKS.forEach(s => {
+    const pts = QB.series(out, s.k, {dropZero:true});
+    const vals = pts.map(p => p.v);
+    const last = vals.length ? vals[vals.length - 1] : null;
+    const up = vals.length >= 2 ? vals[vals.length - 1] >= vals[0] : true;
+    const div = document.createElement("div");
+    div.className = "card spark";
+    div.innerHTML = "<div class='head'><div class='nm'>" + s.name + "<small>" + s.code + " · " + s.unit + "</small></div>" +
+      "<div class='px mono " + (up ? "up" : "dn") + "'>" + (last != null ? last.toLocaleString() : "—") + "</div></div>" +
+      "<div class='rng'>" + (pts.length ? QB.fmtDate(pts[0].d) + " → " + QB.fmtDate(pts[pts.length - 1].d) : "暂无序列") + "</div>" +
+      "<div class='spk'></div>";
+    const svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("viewBox", "0 0 300 56");
+    svg.setAttribute("preserveAspectRatio", "none");
+    drawSpark(svg, vals, up);
+    div.querySelector(".spk").appendChild(svg);
+    wrap.appendChild(div);
+  });
+}
+
+function drawSpark(svg, vals, up){
+  if(vals.length < 2) return;
+  const mn = Math.min(...vals), mx = Math.max(...vals), pad = (mx - mn) * .14 || 1;
+  const X = i => i / (vals.length - 1) * 300;
+  const Y = v => 52 - (v - (mn - pad)) / ((mx + pad) - (mn - pad)) * 46;
+  const pts = vals.map((v,i) => X(i).toFixed(1) + "," + Y(v).toFixed(1)).join(" ");
+  const color = up ? "var(--up)" : "var(--dn)";
+  const area = "0," + Y(mn - pad).toFixed(1) + " " + pts + " 300," + Y(mn - pad).toFixed(1);
+  const fill = add(svg, "polygon", {points:area, fill:color, opacity:.10});
+  add(svg, "polyline", {points:pts, fill:"none", stroke:color, "stroke-width":1.8, "stroke-linejoin":"round"});
+}
+
+function add(parent, tag, attrs){
+  const el = document.createElementNS(SVGNS, tag);
+  for(const k in attrs) el.setAttribute(k, attrs[k]);
+  parent.appendChild(el);
+  return el;
+}
+
+function getPosterData(){
+  const top=currentRows[0], bot=currentRows[currentRows.length-1];
+  const breadthUp=currentRows.filter(r=>r.ret>FLAT_EPS).length;
+  const breadthDn=currentRows.filter(r=>r.ret<-FLAT_EPS).length;
+  const sectors=[...currentSectors].sort((a,b)=>b.avg-a.avg).slice(0,6).map(s=>({label:s.sector,value:s.avg,display:fmtPct(s.avg),color:s.avg>=0?"#ef4f56":"#23b07a"}));
+  return {
+    headline:"商品期货多空日报",
+    summary:$("conflict-readout").textContent || "国内商品期货当日异动、板块多空力量对比与头部品种走势。",
+    metrics:[
+      {label:"监控品种",value:String(currentRows.length || MOVERS.length),sub:"主连收盘口径"},
+      {label:"上涨",value:String(breadthUp),sub:"品种数量"},
+      {label:"下跌",value:String(breadthDn),sub:"品种数量"},
+      {label:"领涨",value:top?top.name:"—",sub:top?fmtPct(top.ret):"—"},
+      {label:"领跌",value:bot?bot.name:"—",sub:bot?fmtPct(bot.ret):"—"},
+      {label:"强势板块",value:currentSectors.length?[...currentSectors].sort((a,b)=>b.avg-a.avg)[0].sector:"—",sub:"均值排序"}
+    ],
+    sections:[
+      {title:"板块强弱",type:"bars",items:sectors,height:190},
+      {title:"今日异动",type:"list",items:[top,bot].filter(Boolean).map(r=>({label:r.name,value:fmtPct(r.ret),color:r.ret>=0?"#ef4f56":"#23b07a"})),height:150},
+      {title:"页面口径",type:"list",items:[{label:"数据日期",value:currentAsof},{label:"刷新方式",value:"打开实时取数"}],height:140}
+    ],
+    asof:currentAsof
+  };
+}
+QBShareShell.init({templateName:"商品多空日报",onRefresh:load,getPosterData:getPosterData,title:()=>$("title").textContent,asof:()=>currentAsof});
+load();
+</script>
+</body>
+</html>

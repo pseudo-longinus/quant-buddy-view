@@ -1,0 +1,54 @@
+<!-- QB_SHELL_HEADER_START -->
+<header class="qb-head" data-qb-share-shell>
+  <div class="qb-head-in">
+    <a class="qb-brand" href="https://www.quantbuddy.cn" target="_blank" rel="noopener" aria-label="QuantBuddy 官网">
+      <span class="qb-logo"><img src="__QB_LOGO_SRC__" alt="QuantBuddy" /></span>
+      <span class="qb-name">QuantBuddy · 宽宝</span>
+    </a>
+    <div class="qb-actions" aria-label="页面操作">
+      <button class="qb-action" id="refresh" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M3 12A9 9 0 0 1 18.3 5.6"/><path d="M18 2v4h4"/><path d="M6 22v-4H2"/></svg>
+        <span class="action-label">刷新数据</span>
+      </button>
+      <button class="qb-action" id="shareBtn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.8 15.4 6.2"/><path d="M8.6 13.2 15.4 17.8"/></svg>
+        <span class="action-label">分享</span>
+      </button>
+      <a class="qb-action primary" href="https://www.quantbuddy.cn" target="_blank" rel="noopener">开始使用</a>
+    </div>
+  </div>
+</header>
+<!-- QB_SHELL_HEADER_END -->
+
+<!-- QB_SHELL_FOOTER_START -->
+<footer class="qb-footer" data-qb-share-shell-footer>
+  <div class="qb-footer-inner">
+    <div>
+      <div class="qb-footer-brand">QuantBuddy · 宽宝</div>
+      <div class="qb-footer-note">页面仅作市场观察与数据展示，不构成投资建议。数据口径以页面实时取数结果为准。</div>
+    </div>
+    <a class="qb-footer-link" href="https://www.quantbuddy.cn" target="_blank" rel="noopener">www.quantbuddy.cn</a>
+  </div>
+</footer>
+<!-- QB_SHELL_FOOTER_END -->
+
+<!-- QB_SHELL_MODAL_START -->
+<div class="share-modal" id="sharePosterModal" role="dialog" aria-modal="true" aria-labelledby="sharePosterTitle" aria-hidden="true">
+  <div class="share-dialog" role="document">
+    <div class="share-preview">
+      <img id="sharePosterImage" alt="QuantBuddy 分享海报" />
+      <canvas id="sharePosterCanvas" width="900" height="1400" hidden></canvas>
+    </div>
+    <aside class="share-side">
+      <h2 id="sharePosterTitle">分享海报</h2>
+      <div class="share-status" id="sharePosterStatus">生成中</div>
+      <div class="share-tools">
+        <button class="share-tool" id="copyLink" type="button">复制链接</button>
+        <button class="share-tool primary" id="copyPoster" type="button">复制图片</button>
+        <button class="share-tool" id="downloadPoster" type="button">下载 PNG</button>
+        <button class="share-tool" id="closePoster" type="button">关闭</button>
+      </div>
+    </aside>
+  </div>
+</div>
+<!-- QB_SHELL_MODAL_END -->

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PAGE_TITLE__</title>
+<style>
+  :root{
+    --bg:#f4f7fb;--panel:#fff;--ink:#172033;--mut:#64748b;--line:#d9e2ee;
+    --accent:#b8842f;--blue:#2454a6;--up:#c2412d;--down:#16845b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .shell-main{max-width:1220px;margin:0 auto;padding:18px 18px 34px}
+  .mast{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;border-bottom:2px solid var(--accent);padding:14px 0 16px;margin-bottom:14px}
+  .eyebrow{margin:0 0 5px;color:var(--accent);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+  h1{margin:0;font-size:28px;line-height:1.15;letter-spacing:0}
+  .sub{margin:8px 0 0;color:var(--mut)}
+  .status{min-width:230px;text-align:right;color:var(--mut);font-size:12px}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+  .tabs button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:7px 12px;cursor:pointer}
+  .tabs button.active{border-color:var(--accent);color:#7a551b;background:#fff8eb}
+  .section{display:none}
+  .section.active{display:block}
+  .bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 12px;min-height:74px}
+  .metric .k{color:var(--mut);font-size:12px}
+  .metric .v{font-size:24px;font-weight:760;margin-top:4px}
+  .grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(320px,.9fr);gap:12px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .panel h2{margin:0;padding:12px 14px;border-bottom:1px solid var(--line);font-size:15px;letter-spacing:0}
+  .panel-body{padding:12px 14px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:7px 8px;border-bottom:1px solid #edf1f6;text-align:right;white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{position:sticky;top:0;background:#f8fafc;color:#475569}
+  .table-wrap{max-height:620px;overflow:auto}
+  .mobile-list{display:none}
+  .stock-card{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px;background:#fff}
+  .stock-card .top{display:flex;justify-content:space-between;gap:8px;font-weight:700}
+  .stock-card .meta{color:var(--mut);font-size:12px;margin-top:3px}
+  .stock-card .score{color:var(--blue);font-size:18px}
+  .audit{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .audit-item{border:1px solid var(--line);border-radius:8px;padding:10px;background:#fff}
+  .audit-item b{display:block;margin-bottom:4px}
+  .muted{color:var(--mut)}
+  .empty{padding:16px;color:var(--mut)}
+  .err{color:#b42318}
+  .chart{height:320px;display:grid;place-items:center;color:var(--mut);background:#f8fafc;border:1px dashed var(--line);border-radius:8px}
+  @media(max-width:760px){
+    .shell-main{padding:12px 10px 28px}
+    .mast{display:block}
+    .status{text-align:left;margin-top:10px;min-width:0}
+    h1{font-size:23px}
+    .bar{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .grid{display:block}
+    .panel{margin-bottom:10px}
+    .desktop-table{display:none}
+    .mobile-list{display:block}
+    .audit{grid-template-columns:1fr}
+  }
+  @media(max-width:340px){
+    .bar{grid-template-columns:1fr}
+    .tabs button{padding:7px 9px}
+  }
+</style>
+<!-- QB_SHARED_SHELL_CSS -->
+</head>
+<body>
+<!-- QB_SHARED_SHELL_HEADER -->
+<main class="shell-main" data-qb-poster-target>
+  <header class="mast">
+    <div>
+      <p class="eyebrow">Multi-factor Screener</p>
+      <h1>__PAGE_TITLE__</h1>
+      <p class="sub">__THEME_NAME__ · 多因子评分、TopN 榜单、回测与公式审计</p>
+    </div>
+    <div id="status" class="status">等待取数</div>
+  </header>
+
+  <nav class="tabs" aria-label="views">
+    <button class="active" data-tab="rank">榜单</button>
+    <button data-tab="backtest">回测</button>
+    <button data-tab="kline">K 线</button>
+    <button data-tab="audit">审计</button>
+  </nav>
+
+  <section id="rank" class="section active">
+    <div class="bar">
+      <div class="metric"><div class="k">股票池</div><div id="m_pool" class="v">—</div></div>
+      <div class="metric"><div class="k">TopN</div><div id="m_topn" class="v">—</div></div>
+      <div class="metric"><div class="k">最高分</div><div id="m_score" class="v">—</div></div>
+      <div class="metric"><div class="k">数据日期</div><div id="m_date" class="v">—</div></div>
+    </div>
+    <div class="grid">
+      <div class="panel">
+        <h2>TopN 榜单</h2>
+        <div class="panel-body">
+          <div class="table-wrap desktop-table"><table id="rankTable"></table></div>
+          <div id="rankCards" class="mobile-list"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>因子分解</h2>
+        <div id="factorBox" class="panel-body muted">等待 RANK 包返回</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="backtest" class="section">
+    <div class="panel">
+      <h2>净值与 rankIC</h2>
+      <div class="panel-body"><div id="backtestChart" class="chart">BACKTEST 包加载后渲染</div></div>
+    </div>
+  </section>
+
+  <section id="kline" class="section">
+    <div class="panel">
+      <h2>TopN K 线</h2>
+      <div class="panel-body"><div id="klineChart" class="chart">KLINE_* 包加载后渲染</div></div>
+    </div>
+  </section>
+
+  <section id="audit" class="section">
+    <div class="panel">
+      <h2>公式包审计</h2>
+      <div id="auditBox" class="panel-body audit"></div>
+    </div>
+  </section>
+</main>
+<!-- QB_SHARED_SHELL_FOOTER -->
+<!-- QB_SHARED_SHELL_MODAL -->
+<!-- QB_SHARED_QR_MINI -->
+<!-- QB_DATA_KERNEL -->
+<!-- QB_SHARED_SHELL_JS -->
+<script>
+const PACKAGES_BY_ROLE = {
+  RANK: { endpoint: "__ENDPOINT__", package_id: "pkg_rank_xxxxxxxx", signature: "sig_rank_xxxxxxxx" },
+  BACKTEST: { endpoint: "__ENDPOINT__", package_id: "pkg_backtest_xxxxxxxx", signature: "sig_backtest_xxxxxxxx" }
+  // Add KLINE_001 / KLINE_002 when needed.
+};
+
+const state = { outputsByRole: {}, statusByRole: {} };
+const $ = id => document.getElementById(id);
+const fmt = v => v == null ? "—" : (typeof v === "number" ? v.toLocaleString(undefined,{maximumFractionDigits:4}) : String(v));
+
+function setStatus(text, cls) {
+  $("status").className = "status " + (cls || "");
+  $("status").textContent = text;
+}
+
+function renderRank(out) {
+  const rows = QB.topValues(out, "RANK_TOP");
+  $("m_pool").textContent = rows.length ? "已返回" : "—";
+  $("m_topn").textContent = rows.length || "—";
+  $("m_score").textContent = rows[0] ? fmt(rows[0].value) : "—";
+  $("m_date").textContent = QB.fmtDate(QB.statDate(out, "RANK_TOP"));
+  const tableRows = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name || r.asset || ""}</td><td>${r.asset || ""}</td><td>${fmt(r.value)}</td></tr>`).join("");
+  $("rankTable").innerHTML = `<thead><tr><th>#</th><th>名称</th><th>代码</th><th>综合分</th></tr></thead><tbody>${tableRows || "<tr><td colspan='4'>暂无数据</td></tr>"}</tbody>`;
+  $("rankCards").innerHTML = rows.map((r, i) => `<article class="stock-card"><div class="top"><span>${i + 1}. ${r.name || r.asset || "—"}</span><span class="score">${fmt(r.value)}</span></div><div class="meta">${r.asset || ""}</div></article>`).join("") || "<p class='empty'>暂无数据</p>";
+  const factors = QB.perAsset(out, "FACTOR_SCORE").slice(0, 8);
+  $("factorBox").innerHTML = factors.length ? factors.map(x => `<div>${x.name || x.asset || "—"}：${fmt(x.value || x.score)}</div>`).join("") : "FACTOR_SCORE 未返回 per-asset 数据";
+}
+
+function renderAudit() {
+  const roles = Object.keys(PACKAGES_BY_ROLE);
+  $("auditBox").innerHTML = roles.map(role => {
+    const cfg = PACKAGES_BY_ROLE[role];
+    const st = state.statusByRole[role] || {};
+    const status = st.loading ? "loading" : (st.ok ? "ok" : (st.error ? "failed" : "pending"));
+    return `<div class="audit-item"><b>${role}</b><div class="muted">package_id: ${cfg.package_id}</div><div class="${status === "failed" ? "err" : "muted"}">status: ${status}${st.error ? " · " + st.error : ""}</div></div>`;
+  }).join("");
+}
+
+function renderSecondStage(role, out) {
+  if (role === "BACKTEST") {
+    const nav = QB.series(out, "NAV");
+    const bench = QB.series(out, "BENCH_NAV");
+    $("backtestChart").textContent = nav.length || bench.length ? `NAV ${nav.length} 点 · BENCH ${bench.length} 点` : "BACKTEST 已返回，但暂无 NAV/BENCH_NAV 序列";
+  }
+  if (role.indexOf("KLINE_") === 0) {
+    const px = QB.series(out, "PX", { dropZero: true });
+    $("klineChart").textContent = px.length ? `${role} · PX ${px.length} 点` : `${role} 暂无 PX 序列`;
+  }
+}
+
+async function loadRankFirst() {
+  setStatus("RANK 取数中");
+  try {
+    const rank = await QB.query(PACKAGES_BY_ROLE.RANK);
+    state.outputsByRole.RANK = rank;
+    state.statusByRole.RANK = QB.outputStatus(rank);
+    renderRank(rank);
+    renderAudit();
+    setStatus("RANK 已渲染，继续加载回测/K线");
+  } catch (e) {
+    state.statusByRole.RANK = { ok:false, error:e.message };
+    renderAudit();
+    setStatus("RANK 取数失败：" + e.message, "err");
+    return;
+  }
+
+  const rest = {};
+  Object.keys(PACKAGES_BY_ROLE).forEach(role => { if (role !== "RANK") rest[role] = PACKAGES_BY_ROLE[role]; });
+  const res = await QB.queryMany(rest, {
+    slowMs: 9000,
+    onStatus(evt) {
+      state.statusByRole[evt.role] = evt.status;
+      if (evt.phase === "slow") setStatus(evt.role + " 仍在取数，可先查看榜单");
+      renderAudit();
+    }
+  });
+  Object.assign(state.outputsByRole, res.outputsByRole);
+  Object.assign(state.statusByRole, res.statusByRole);
+  Object.keys(res.outputsByRole).forEach(role => renderSecondStage(role, res.outputsByRole[role]));
+  renderAudit();
+  setStatus("加载完成");
+}
+
+document.querySelectorAll(".tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".section").forEach(x => x.classList.remove("active"));
+    btn.classList.add("active");
+    $(btn.dataset.tab).classList.add("active");
+  });
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (window.QBShareShell) {
+    QBShareShell.init({
+      templateName: "多因子选股看板",
+      title: () => document.title,
+      subtitle: () => "__THEME_NAME__ · TopN 榜单与回测监控",
+      asof: () => $("m_date").textContent || "",
+      onRefresh: loadRankFirst,
+      getPosterData: () => ({
+        headline: document.title,
+        summary: "__THEME_NAME__ 多因子评分与 TopN 监控",
+        metrics: [
+          { label: "TopN", value: $("m_topn").textContent, sub: "RANK_TOP" },
+          { label: "最高分", value: $("m_score").textContent, sub: "综合评分" }
+        ],
+        sections: [],
+        asof: $("m_date").textContent || ""
+      })
+    });
+  }
+  renderAudit();
+  loadRankFirst();
+});
+</script>
+</body>
+</html>

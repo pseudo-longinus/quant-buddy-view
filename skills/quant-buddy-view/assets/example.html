@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>取数内核 · 最小示例</title>
+<!--
+  这是“怎么用取数内核”的最小骨架。手搓 bespoke 页时照这个结构写：
+    1) 引内核   2) 填 CONFIG   3) QB.query 拿数据   4) 用 QB.* 解包清洗   5) 自己画
+  本例为了能本地直接打开，用 <script src="data-kernel.js"> 引同目录内核；
+  ★ 真正发布的页面请把 data-kernel.js 的内容【整段内联】进下面的 <script>，做到自包含。
+-->
+<style>
+  body{font-family:"PingFang SC",system-ui,sans-serif;background:#0e141c;color:#e4ecf4;
+       max-width:720px;margin:0 auto;padding:32px 24px;line-height:1.5}
+  h1{font-size:22px;margin:0 0 4px} .sub{color:#8a97a7;font-size:13px;margin-bottom:24px}
+  .card{background:#161f2b;border:1px solid #26323f;border-radius:10px;padding:16px 18px;margin-bottom:14px}
+  .lab{font-size:12px;color:#8a97a7} .big{font-size:30px;font-weight:700;margin-top:4px}
+  .err{display:none;background:rgba(239,79,86,.14);border:1px solid #ef4f56;color:#ffb9bc;
+       padding:11px 14px;border-radius:8px;margin-bottom:14px;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:5px 0;border-bottom:1px solid #1f2937} td.r{text-align:right;font-weight:700}
+  svg{display:block;width:100%;height:60px;margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>取数内核 · 最小示例</h1>
+  <div class="sub" id="asof">读取中…</div>
+
+  <!-- 出错槽：QB.query 抛错时把人话原因塞这，绝不闷头画假图 -->
+  <div class="err" id="err"></div>
+
+  <div class="card">
+    <div class="lab">最新涨跌幅（单值 · lastValue）</div>
+    <div class="big" id="chg">—</div>
+  </div>
+
+  <div class="card">
+    <div class="lab">价格走势（序列 · series, dropZero）</div>
+    <svg id="spark" viewBox="0 0 300 60" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="card">
+    <div class="lab">涨幅榜（榜单 · topValues）</div>
+    <table id="rank"><tbody></tbody></table>
+  </div>
+
+<!-- ★ 发布时把 data-kernel.js 内容粘到这里，删掉下面这行 src 引用 -->
+<script src="data-kernel.js"></script>
+<script>
+/* ① 环境配置：地址按环境填，保持灵活（这里用占位，跑通需换成你真实的包） */
+const CONFIG = {
+  endpoint:   "https://www.quantbuddy.cn",   // 正式 https；测试环境换成你的测试地址
+  package_id: "pkg_xxxxxxxx",
+  signature:  "（你的 signature）",
+};
+
+async function load() {
+  const err = document.getElementById('err');
+  err.style.display = 'none';
+  try {
+    /* ② 拿数据：水管这层全交给内核 */
+    const out = await QB.query(CONFIG);
+
+    /* ③ 解包清洗：内核保证缺口/假 0 已剔除、无效值给 null */
+    const chg = QB.lastValue(out, 'chg');                 // 涨跌幅：0 是合法平盘，不 dropZero
+    const px  = QB.series(out, 'px', { dropZero: true });  // 价格：扔掉假 0/缺口
+    const top = QB.topValues(out, 'GAIN').slice(0, 5);
+
+    document.getElementById('asof').textContent =
+      '数据截至 ' + QB.fmtDate(QB.lastDate(out, 'chg'));
+
+    /* ④ 自己画（呈现层自由发挥）—— 数据已经是干净的，画就行 */
+    document.getElementById('chg').textContent = chg == null ? '—' : (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+    drawSpark(px.map(p => p.v));
+    document.querySelector('#rank tbody').innerHTML =
+      top.map(r => `<tr><td>${r.name || r.asset}</td><td class="r">${(+r.value).toFixed(2)}</td></tr>`).join('')
+      || '<tr><td>暂无数据</td></tr>';
+  } catch (e) {
+    /* ⑤ 出错就喊：把原因显式告诉看页面的人 */
+    err.style.display = 'block';
+    err.textContent = '取数失败：' + e.message;
+    document.getElementById('asof').textContent = '取数失败';
+  }
+}
+
+// 一个极简 sparkline，证明“数据已干净，画图不必再操心缺口”
+function drawSpark(vals) {
+  const svg = document.getElementById('spark');
+  if (vals.length < 2) { svg.innerHTML = ''; return; }
+  const mn = Math.min(...vals), mx = Math.max(...vals), pad = (mx - mn) * 0.1 || 1;
+  const X = i => i / (vals.length - 1) * 300;
+  const Y = v => 60 - (v - (mn - pad)) / ((mx + pad) - (mn - pad)) * 60;
+  svg.innerHTML = `<polyline fill="none" stroke="#5b9bd5" stroke-width="1.6"
+    points="${vals.map((v, i) => X(i).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ')}"/>`;
+}
+
+load();
+</script>
+</body>
+</html>

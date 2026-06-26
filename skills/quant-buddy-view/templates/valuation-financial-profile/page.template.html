@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>__PAGE_TITLE__</title>
+<!--
+  个股估值体检模板（bespoke 页面）。
+  形状：估值水位 + 财务趋势 + 估值变动归因。
+  生成前替换 CONFIG 与标题占位；发布前用 scripts/compile_bespoke_page.py 内联公共 shell 与运行时资产。
+-->
+<style>
+  :root{
+    --page:#10131a; --paper:#16191f; --ink:#e1e2eb; --mut:#9ca3af; --soft:#272a31;
+    --line:#2c323d; --deep:#0b0e14; --teal:#43e091; --violet:#8ed6ff;
+    --amber:#ffc27d; --amber-strong:#f89e1b; --red:#ff8b7b; --green:#43e091; --blue:#8ed6ff;
+    --warm:#d9c3ae; --shadow:0 20px 50px rgba(0,0,0,.28);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:
+    linear-gradient(180deg,rgba(255,194,125,.06),rgba(16,19,26,0) 310px),
+    radial-gradient(circle at 1px 1px,rgba(225,226,235,.075) 1px,transparent 0) 0 0/22px 22px,
+    var(--page);color:var(--ink);
+    font-family:"Geist","Inter","Microsoft YaHei","PingFang SC",-apple-system,"Segoe UI",sans-serif;
+    letter-spacing:0;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  body{min-width:320px}
+  a{color:inherit;text-decoration:none}
+  .mono{font-family:"JetBrains Mono","SF Mono","Roboto Mono","Consolas",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  .wrap{max-width:1220px;margin:0 auto;padding:24px 24px 54px}
+  .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(360px,.95fr);gap:14px;align-items:stretch;margin-bottom:14px}
+  .hero-main{background:linear-gradient(180deg,#1d2026,#16191f);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:24px;position:relative;overflow:hidden}
+  .hero-main:before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,var(--amber),var(--green),var(--blue))}
+  .hero-main:after{content:"";position:absolute;right:20px;top:18px;width:168px;height:168px;background:linear-gradient(90deg,rgba(255,194,125,.10) 1px,transparent 1px),linear-gradient(180deg,rgba(255,194,125,.10) 1px,transparent 1px);background-size:16px 16px;opacity:.32;pointer-events:none}
+  .tags{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px;position:relative;z-index:1}
+  .tag{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:5px 9px;color:var(--mut);background:#1d2026}
+  .tag.hot{border-color:rgba(255,194,125,.55);color:var(--amber);background:rgba(255,194,125,.08);font-weight:700}
+  .kicker{font-family:"JetBrains Mono","Consolas",ui-monospace,monospace;font-size:12px;color:var(--warm);font-weight:600;margin-bottom:10px;position:relative;z-index:1}
+  h1{font-family:"Geist","Microsoft YaHei","PingFang SC",sans-serif;font-size:36px;line-height:1.14;font-weight:750;max-width:720px;position:relative;z-index:1}
+  .question{margin-top:12px;color:var(--warm);font-size:15px;line-height:1.65;max-width:720px;position:relative;z-index:1}
+  .verdict{margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:10px;position:relative;z-index:1}
+  .verdict-item{border:1px solid var(--line);border-radius:6px;padding:14px;background:#191c22}
+  .verdict-item .label{font-family:"JetBrains Mono","Consolas",ui-monospace,monospace;font-size:11px;color:var(--mut);margin-bottom:5px}
+  .verdict-item .value{font-size:20px;font-weight:750;line-height:1.2;color:var(--ink)}
+  .verdict-item .note{font-size:11px;color:var(--warm);margin-top:7px;line-height:1.45}
+  .hero-side{background:#0b0e14;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:18px;position:relative;overflow:hidden;box-shadow:var(--shadow)}
+  .hero-side h2{font-size:15px;font-weight:750;margin-bottom:8px;color:var(--amber)}
+  .asof{font-size:12px;color:var(--warm);margin-bottom:14px}
+  .balance{height:260px;position:relative;border:1px solid var(--line);border-radius:6px;background:#10131a;overflow:hidden}
+  .balance svg{width:100%;height:100%;display:block}
+  .balance-caption{font-size:12px;color:var(--warm);line-height:1.6;margin-top:12px}
+  .err{display:none;background:rgba(147,0,10,.22);border:1px solid rgba(255,180,171,.45);color:#ffdad6;border-radius:6px;padding:12px 14px;margin-bottom:14px;font-size:13px}
+  .metrics{display:grid;grid-template-columns:repeat(8,1fr);gap:10px;margin-bottom:24px}
+  .metric{background:#16191f;border:1px solid var(--line);border-radius:6px;padding:13px;min-height:104px;box-shadow:0 10px 28px rgba(0,0,0,.16)}
+  .metric .label{font-family:"JetBrains Mono","Consolas",ui-monospace,monospace;font-size:11px;color:var(--mut);line-height:1.35;min-height:30px}
+  .metric .value{font-size:24px;font-weight:650;margin-top:7px;line-height:1.05;color:var(--ink)}
+  .metric .sub{font-size:11px;color:var(--warm);margin-top:8px;line-height:1.35}
+  .section{margin:28px 0 12px;display:flex;align-items:baseline;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .section h2{font-size:19px;font-weight:750}
+  .section span{font-size:12px;color:var(--warm)}
+  .water-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .water{background:#16191f;border:1px solid var(--line);border-radius:6px;padding:16px;box-shadow:0 10px 28px rgba(0,0,0,.16)}
+  .water-h{display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:13px}
+  .water-h b{font-size:15px;color:var(--ink)}
+  .water-h span{font-size:12px;color:var(--warm)}
+  .rail{height:14px;border-radius:999px;background:#0b0e14;border:1px solid var(--line);position:relative;overflow:hidden}
+  .rail:before{content:"";position:absolute;left:0;top:0;bottom:0;width:35%;background:rgba(67,224,145,.18)}
+  .rail:after{content:"";position:absolute;right:0;top:0;bottom:0;width:20%;background:rgba(255,139,123,.18)}
+  .pin{position:absolute;top:-5px;width:8px;height:24px;border-radius:99px;background:var(--amber);box-shadow:0 0 0 3px rgba(255,194,125,.13)}
+  .water-note{margin-top:10px;color:var(--warm);font-size:12px;line-height:1.5}
+  .chart-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:12px}
+  .panel{background:#16191f;border:1px solid var(--line);border-radius:6px;padding:16px;box-shadow:0 10px 28px rgba(0,0,0,.16);min-width:0}
+  .panel-h{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+  .panel-h h3{font-size:15px;font-weight:750}
+  .panel-h span{font-family:"JetBrains Mono","Consolas",ui-monospace,monospace;font-size:11px;color:var(--warm)}
+  .chart{height:260px}
+  .chart svg{width:100%;height:100%;display:block}
+  .finance-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  .table{width:100%;border-collapse:collapse;font-size:12px;color:var(--ink)}
+  .table th,.table td{border-bottom:1px solid var(--line);padding:9px 6px;text-align:right}
+  .table th:first-child,.table td:first-child{text-align:left}
+  .table th{color:var(--warm);font-weight:650;background:#1d2026}
+  .table td{font-family:"JetBrains Mono","Consolas",ui-monospace,monospace;color:#dfe3ea}
+  .method{background:#0b0e14;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:18px;display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-top:18px}
+  .method h3{font-size:16px;margin-bottom:8px;color:var(--amber)}
+  .method p{font-size:12px;color:var(--warm);line-height:1.7}
+  .method ul{font-size:12px;color:var(--warm);line-height:1.75;padding-left:18px}
+  .empty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--warm);font-size:12px;border:1px dashed var(--line);border-radius:6px;background:#10131a}
+  @media(max-width:1020px){
+    .hero{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(4,1fr)}
+    .chart-grid,.method{grid-template-columns:1fr}.water-grid{grid-template-columns:1fr}
+  }
+  @media(max-width:680px){
+    .wrap{padding:18px 16px 44px}h1{font-size:28px;line-height:1.18}
+    .hero-main,.hero-side{padding:18px}.verdict{grid-template-columns:1fr}
+    .metrics{grid-template-columns:repeat(2,1fr)}.finance-grid{grid-template-columns:1fr}
+    .metric .value{font-size:21px}.section{align-items:flex-start;flex-direction:column;gap:4px}
+  }
+</style>
+<!-- QB_SHARED_SHELL_CSS -->
+</head>
+<body>
+<!-- QB_SHARED_SHELL_HEADER -->
+
+<main class="wrap">
+  <div class="err" id="err"></div>
+
+  <section class="hero">
+    <div class="hero-main">
+      <div class="tags">
+        <span class="tag hot">个股估值体检</span>
+        <span class="tag">单标的</span>
+        <span class="tag">实时取数</span>
+      </div>
+      <div class="kicker">VALUATION · FINANCIAL QUALITY</div>
+      <h1><span id="assetName">标的</span>是否昂贵，基本面有没有变好？</h1>
+      <p class="question" id="question">用估值水位、财务趋势和现金流质量回答：这只股票当前贵不贵，估值变化主要来自价格、盈利还是两者共同作用。</p>
+      <div class="verdict">
+        <div class="verdict-item">
+          <div class="label">估值判断</div>
+          <div class="value" id="valuationVerdict">等待取数</div>
+          <div class="note" id="valuationNote">PE/PB/PCF 水位会在取数后更新。</div>
+        </div>
+        <div class="verdict-item">
+          <div class="label">基本面判断</div>
+          <div class="value" id="fundamentalVerdict">等待取数</div>
+          <div class="note" id="fundamentalNote">营收、归母净利、ROE 与现金流会在取数后更新。</div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="hero-side">
+      <h2>估值天平</h2>
+      <div class="asof">数据截至 <b id="asof">—</b> · <span id="marketLabel">A 股</span></div>
+      <div class="balance"><svg id="balance" viewBox="0 0 520 260" aria-hidden="true"></svg></div>
+      <div class="balance-caption" id="balanceCaption">拆解近三年价格变化、PE 变化与盈利代理变化。</div>
+    </aside>
+  </section>
+
+  <section class="metrics" id="metrics"></section>
+
+  <div class="section"><h2>估值水位</h2><span>PE(TTM)、PB、PCF 的历史位置，越右越贵</span></div>
+  <section class="water-grid" id="waterGrid"></section>
+
+  <div class="section"><h2>估值曲线</h2><span>价格造成的估值变化与盈利造成的估值变化分开看</span></div>
+  <section class="chart-grid">
+    <div class="panel">
+      <div class="panel-h"><h3>PE(TTM) / PB / PCF</h3><span id="valuationRange">近 3 年</span></div>
+      <div class="chart"><svg id="valuationChart" viewBox="0 0 760 260" aria-hidden="true"></svg></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h3>价格与盈利代理变化</h3><span>价格 / PE 反推</span></div>
+      <div class="chart"><svg id="attributionChart" viewBox="0 0 520 260" aria-hidden="true"></svg></div>
+    </div>
+  </section>
+
+  <div class="section"><h2>财务趋势</h2><span>报告期累计值，默认最近 8 个报告期；字段缺失时自动降级</span></div>
+  <section class="finance-grid">
+    <div class="panel">
+      <div class="panel-h"><h3>收入、利润、现金流（报告期累计）</h3><span>亿元</span></div>
+      <div class="chart"><svg id="financeChart" viewBox="0 0 760 260" aria-hidden="true"></svg></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h3>报告期明细（累计口径）</h3><span>末 8 期</span></div>
+      <div id="financeTable"></div>
+    </div>
+  </section>
+
+  <section class="method">
+    <div>
+      <h3>口径说明</h3>
+      <p>PE(TTM) 使用滚动 12 个月口径，静态 PE 使用最近披露盈利对应的静态口径；财务项使用报告期累计序列，归母净利同比按与 4 个报告期前的同口径值比较。页面展示的是事实画像，不给买卖建议、目标价或价格预测。</p>
+    </div>
+    <ul>
+      <li>估值水位默认按近三年历史位置展示。</li>
+      <li>现金流质量优先看经营现金流 / 归母净利润。</li>
+      <li>估值天平把价格变化、PE 变化、盈利代理变化拆开。</li>
+      <li>财务趋势按报告期累计值展示，不把财报期线条解读为连续日频经营曲线。</li>
+      <li>港股/美股字段缺失时仅展示工具实际返回的数据。</li>
+    </ul>
+  </section>
+</main>
+
+<!-- QB_SHARED_SHELL_FOOTER -->
+
+<!-- QB_SHARED_SHELL_MODAL -->
+
+<!-- QB_SHARED_QR_MINI -->
+<!-- QB_DATA_KERNEL -->
+<!-- QB_SHARED_SHELL_JS -->
+<script>
+const CONFIG = {
+  endpoint: "https://www.quantbuddy.cn",
+  package_id: "pkg_replace_after_formula_package_register",
+  signature: "replace_with_signature",
+  asset: "贵州茅台",
+  market: "A 股",
+  question: "这只股票贵不贵？基本面是否改善？",
+  valuation_window_label: "近 3 年",
+  financial_periods: 8
+};
+
+const $ = id => document.getElementById(id);
+const SVGNS = "http://www.w3.org/2000/svg";
+let currentOutputs=null, currentFinance=null, currentAttribution=null;
+function svgEl(tag, attrs){ const el=document.createElementNS(SVGNS,tag); for(const k in attrs) el.setAttribute(k,attrs[k]); return el; }
+function isNum(v){ return typeof v === "number" && isFinite(v); }
+function fmt(v, digits=2){ return isNum(v) ? (+v).toFixed(digits) : "—"; }
+function fmtPct(v, digits=1){ return isNum(v) ? ((+v)>=0?"+":"") + (+v).toFixed(digits) + "%" : "—"; }
+function fmtYi(v, digits=1){ return isNum(v) ? (v/100000000).toFixed(digits) : "—"; }
+function normPct(v){ if(!isNum(v)) return null; return Math.abs(v) <= 1 ? v * 100 : v; }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function lastPoint(s){ return s && s.length ? s[s.length-1] : null; }
+function lastValueFromSeries(s){ const p=lastPoint(s); return p ? p.v : null; }
+function series(out,key,opts){ return QB.series(out,key,opts || {}); }
+function values(out,key,opts){ return series(out,key,opts).map(p=>p.v); }
+function yoy(series){
+  if(!series || series.length < 5) return null;
+  const last=series[series.length-1].v, prev=series[series.length-5].v;
+  if(!isNum(last) || !isNum(prev) || prev === 0) return null;
+  return (last / prev - 1) * 100;
+}
+function latestDate(outputs){
+  const keys=["px","pe_ttm","pb","roe","revenue"];
+  for(const key of keys){
+    const d=QB.lastDate(outputs,key);
+    if(d) return d;
+    const s=series(outputs,key,{dropZero:false});
+    if(s.length) return s[s.length-1].d;
+  }
+  return null;
+}
+function configReady(){
+  return CONFIG.package_id.indexOf("pkg_" + "replace") !== 0 &&
+    CONFIG.signature.indexOf("replace_") !== 0 &&
+    !!CONFIG.endpoint;
+}
+function heatColor(p){
+  if(!isNum(p)) return "#9ca3af";
+  if(p < 35) return "var(--green)";
+  if(p < 60) return "var(--blue)";
+  if(p < 80) return "var(--amber)";
+  return "var(--red)";
+}
+function valuationBand(p){
+  if(!isNum(p)) return ["估值待确认","等待 PE/PB/PCF 水位。"];
+  if(p < 35) return ["估值偏低","历史水位偏低，需继续检查盈利质量是否同步改善。"];
+  if(p < 60) return ["估值中性","水位处于中间区域，重点看盈利和现金流是否支撑。"];
+  if(p < 80) return ["估值偏高","估值已有抬升，需区分价格上涨和盈利下滑。"];
+  return ["估值过热","估值处于高水位，若盈利没有同步改善，安全垫偏薄。"];
+}
+function fundamentalBand(revenueYoy, profitYoy, roeLast, cfRatio){
+  let score=0, known=0;
+  if(isNum(revenueYoy)){ known++; score += revenueYoy > 0 ? 1 : -1; }
+  if(isNum(profitYoy)){ known++; score += profitYoy > 0 ? 1 : -1; }
+  if(isNum(roeLast)){ known++; score += roeLast >= 10 ? 1 : -1; }
+  if(isNum(cfRatio)){ known++; score += cfRatio >= 1 ? 1 : -1; }
+  if(!known) return ["基本面待确认","财务序列缺失，页面仅展示已返回数据。"];
+  if(score >= 3) return ["基本面改善","增长、盈利能力和现金流质量中有多项向好。"];
+  if(score >= 1) return ["基本面温和改善","增长或盈利能力有支撑，现金流与利润匹配度仍需继续观察。"];
+  if(score <= -2) return ["基本面承压","增长、盈利能力或现金流质量中有多项偏弱。"];
+  return ["基本面分化","部分指标改善，仍需关注现金流与利润是否匹配。"];
+}
+function calcReturn(vals){
+  if(!vals || vals.length < 2) return null;
+  const first=vals[0], last=vals[vals.length-1];
+  if(!isNum(first) || first === 0 || !isNum(last)) return null;
+  return (last / first - 1) * 100;
+}
+function calcAttribution(outputs){
+  const px=values(outputs,"px_series",{dropZero:true});
+  const pe=values(outputs,"pe_ttm_series",{dropZero:true});
+  const priceRet=calcReturn(px);
+  const peRet=calcReturn(pe);
+  let earningsRet=null;
+  if(isNum(priceRet) && isNum(peRet) && (1 + peRet/100) !== 0){
+    earningsRet=((1 + priceRet/100) / (1 + peRet/100) - 1) * 100;
+  }
+  return {priceRet, peRet, earningsRet};
+}
+function drawEmpty(svg,msg){
+  svg.innerHTML="";
+  const t=svgEl("text",{x:"50%",y:"50%","text-anchor":"middle","font-size":"13",fill:"#d9c3ae"});
+  t.textContent=msg; svg.appendChild(t);
+}
+function drawLineChart(id, lines){
+  const svg=$(id); svg.innerHTML="";
+  const W=760,H=260,pL=42,pR=16,pT=18,pB=34;
+  const valid=lines.filter(l=>l.points && l.points.length>1);
+  if(!valid.length){ drawEmpty(svg,"暂无可绘制序列"); return; }
+  const maxLen=Math.max(...valid.map(l=>l.points.length));
+  const all=valid.flatMap(l=>l.points.map(p=>p.v)).filter(isNum);
+  const mn=Math.min(...all), mx=Math.max(...all), pad=(mx-mn)*.12 || 1;
+  const X=i=>pL + i/(maxLen-1)*(W-pL-pR);
+  const Y=v=>pT + (mx+pad-v)/((mx+pad)-(mn-pad))*(H-pT-pB);
+  [0,.25,.5,.75,1].forEach(r=>{
+    const y=pT+r*(H-pT-pB);
+    svg.appendChild(svgEl("line",{x1:pL,y1:y,x2:W-pR,y2:y,stroke:"#2c323d","stroke-width":1}));
+  });
+  valid.forEach(l=>{
+    const pts=l.points.map((p,i)=>X(i).toFixed(1)+","+Y(p.v).toFixed(1)).join(" ");
+    svg.appendChild(svgEl("polyline",{points:pts,fill:"none",stroke:l.color,"stroke-width":2.2,"stroke-linecap":"round","stroke-linejoin":"round"}));
+  });
+  let lx=pL, ly=H-12;
+  valid.forEach(l=>{
+    svg.appendChild(svgEl("circle",{cx:lx,cy:ly-4,r:4,fill:l.color}));
+    const t=svgEl("text",{x:lx+8,y:ly,"font-size":"11",fill:"#d9c3ae"}); t.textContent=l.name; svg.appendChild(t);
+    lx += 96;
+  });
+}
+function drawBarChart(id, bars){
+  const svg=$(id); svg.innerHTML="";
+  const W=520,H=260,pL=132,pR=24,pT=26,pB=28;
+  const valid=bars.filter(b=>isNum(b.value));
+  if(!valid.length){ drawEmpty(svg,"暂无归因数据"); return; }
+  const maxAbs=Math.max(10,...valid.map(b=>Math.abs(b.value)));
+  const zero=pL+(W-pL-pR)/2;
+  valid.forEach((b,i)=>{
+    const y=pT+i*58, half=(W-pL-pR)/2;
+    const xEnd=zero + (b.value/maxAbs)*half;
+    const x=Math.min(zero,xEnd), w=Math.abs(xEnd-zero);
+    const label=svgEl("text",{x:18,y:y+20,"font-size":"12",fill:"#d9c3ae"}); label.textContent=b.name; svg.appendChild(label);
+    svg.appendChild(svgEl("rect",{x:pL,y:y+6,width:W-pL-pR,height:18,rx:9,fill:"#272a31"}));
+    svg.appendChild(svgEl("line",{x1:zero,y1:y+2,x2:zero,y2:y+28,stroke:"#534434","stroke-width":1}));
+    svg.appendChild(svgEl("rect",{x:x,y:y+6,width:Math.max(2,w),height:18,rx:9,fill:b.color}));
+    const val=svgEl("text",{x:W-pR,y:y+20,"text-anchor":"end","font-size":"12","font-weight":"700",fill:"#e1e2eb"});
+    val.textContent=fmtPct(b.value,1); svg.appendChild(val);
+  });
+}
+function drawBalance(att){
+  const svg=$("balance"); svg.innerHTML="";
+  const W=520,H=260,cx=260,cy=118;
+  svg.appendChild(svgEl("line",{x1:88,y1:cy,x2:432,y2:cy,stroke:"#ffc27d","stroke-width":7,"stroke-linecap":"round"}));
+  svg.appendChild(svgEl("line",{x1:cx,y1:cy,x2:cx,y2:214,stroke:"#ffc27d","stroke-width":5,"stroke-linecap":"round"}));
+  svg.appendChild(svgEl("path",{d:"M 215 214 L 305 214 L 326 236 L 194 236 Z",fill:"#ffc27d",opacity:.95}));
+  const maxAbs=Math.max(10,Math.abs(att.priceRet||0),Math.abs(att.earningsRet||0));
+  const leftDrop=isNum(att.priceRet)?clamp(att.priceRet/maxAbs*34,-34,34):0;
+  const rightDrop=isNum(att.earningsRet)?clamp(att.earningsRet/maxAbs*34,-34,34):0;
+  function pan(x,y,label,val,color){
+    svg.appendChild(svgEl("line",{x1:x,y1:cy,x2:x,y2:y,stroke:"#534434","stroke-width":2}));
+    svg.appendChild(svgEl("path",{d:`M ${x-64} ${y} L ${x+64} ${y} L ${x+46} ${y+34} L ${x-46} ${y+34} Z`,fill:color,opacity:.9}));
+    const t=svgEl("text",{x,y:y+55,"text-anchor":"middle","font-size":"13","font-weight":"700",fill:"#e1e2eb"}); t.textContent=label; svg.appendChild(t);
+    const v=svgEl("text",{x,y:y+76,"text-anchor":"middle","font-size":"18","font-weight":"900",fill:"#ffffff"}); v.textContent=fmtPct(val,1); svg.appendChild(v);
+  }
+  pan(126,154+leftDrop,"价格变化",att.priceRet,"#ff8b7b");
+  pan(394,154-rightDrop,"盈利代理",att.earningsRet,"#43e091");
+  const pe=svgEl("text",{x:cx,y:54,"text-anchor":"middle","font-size":"13",fill:"#d9c3ae"}); pe.textContent="PE变化 " + fmtPct(att.peRet,1); svg.appendChild(pe);
+}
+function metricRows(outputs, finance){
+  return [
+    ["最新价", fmt(QB.lastValue(outputs,"px"),2), "价格序列末值"],
+    ["日涨跌幅", fmtPct(QB.lastValue(outputs,"chg"),2), "最近交易日"],
+    ["PE(TTM)", fmt(QB.lastValue(outputs,"pe_ttm"),1), "滚动 12 个月"],
+    ["静态PE", fmt(QB.lastValue(outputs,"pe_static"),1), "静态口径"],
+    ["PB", fmt(QB.lastValue(outputs,"pb"),2), "最新估值"],
+    ["ROE", fmtPct(finance.roeLast,1), "最近报告期"],
+    ["归母净利同比", fmtPct(finance.profitYoy,1), "与 4 期前比较"],
+    ["现金流/净利", fmt(finance.cfRatio,2), ">=1 更健康"]
+  ];
+}
+function renderMetrics(outputs, finance){
+  const metrics=metricRows(outputs, finance);
+  $("metrics").innerHTML=metrics.map(m=>`<div class="metric"><div class="label">${m[0]}</div><div class="value mono">${m[1]}</div><div class="sub">${m[2]}</div></div>`).join("");
+}
+function renderWater(outputs){
+  const rows=[
+    ["PE(TTM)", normPct(QB.lastValue(outputs,"pe_pctile")), QB.lastValue(outputs,"pe_ttm"), "倍"],
+    ["PB", normPct(QB.lastValue(outputs,"pb_pctile")), QB.lastValue(outputs,"pb"), "倍"],
+    ["PCF", normPct(QB.lastValue(outputs,"pcf_pctile")), QB.lastValue(outputs,"pcf"), "倍"]
+  ];
+  $("waterGrid").innerHTML=rows.map(r=>{
+    const p=isNum(r[1])?clamp(r[1],0,100):null;
+    return `<div class="water">
+      <div class="water-h"><b>${r[0]}</b><span class="mono">${isNum(r[2])?fmt(r[2],2)+" "+r[3]:"暂无"}</span></div>
+      <div class="rail"><div class="pin" style="left:calc(${p==null?0:p}% - 4px);background:${heatColor(p)}"></div></div>
+      <div class="water-note">历史水位：<b class="mono" style="color:${heatColor(p)}">${p==null?"—":Math.round(p)+"%"}</b> · ${valuationBand(p)[0]}</div>
+    </div>`;
+  }).join("");
+}
+function renderFinanceTable(finance){
+  const n=CONFIG.financial_periods || 8;
+  const dates=[...new Set([finance.revenue,finance.profit,finance.roe,finance.cashflow].flat().map(p=>p.d))].slice(-n);
+  if(!dates.length){ $("financeTable").innerHTML='<div class="empty">暂无财务序列</div>'; return; }
+  const byDate=(arr,d)=>{const p=arr.find(x=>String(x.d)===String(d));return p?p.v:null;};
+  $("financeTable").innerHTML=`<table class="table"><thead><tr><th>报告期</th><th>营收(亿)</th><th>归母净利(亿)</th><th>ROE</th><th>现金流/净利</th></tr></thead><tbody>${
+    dates.map(d=>`<tr><td>${QB.fmtDate(d)}</td><td>${fmtYi(byDate(finance.revenue,d),1)}</td><td>${fmtYi(byDate(finance.profit,d),1)}</td><td>${fmt(byDate(finance.roe,d),1)}%</td><td>${fmt(byDate(finance.cfRatioSeries,d),2)}</td></tr>`).join("")
+  }</tbody></table>`;
+}
+function renderCharts(outputs, finance, att){
+  drawLineChart("valuationChart",[
+    {name:"PE(TTM)", color:"#ffc27d", points:series(outputs,"pe_ttm_series",{dropZero:true})},
+    {name:"PB", color:"#8ed6ff", points:series(outputs,"pb_series",{dropZero:true})},
+    {name:"PCF", color:"#43e091", points:series(outputs,"pcf_series",{dropZero:true})}
+  ]);
+  drawBarChart("attributionChart",[
+    {name:"价格变化", value:att.priceRet, color:"#ff8b7b"},
+    {name:"PE 变化", value:att.peRet, color:"#ffc27d"},
+    {name:"盈利代理变化", value:att.earningsRet, color:"#43e091"}
+  ]);
+  drawLineChart("financeChart",[
+    {name:"营收(亿)", color:"#8ed6ff", points:finance.revenue.map(p=>({d:p.d,v:p.v/100000000}))},
+    {name:"归母净利(亿)", color:"#ffc27d", points:finance.profit.map(p=>({d:p.d,v:p.v/100000000}))},
+    {name:"经营现金流(亿)", color:"#43e091", points:finance.cashflow.map(p=>({d:p.d,v:p.v/100000000}))}
+  ]);
+}
+function financeFacts(outputs){
+  const revenue=series(outputs,"revenue",{dropZero:false});
+  const profit=series(outputs,"net_profit_parent",{dropZero:false});
+  const roe=series(outputs,"roe",{dropZero:false});
+  const cashflow=series(outputs,"operating_cashflow",{dropZero:false});
+  const cfRatioSeries=series(outputs,"cashflow_profit_ratio",{dropZero:false});
+  return {
+    revenue, profit, roe, cashflow, cfRatioSeries,
+    revenueYoy:yoy(revenue),
+    profitYoy:yoy(profit),
+    roeLast:lastValueFromSeries(roe),
+    cfRatio:lastValueFromSeries(cfRatioSeries)
+  };
+}
+function updateVerdicts(outputs, finance){
+  const vals=[normPct(QB.lastValue(outputs,"pe_pctile")),normPct(QB.lastValue(outputs,"pb_pctile")),normPct(QB.lastValue(outputs,"pcf_pctile"))].filter(isNum);
+  const avgPct=vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+  const [vTitle,vNote]=valuationBand(avgPct);
+  const [fTitle,fNote]=fundamentalBand(finance.revenueYoy, finance.profitYoy, finance.roeLast, finance.cfRatio);
+  $("valuationVerdict").textContent=vTitle;
+  $("valuationNote").textContent=(isNum(avgPct) ? "综合估值水位约 " + Math.round(avgPct) + "%。 " : "") + vNote;
+  $("fundamentalVerdict").textContent=fTitle;
+  $("fundamentalNote").textContent=fNote;
+}
+function setLoading(){
+  currentOutputs=null; currentFinance=null; currentAttribution=null;
+  $("assetName").textContent=CONFIG.asset || "标的";
+  $("marketLabel").textContent=CONFIG.market || "市场";
+  $("question").textContent=CONFIG.question || $("question").textContent;
+  $("valuationRange").textContent=CONFIG.valuation_window_label || "近 3 年";
+  $("metrics").innerHTML=Array.from({length:8},()=>'<div class="metric"><div class="label">取数中</div><div class="value mono">—</div><div class="sub">公式包实时读取</div></div>').join("");
+  $("waterGrid").innerHTML=["PE(TTM)","PB","PCF"].map(k=>`<div class="water"><div class="water-h"><b>${k}</b><span>等待</span></div><div class="rail"></div><div class="water-note">等待公式包取数</div></div>`).join("");
+  drawEmpty($("valuationChart"),"等待公式包取数");
+  drawEmpty($("attributionChart"),"等待公式包取数");
+  drawEmpty($("financeChart"),"等待公式包取数");
+  drawBalance({priceRet:null,peRet:null,earningsRet:null});
+}
+function showErr(msg){ const el=$("err"); el.textContent="取数失败：" + msg; el.style.display="block"; }
+function clearErr(){ $("err").style.display="none"; }
+function textOf(id){
+  const el=$(id);
+  return el ? el.textContent.trim() : "";
+}
+function domMetricRows(){
+  return Array.from(document.querySelectorAll("#metrics .metric")).slice(0,8).map(el=>({
+    label:(el.querySelector(".label")||{}).textContent || "—",
+    value:(el.querySelector(".value")||{}).textContent || "—",
+    sub:(el.querySelector(".sub")||{}).textContent || ""
+  }));
+}
+function getPosterData(){
+  const asset=textOf("assetName") || CONFIG.asset || "标的";
+  const asof=textOf("asof") || "—";
+  const metrics=currentOutputs && currentFinance
+    ? metricRows(currentOutputs,currentFinance).map(m=>({label:m[0],value:m[1],sub:m[2]}))
+    : domMetricRows();
+  const waters=currentOutputs ? [
+    ["PE(TTM)", normPct(QB.lastValue(currentOutputs,"pe_pctile")), QB.lastValue(currentOutputs,"pe_ttm")],
+    ["PB", normPct(QB.lastValue(currentOutputs,"pb_pctile")), QB.lastValue(currentOutputs,"pb")],
+    ["PCF", normPct(QB.lastValue(currentOutputs,"pcf_pctile")), QB.lastValue(currentOutputs,"pcf")]
+  ].map(r=>({label:r[0], value:isNum(r[1])?clamp(r[1],0,100):null, display:isNum(r[1])?Math.round(clamp(r[1],0,100))+"%":"—", sub:isNum(r[2])?fmt(r[2],2)+" 倍":"—", color:heatColor(isNum(r[1])?clamp(r[1],0,100):null)})) : [];
+  const att=currentAttribution || {};
+  const attrItems=[
+    {label:"价格变化", value:att.priceRet, display:fmtPct(att.priceRet,1), color:"#ff8b7b"},
+    {label:"PE 变化", value:att.peRet, display:fmtPct(att.peRet,1), color:"#ffc27d"},
+    {label:"盈利代理", value:att.earningsRet, display:fmtPct(att.earningsRet,1), color:"#43e091"}
+  ];
+  return {
+    headline: asset + " 个股估值体检报告",
+    summary: (textOf("valuationVerdict") || "估值观察") + " · " + (textOf("fundamentalVerdict") || "基本面观察") + "。" + (textOf("balanceCaption") || textOf("question")),
+    metrics,
+    sections:[
+      {title:"估值水位", type:"water", items:waters, height:160},
+      {title:"估值归因", type:"bars", items:attrItems, summary:textOf("balanceCaption"), height:176},
+      {title:"口径提示", type:"list", summary:"PE(TTM)、静态 PE、财务累计口径需分开解读；页面展示事实画像，不构成投资建议。", items:[
+        {label:"估值窗口", value:CONFIG.valuation_window_label || "近 3 年"},
+        {label:"财务期数", value:(CONFIG.financial_periods || 8) + " 期"},
+        {label:"数据日期", value:asof}
+      ], height:160}
+    ],
+    asof
+  };
+}
+async function load(){
+  clearErr(); setLoading();
+  const btn=$("refresh");
+  const btnLabel=btn ? btn.querySelector(".action-label") : null;
+  if(btn){ btn.disabled=true; if(btnLabel) btnLabel.textContent="取数中"; }
+  if(!configReady()){
+    showErr("页面尚未接入已注册的公式包；请完成公式验证、注册和页面配置后再预览或发布。");
+    if(btn){ btn.disabled=false; if(btnLabel) btnLabel.textContent="刷新数据"; }
+    return;
+  }
+  try{
+    const outputs=await QB.query(CONFIG);
+    const finance=financeFacts(outputs);
+    const att=calcAttribution(outputs);
+    currentOutputs=outputs; currentFinance=finance; currentAttribution=att;
+    renderMetrics(outputs,finance);
+    renderWater(outputs);
+    updateVerdicts(outputs,finance);
+    renderCharts(outputs,finance,att);
+    renderFinanceTable(finance);
+    drawBalance(att);
+    $("balanceCaption").textContent=`${CONFIG.valuation_window_label || "近 3 年"}：价格 ${fmtPct(att.priceRet,1)}，PE ${fmtPct(att.peRet,1)}，盈利代理 ${fmtPct(att.earningsRet,1)}。`;
+    $("asof").textContent=QB.fmtDate(latestDate(outputs),".");
+  }catch(e){
+    showErr(e.message || String(e));
+  }finally{
+    if(btn){ btn.disabled=false; if(btnLabel) btnLabel.textContent="刷新数据"; }
+  }
+}
+QBShareShell.init({
+  templateName:"个股估值体检",
+  title:()=>textOf("assetName") || CONFIG.asset || document.title,
+  subtitle:()=>textOf("question"),
+  asof:()=>textOf("asof"),
+  onRefresh:load,
+  getPosterData:getPosterData
+});
+setLoading();
+load();
+</script>
+</body>
+</html>
