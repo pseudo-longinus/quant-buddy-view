@@ -33,9 +33,11 @@ upload 参数：
       "html_file":   "本地 HTML 文件路径（与 html 二选一；常用 build_dashboard 的产物）",
       "title":       "可选，不传则服务端从 <title> 抽取",
       "description": "可选，页面说明（≤1000 字，列表/详情展示用）",
-      "ttl_days":    "可选，默认 365"
+      "ttl_days":    "可选，默认 365",
+      "thumbnail_file": "可选，本地 PNG/JPG；HTML 上传成功后再设封面，失败只返回 warning"
     }
 update 参数：page_id 必填；title / description / ttl_days 仅在传了才改（description 传空串=清空，不传保留原值）。
+    可同样传 thumbnail_file，HTML 更新成功后再替换封面；缩略图失败不回滚 HTML。
 download 参数：
     {
       "page_id":  "要下载的页面（与 url 二选一）",
@@ -327,6 +329,66 @@ def _read_html(params):
     return html, None
 
 
+def _thumbnail_file_from_params(params):
+    """Return optional thumbnail path from upload/update params."""
+    for key in ("thumbnail_file", "thumbnail_image", "thumbnail_path"):
+        value = params.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = params.get("thumbnail")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _result_message(out):
+    if not isinstance(out, dict):
+        return str(out)
+    if out.get("message"):
+        return str(out.get("message"))
+    err = out.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("code") or err)
+    if err:
+        return str(err)
+    return json.dumps(out, ensure_ascii=False)[:500]
+
+
+def _append_warning(out, warning):
+    warnings = out.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    warnings.append(warning)
+    out["warnings"] = warnings
+
+
+def _attach_thumbnail_if_requested(out, params):
+    """Upload thumbnail after HTML publish succeeds; never fail the publish result."""
+    thumb_file = _thumbnail_file_from_params(params)
+    if not thumb_file or not isinstance(out, dict) or out.get("code") != 0:
+        return out
+    page_id = out.get("page_id") or params.get("page_id")
+    if not page_id:
+        out["thumbnail_warning"] = "HTML 已发布，但响应里缺少 page_id，无法设置缩略图"
+        _append_warning(out, {"type": "thumbnail_upload_skipped", "message": out["thumbnail_warning"]})
+        return out
+
+    thumb = cmd_thumbnail({"page_id": page_id, "image_file": thumb_file})
+    out["thumbnail_upload"] = thumb
+    if isinstance(thumb, dict) and thumb.get("code") == 0:
+        out["thumbnail_url"] = thumb.get("thumbnail_url") or out.get("thumbnail_url") or ""
+        return out
+
+    message = _result_message(thumb)
+    out["thumbnail_warning"] = f"HTML 已发布，但缩略图上传失败：{message}"
+    _append_warning(out, {
+        "type": "thumbnail_upload_failed",
+        "message": message,
+        "thumbnail_file": thumb_file,
+    })
+    return out
+
+
 def _has_shared_header(html):
     return bool(re.search(r"<header\b[^>]*\bdata-qb-share-shell(?:\s|=|>)", html, flags=re.I))
 
@@ -587,6 +649,7 @@ def cmd_upload(params):
                 force=bool(params.get("verify_packages")),
                 publish_out=out,
             )
+        out = _attach_thumbnail_if_requested(out, params)
     return out
 
 
@@ -626,6 +689,7 @@ def cmd_update(params):
                 force=bool(params.get("verify_packages")),
                 publish_out=out,
             )
+        out = _attach_thumbnail_if_requested(out, params)
     return out
 
 def _fetch_oss(url):
@@ -667,10 +731,15 @@ def cmd_download(params):
         "owner": meta.get("owner"),
         "title": meta.get("title"),
         "description": meta.get("description"),
+        "thumbnail_url": meta.get("thumbnail_url") or "",
         "url": meta.get("url"),
         "size": len(html.encode("utf-8")),
         "sha256": sha,
         "sha256_match": sha_ok,
+        "is_live": bool(meta.get("is_live")),
+        "package_ids": meta.get("package_ids") or [],
+        "status": meta.get("status"),
+        "expires_at": meta.get("expires_at"),
     }
 
     # 4) 落盘或回传 html
@@ -769,7 +838,7 @@ def cmd_thumbnail(params):
     ext = os.path.splitext(img_path)[1].lower()
     content_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
     file_name = os.path.basename(img_path)
-    return _http_multipart(endpoint + _PATH["thumbnail"], api_key,
+    return _http_multipart(C.api_url(endpoint, _PATH["thumbnail"]), api_key,
                            {"page_id": params["page_id"]},
                            "file", img_bytes, file_name, content_type)
 
@@ -781,7 +850,7 @@ def cmd_templates(params):
     for k in ("category", "status"):  # status 仅 is_test 生效（普通用户恒为 published）
         if params.get(k):
             qs_pairs.append((k, params[k]))
-    url = f"{endpoint}{_PATH['templates']}?" + _up.urlencode(qs_pairs)
+    url = C.api_url(endpoint, _PATH["templates"]) + "?" + _up.urlencode(qs_pairs)
     return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
 
 
@@ -792,7 +861,7 @@ def cmd_template(params):
     if not tid:
         return {"code": 1, "message": "template 需要 template_id 或 page_id"}
     key = "template_id" if params.get("template_id") else "page_id"
-    url = f"{endpoint}{_PATH['template']}?" + _up.urlencode([(key, tid)])
+    url = C.api_url(endpoint, _PATH["template"]) + "?" + _up.urlencode([(key, tid)])
     return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
 
 

@@ -80,4 +80,4 @@ python scripts/static_page.py upload '{"html_file":"output/pages/沪深300监控
 - **下线页面**：`python scripts/static_page.py revoke '{"page_id":"page_xxx"}'`。
 - **轮换公式包签名**：`python scripts/formula_package.py refresh '{"package_id":"pkg_xxx","rotate_signature":true}'`，再用新签名重建页面（页面内嵌的旧签名才会更新）。
 
-> 页面是实时取数的（HTML 内嵌 `package_id + signature`，打开时调 `queryFormulaPackage` 取最新数据）。前置：端点对页面域名放开 CORS、协议与页面一致、且接受 signature 公开在 HTML 里——当前 `https://test.quantbuddy.cn/skill` 均满足。
+> 页面是实时取数的（HTML 内嵌 `package_id + signature`，打开时调 `queryFormulaPackage` 取最新数据）。前置：端点对页面域名放开 CORS、协议与页面一致、且接受 signature 公开在 HTML 里——当前 `https://www.quantbuddy.cn/skill` 均满足。

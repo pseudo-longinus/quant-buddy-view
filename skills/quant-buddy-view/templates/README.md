@@ -1,44 +1,21 @@
-# Page Templates
+# 模板路由（线上优先）
 
-Use this directory when the user asks for a concrete reusable page shape.
+模板已**统一走在线接口**，本目录不再存放模板文件，只说明路由。
 
-Each template owns a directory:
+## 线上公共模板（首选）
 
-```text
-templates/<template-name>/
-  README.md              # when to use it, data contract, agent-editable slots
-  spec.template.json     # for standard build_dashboard pages, when applicable
-  page.template.html     # for bespoke HTML pages, when applicable
+用户提到**模板市场 / 官方模板 / 公共模板 / 已发布模板**时：
 
-templates/_shared/share-shell/
-  shell.html             # shared header, footer, and share modal structure
-  shell.css              # shared shell styling
-  shell.js               # refresh/share/copy/download bindings
-  poster.js              # fixed poster canvas renderer with dynamic body adapter
-```
+1. `python scripts/static_page.py templates` —— 列出在线公共模板（普通用户只见 `published`）。
+2. `python scripts/static_page.py template '{"page_id":"page_xxx"}'` —— 看某模板详情，拿 `download_url`。
+3. 直连 `download_url`（OSS）取回 HTML，替换标的、文案、公式包凭证后，再 `upload` 成用户自己的页面。
 
-| Display name | Template slug | Use when | Rendering path |
-|---|---|---|---|
-| 个股速览 | `single-stock/` | One stock/index profile page with price trend and valuation/activity cards | `build_dashboard` spec |
-| 个股估值体检 | `valuation-financial-profile/` | One stock valuation and fundamentals landing page: PE/PB/PCF water level, financial trend, cash-flow quality, and valuation attribution | Bespoke HTML template + `data-kernel.js` |
-| 商品多空日报 | `commodity-daily/` | Commodity futures daily page with sector conflict, movers, and sparklines | Bespoke HTML template + `data-kernel.js` |
-| 成分股异动榜 | `index-anomaly/` | Index constituent anomaly monitor with gain/loss/turnover/volume/amplitude top-lists, breadth, and index trend | Bespoke HTML template + `data-kernel.js` |
-| 市场泡沫水位 | `bubble-watch/` | Multi-market bubble/froth water-level monitor with composite gauge, per-market bias/position bars, and macro backdrop | Bespoke HTML template + `data-kernel.js` |
+详见 [tools/static_page.md](../tools/static_page.md) 的 `templates` / `template` 小节。
 
-If no template matches the user's requested page shape, use `../workflows/dashboard-end-to-end.md` for standard panels or `../guides/bespoke-page.md` for custom HTML.
+## 离线参考模板（兜底 / 开发源）
 
-All landing-page templates must use `templates/_shared/share-shell/`. A template may decide its body layout and data explanation, but it must not fork its own QuantBuddy header, footer, body QR block, refresh button, or share-poster modal. Bespoke pages should be compiled with `scripts/compile_bespoke_page.py` before local verification or publishing.
+线上接口不可用，或用户要一个具体页面形态但未指明公共模板时，从 **[`../examples/`](../examples/README.md)** 挑最贴近的形态起步。
 
-Template rule of thumb: keep data contracts and layout skeleton stable, but leave Agent-editable fields for titles, summaries, interpretation text, risk notes, panel descriptions, and optional panel additions.
+## 公共页头页尾组件
 
-Agent flexibility contract:
-
-| Area | Keep stable | Agent may customize |
-|---|---|---|
-| Data contract | output names, read modes, required formula validation, query/unpack helpers | target asset, date window, optional extra outputs |
-| Layout skeleton | page sections, responsive constraints, shared share shell, `getPosterData()`, error/loading states | section order when the user intent clearly asks for it, optional panels/modules |
-| Copywriting | no stale placeholder text, no fake conclusions, no exposed signatures | title, subtitle, summary, interpretation, risk note, panel descriptions |
-| Visual system | QuantBuddy brand shell, header actions, share poster structure, readable desktop/mobile layout | accent copy, chart emphasis, bespoke page details within the template's visual language |
-
-When adding a new template, add a directory here instead of a loose markdown file. The directory README should answer three questions for the next Agent: when to pick it, what data outputs it needs, and which page regions are intentionally editable.
-
+所有落地页共用的页头、页尾、刷新按钮、分享海报弹层等，由 **[`../assets/share-shell/`](../assets/share-shell/README.md)** 提供（是公共组件，不是模板）。

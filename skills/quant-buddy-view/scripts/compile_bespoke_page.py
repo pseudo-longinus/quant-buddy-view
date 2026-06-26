@@ -5,7 +5,7 @@ The compiler replaces shared-shell placeholders and inlines local runtime assets
 Input is JSON via @file, CB_PARAMS, command JSON, or stdin:
 
 {
-  "template": "templates/valuation-financial-profile/page.template.html",
+  "template": "examples/valuation-financial-profile/page.template.html",
   "out_file": "output/pages/demo.html",
   "inline_data_kernel": true,
   "inline_qr_mini": true
@@ -20,7 +20,7 @@ from urllib.parse import quote
 import common as C
 
 
-SHARED_DIR = os.path.join(C.SKILL_ROOT, "templates", "_shared", "share-shell")
+SHARED_DIR = os.path.join(C.SKILL_ROOT, "assets", "share-shell")
 ASSETS_DIR = os.path.join(C.SKILL_ROOT, "assets")
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 

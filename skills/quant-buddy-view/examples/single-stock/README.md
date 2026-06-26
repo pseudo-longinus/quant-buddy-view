@@ -106,7 +106,7 @@ python scripts/formula_package.py register @params.json
 先复制模板，不要从空白 spec 手写：
 
 ```powershell
-Copy-Item templates\single-stock\spec.template.json spec.json
+Copy-Item examples\single-stock\spec.template.json spec.json
 ```
 
 保留 `"template": "single-stock"`。这个字段会触发 `build_dashboard` 的模板契约校验，防止重新退回旧版「1 条线 + 4 个数字卡」页面。

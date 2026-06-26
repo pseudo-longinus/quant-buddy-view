@@ -101,7 +101,7 @@ python scripts/formula_package.py register @params.json
 
 ```json
 {
-  "template": "templates/index-anomaly/page.template.html",
+  "template": "examples/index-anomaly/page.template.html",
   "out_file": "output/pages/<index>-anomaly.html",
   "replacements": {
     "__PAGE_TITLE__": "<指数>成分股异动监控",

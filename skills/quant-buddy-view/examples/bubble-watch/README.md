@@ -97,7 +97,7 @@ python scripts/formula_package.py register @params.json
 
 ```json
 {
-  "template": "templates/bubble-watch/page.template.html",
+  "template": "examples/bubble-watch/page.template.html",
   "out_file": "output/pages/bubble-watch.html",
   "replacements": {
     "__PAGE_TITLE__": "泡沫监测终端",

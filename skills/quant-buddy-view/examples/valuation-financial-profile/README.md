@@ -119,7 +119,7 @@
 
 ```json
 {
-  "template": "templates/valuation-financial-profile/page.template.html",
+  "template": "examples/valuation-financial-profile/page.template.html",
   "out_file": "output/pages/valuation-financial-profile.html",
   "replacements": {
     "__PAGE_TITLE__": "贵州茅台 · 个股估值体检",

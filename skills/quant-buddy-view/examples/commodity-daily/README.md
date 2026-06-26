@@ -124,7 +124,7 @@ python scripts/formula_package.py register @params.json
 
 ```json
 {
-  "template": "templates/commodity-daily/page.template.html",
+  "template": "examples/commodity-daily/page.template.html",
   "out_file": "output/pages/commodity-daily.html",
   "replacements": {
     "__PAGE_TITLE__": "商品期货每日异动",

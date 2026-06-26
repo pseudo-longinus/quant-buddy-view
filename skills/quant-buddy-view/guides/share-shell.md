@@ -17,7 +17,7 @@ Every generated landing page should feel like one QuantBuddy artifact even when 
 Shared component files live in:
 
 ```text
-templates/_shared/share-shell/
+assets/share-shell/
   shell.html
   shell.css
   shell.js

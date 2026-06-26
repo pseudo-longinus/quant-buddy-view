@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.3.0
+version: 0.4.0
 description: |
   把量化数据做成「可分享的网页看板」。配合 quant-buddy-skill 使用：先在 quant-buddy-skill 里探索行情/因子/回测，
   确定要持续展示的指标后，用本技能把这些指标注册成「公式任务包」（底层数据更新即自动重算），
@@ -12,7 +12,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -65,28 +65,60 @@ runtimeRequirements:
 - **探索/一次性查询**（"茅台今天涨跌幅"、"跑个均线金叉回测看看"）→ 用 **quant-buddy-skill**。
 - **要一个能反复看、能发给别人、数据会自动更新的页面** → 探索清楚后切到 **quant-buddy-view**。
 
+## 前置依赖：需要先装 quant-buddy-skill
+
+本技能**运行时自包含**（注册/生成/发布只凭 `config.json` 的 api_key，不依赖 quant-buddy-skill 的代码）。
+但正常使用流程里有一道**硬门槛**：注册公式包前，每组公式**必须先在 quant-buddy-skill 里用 `runMultiFormulaBatchStream` 跑通确认出数**（见下方「注册前硬规则」）。因此**没有装 quant-buddy-skill 就无法正确完成公式验证这一步**。
+
+**如果尚未安装 quant-buddy-skill，按以下优先级安装：**
+
+1. **优先：GitHub 安装（`npx skills`）** —— quant-buddy-skill 与本技能同属 GitHub 仓库 `pseudo-longinus/quant-buddy-skills`：
+   ```bash
+   # 全新安装（从未装过）
+   npx skills add pseudo-longinus/quant-buddy-skills -g --all
+   # 已装过、只是要更新
+   npx skills update pseudo-longinus/quant-buddy-skills -y
+   # 装在哪 / 是否装上，自检：
+   npx skills list -g --json
+   ```
+   > Windows 上若 symlink / `EPERM` 报错，命令末尾追加 `--copy` 重试。安装路径通常是 `~/.agents/skills/quant-buddy-skill`。
+
+2. **兜底：下载 zip 压缩包手动解压**（无 node/npx、或网络受限时）——下载官方 `quant-buddy-skill` zip，解压覆盖到 skills 目录下的 `quant-buddy-skill/`（先解压到临时目录，若内含嵌套 `quant-buddy-skill/` 取内层；保留已有 `config.json` 的 api_key）。quant-buddy-skill 自带 `scripts/self_update.py`，支持 `--url` / `--zip-path` + `--sha512` + `--version` 做校验解压，优先用它。
+
+**放置布局**：让 quant-buddy-skill 与 quant-buddy-view **同级并列**：
+```text
+<skills 目录>/
+  quant-buddy-skill/      ← 探索 / 公式验证（runMultiFormulaBatchStream、confirmDataMulti）
+  quant-buddy-view/       ← 本技能：注册公式包 / 生成看板 / 发布
+```
+> 这个同级布局是推荐布局：`formula_package import`（迁移旧凭证）找不到显式路径时，正是按「同级 `../quant-buddy-skill`」兜底定位的。
+
+3. **配置**：在 quant-buddy-skill 里配好它自己的 api_key（与本技能各自独立）。装好后即可在那边验证公式，再回到本技能 `register`。
+
+**老用户迁移**：已在旧版 quant-buddy-skill 里注册过的公式包**无需重注册**——用 `python scripts/formula_package.py import ...` 一次性把凭证导入本技能即可继续用旧 `package_id` 取数（详见 [tools/formula_package.md](tools/formula_package.md) 的「从旧 quant-buddy-skill 迁移凭证」）。
+
 ## 入口选择（先判断类型）
 
-> Agent 路由规则：用户要一个**具体页面形态** → 先看 `templates/`；用户要从需求做到链接 → 看 `workflows/`；用户要复杂自定义页面或迁移旧 HTML → 看 `guides/`。
+> Agent 路由规则：用户提到**模板市场 / 官方模板 / 公共模板 / 已发布模板** → 先用 `scripts/static_page.py templates` / `template` 读取在线公共模板；从 `template` 返回的 `download_url` 直连 OSS 下载 HTML，替换标的、文案、公式包凭证后，再 `upload` 成用户自己的页面。用户要一个**具体页面形态**但未指公共模板 → 先看本地 `examples/`（线上模板的离线兜底和模板开发源）；用户要从需求做到链接 → 看 `workflows/`；用户要复杂自定义页面或迁移旧 HTML → 看 `guides/`。
 
 | 类型 | 展示名 | 入口 | 什么时候用 |
 |---|---|---|---|
-| 页面模板 | 个股速览 | [templates/single-stock/](templates/single-stock/README.md) | 单标的画像页：阅读摘要 + 最新价/涨跌幅/20日/60日/PE/PB/成交额数字卡 + 价格主图；必须从 `spec.template.json` 起步 |
-| 页面模板 | 个股估值体检 | [templates/valuation-financial-profile/](templates/valuation-financial-profile/README.md) | 单标的估值财务页：PE/PB/PCF 历史水位、财务趋势、现金流质量、估值变动归因；配套 `page.template.html` |
-| 页面模板 | 成分股异动榜 | [templates/index-anomaly/](templates/index-anomaly/README.md) | 指数/股票池成分股异动监控：异动榜单 + 涨跌分布 + 指数走势；配套 `page.template.html`，深色盘面、data-kernel 取数 |
-| 页面模板 | 多因子选股看板 | [templates/multi-factor-screener/](templates/multi-factor-screener/README.md) | 主题股票池 + 多因子评分 + TopN 榜单 + 回测/rankIC + K 线 + 公式审计；固定角色 `RANK` / `BACKTEST` / `KLINE_*`，RANK 首屏优先渲染 |
-| 页面模板 | 商品多空日报 | [templates/commodity-daily/](templates/commodity-daily/README.md) | 商品期货日报：板块多空主导矛盾 + 今日异动 + 头部品种 sparkline；配套 `page.template.html` |
-| 页面模板 | 泡沫监测终端 | [templates/bubble-watch/](templates/bubble-watch/README.md) | 市场状态页：综合温度 gauge 仪表盘 + 多市场泡沫水位横截面 + 宏观背景；回答“现在是不是泡沫/市场太热/风险温度计/估值水位”，非单标的画像；bespoke 模板 |
+| 页面模板 | 个股速览 | [examples/single-stock/](examples/single-stock/README.md) | 单标的画像页：阅读摘要 + 最新价/涨跌幅/20日/60日/PE/PB/成交额数字卡 + 价格主图；必须从 `spec.template.json` 起步 |
+| 页面模板 | 个股估值体检 | [examples/valuation-financial-profile/](examples/valuation-financial-profile/README.md) | 单标的估值财务页：PE/PB/PCF 历史水位、财务趋势、现金流质量、估值变动归因；配套 `page.template.html` |
+| 页面模板 | 成分股异动榜 | [examples/index-anomaly/](examples/index-anomaly/README.md) | 指数/股票池成分股异动监控：异动榜单 + 涨跌分布 + 指数走势；配套 `page.template.html`，深色盘面、data-kernel 取数 |
+| 页面模板 | 多因子选股看板 | [examples/multi-factor-screener/](examples/multi-factor-screener/README.md) | 主题股票池 + 多因子评分 + TopN 榜单 + 回测/rankIC + K 线 + 公式审计；固定角色 `RANK` / `BACKTEST` / `KLINE_*`，RANK 首屏优先渲染 |
+| 页面模板 | 商品多空日报 | [examples/commodity-daily/](examples/commodity-daily/README.md) | 商品期货日报：板块多空主导矛盾 + 今日异动 + 头部品种 sparkline；配套 `page.template.html` |
 | 通用流程 | 标准实时看板 | [workflows/dashboard-end-to-end.md](workflows/dashboard-end-to-end.md) | 用户要“做成可分享看板/链接”，但没有指定固定页面模板 |
 | 开发指南 | 自定义页面 | [guides/bespoke-page.md](guides/bespoke-page.md) | `build_dashboard` 做不出的自定义 HTML/CSS/SVG 页面，或迁移已有 HTML |
 | 迁移工具 | 旧页套公共外壳 | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) | 已发布/已生成 HTML 需要去掉旧二维码、旧页头、旧页尾，并保留同一个 `page_id` 更新 |
 
-> 硬规则：用户要“某只股票/指数画像页、个股画像、单股画像、单标的页面”时，先读 `templates/single-stock/README.md`，复制 `templates/single-stock/spec.template.json` 作为 spec 起点，保留 `template: "single-stock"`。不要手写旧版“1 条价格线 + 4 个数字卡”的最小 spec；`build_dashboard` 会拒绝这种旧骨架。
-> 硬规则：用户问“这只股票贵不贵 / 基本面是否改善 / 估值与财务画像 / PE/PB历史水位 / 财务趋势 / 现金流质量”并要求做成落地页或公开链接时，先读 `templates/valuation-financial-profile/README.md`，复制 `templates/valuation-financial-profile/page.template.html` 起步，验证并注册该模板要求的一套公式包；不要退回普通 `single-stock` 卡片页。
-> 硬规则：用户要“某指数 / 某股票池 的成分股异动、异动榜、龙虎榜式排行”（如「中证500今天哪些股票异动」「沪深300异动监控」「上证50涨跌幅榜」）时，先读 `templates/index-anomaly/README.md`，复制 `templates/index-anomaly/page.template.html` 起步，替换 `__INDEX_*__` 占位并内联 `data-kernel.js` 再发布；不要手写一份离题的浅色/通用 HTML。
-> 硬规则：用户要“主题股票池 / 概念股 / 行业池 + 多因子评分 / TopN / 回测 / rankIC / K线 / 公式审计”的选股工作台页面时，先读 `templates/multi-factor-screener/README.md`，复制 `templates/multi-factor-screener/page.template.html` 起步；公式包角色固定为 `RANK` / `BACKTEST` / `KLINE_*`，`RANK` 必须首屏优先渲染，`BACKTEST` 和 `KLINE_*` 允许局部降级。
+> 硬规则：用户要“某只股票/指数画像页、个股画像、单股画像、单标的页面”时，先读 `examples/single-stock/README.md`，复制 `examples/single-stock/spec.template.json` 作为 spec 起点，保留 `template: "single-stock"`。不要手写旧版“1 条价格线 + 4 个数字卡”的最小 spec；`build_dashboard` 会拒绝这种旧骨架。
+> 硬规则：用户问“这只股票贵不贵 / 基本面是否改善 / 估值与财务画像 / PE/PB历史水位 / 财务趋势 / 现金流质量”并要求做成落地页或公开链接时，先读 `examples/valuation-financial-profile/README.md`，复制 `examples/valuation-financial-profile/page.template.html` 起步，验证并注册该模板要求的一套公式包；不要退回普通 `single-stock` 卡片页。
+> 硬规则：用户要“某指数 / 某股票池 的成分股异动、异动榜、龙虎榜式排行”（如「中证500今天哪些股票异动」「沪深300异动监控」「上证50涨跌幅榜」）时，先读 `examples/index-anomaly/README.md`，复制 `examples/index-anomaly/page.template.html` 起步，替换 `__INDEX_*__` 占位并内联 `data-kernel.js` 再发布；不要手写一份离题的浅色/通用 HTML。
+> 硬规则：用户要“主题股票池 / 概念股 / 行业池 + 多因子评分 / TopN / 回测 / rankIC / K线 / 公式审计”的选股工作台页面时，先读 `examples/multi-factor-screener/README.md`，复制 `examples/multi-factor-screener/page.template.html` 起步；公式包角色固定为 `RANK` / `BACKTEST` / `KLINE_*`，`RANK` 必须首屏优先渲染，`BACKTEST` 和 `KLINE_*` 允许局部降级。
+> 硬规则：复用公共模板时，模板 HTML 里的 `package_id + signature` 属于模板原作者；必须按当前用户目标重新验证公式、注册自己的公式包，并替换页面里的凭证后再发布。不要把公共模板原凭证直接当成用户页面的数据来源。
 > 硬规则：单标的画像页的 `subtitle` 和“阅读摘要”只能使用 `build_dashboard` 构建期实时取数结果（最终 outputs）对应的数值。若脚本返回“文案与实时取数结果不一致”，按返回的 `facts` 重写文案后再生成/上传，不要沿用旧查询结果或手工估算。
-> 硬规则：所有落地页必须接入 `templates/_shared/share-shell/` 公共组件。模板只负责主体内容和 `getPosterData()`，页头、页尾、刷新按钮、分享海报弹层、复制链接、复制/下载 PNG 和海报固定页头页尾都由公共 shell 提供；不要在单个模板里私自复制或改造旧二维码块、旧刷新按钮或旧分享弹层。
+> 硬规则：所有落地页必须接入 `assets/share-shell/` 公共组件。模板只负责主体内容和 `getPosterData()`，页头、页尾、刷新按钮、分享海报弹层、复制链接、复制/下载 PNG 和海报固定页头页尾都由公共 shell 提供；不要在单个模板里私自复制或改造旧二维码块、旧刷新按钮或旧分享弹层。
 > 硬规则：分享海报由公共 `poster.js` 默认前端截图页面主体生成，宁缺毋滥；模板可用 `data-qb-poster-target` 标记核心截图区域，`getPosterData()` 只提供标题/摘要和结构化兜底候选，不要依赖 Agent 手写海报版式，也不要把整页内容塞进 `sections`。
 > 硬规则：用户要“改造已经生成的 HTML / 去掉二维码 / 去掉当前页头页尾 / 适配固定页头页尾”时，优先用 `scripts/retrofit_share_shell.py`。不要靠长提示词让 Agent 手工删 DOM；默认保留旧页面主体 hero 区域，只移除其中的二维码卡片和旧页尾，然后在 `body` 顶部/底部直接插入公共页头页尾；先生成本地迁移版验证，再用 `update:true` 覆盖同一个 `page_id`。
 
@@ -106,8 +138,8 @@ runtimeRequirements:
    - `upload`：上传 HTML → 返回 `page_id` + 公开 `url`；可带 `title`（缺省取 `<title>`）和 `description`（页面说明，≤1000 字，列表/详情展示用）。
    - `update`：替换已发布页面的内容，**URL / page_id 不变**（页面已分享后想补充/调整时用，访问者刷新即见新内容，不占新配额）。也可只改 `title` / `description`（`description` 传空串 `""` 清空，不传保留原值）。
    - `download`：取回已发布页面的 HTML 再编辑（鉴权拿 url → 直连 OSS 下载，不占服务端带宽），改完 `update` 覆盖。
-   - `list` / `revoke`：列出 / 撤销我的页面（活跃页上限 10，单页 ≤ 2MB）。
-   - `thumbnail`：给某个已发布页面设置 / 替换一张**纯展示封面图**（直传 PNG/JPG，≤2MB）。只用于列表/详情/模板墙的 `<img>` 预览，**不进入 HTML、不影响取数、不占活跃页配额**；按 page_id 命名存 OSS，转模板后仍有效。可选锦上添花，不是发布必需。
+   - `list` / `revoke`：列出 / 撤销我的页面（活跃页上限 200，单页 ≤ 2MB）。
+   - `thumbnail`：给某个已发布页面设置 / 替换一张**纯展示封面图**（直传 PNG/JPG，≤2MB）。只用于列表/详情/模板墙的 `<img>` 预览，**不进入 HTML、不影响取数、不占活跃页配额**；按 page_id 命名存 OSS，转模板后仍有效。`upload` / `update` 可带 `thumbnail_file`，HTML 成功后再自动上传封面；缩略图失败只返回 warning，不回滚 HTML。
    - `templates` / `template`：**浏览 / 复用公共模板**——`templates` 列模板（普通用户只见 published），`template` 看某模板详情拿 `download_url`，直连 OSS 取回 HTML，换成自己的标的/文案/公式包后再 `upload` 成自己的页。
    - `upload` / `update` 发布前会强制检查公共 share shell；缺公共页头/页尾会自动插入并编译，主题色只能通过 `theme` / `--qb-shell-*` 变量覆盖，仍有占位符或旧二维码残留则拒绝发布。
    - 权限 / 权责：自己的页面默认仅本人；`is_test` 用户可跨 download / update / thumbnail 其他 is_test 用户页面、`list` 传 `scope=test_all` 看全部 test 用户（普通用户页面一律 `FORBIDDEN`）。**公共模板浏览/复用对全员开放**（普通用户只读 published）；模板的提交/改写/上下线仅 is_test，把已有页转公共模板是后台（growthX）动作——本 skill 侧只「读取 + 复用」模板，不做这些写操作。
@@ -120,7 +152,7 @@ runtimeRequirements:
 
 - **页面是"活"的**：数据不焊进 HTML，运行时实时取；构建期只取一次数做质量体检（数据健康 + 单标的文案一致性），不内联。
 - **两个前提（均已满足）**：① `queryFormulaPackage` 端点对页面域名 `pages.quantbuddy.cn` 放开 **CORS**（当前 https 端点已放开 `*`）；② `signature` 随页面公开（公式包 query 本就以 signature 作能力令牌、设计上允许嵌入页面）。
-- ⚠️ **协议必须一致**：页面发布在 `https://`，`config.json` 的 `endpoint` 也必须是 `https://`，否则浏览器会以 mixed-content 拦截取数。当前 endpoint 已是 `https://test.quantbuddy.cn/skill`。
+- ⚠️ **协议必须一致**：页面发布在 `https://`，`config.json` 的 `endpoint` 也必须是 `https://`，否则浏览器会以 mixed-content 拦截取数。当前 endpoint 已是 `https://www.quantbuddy.cn/skill`。
 
 ## 硬规则
 
@@ -138,15 +170,17 @@ runtimeRequirements:
 |---|---|---|---|
 | `scripts/formula_package.py` | `register` / `query` / `list` / `revoke` / `refresh` | 公式任务包：注册取数能力，凭包凭证流式取数 | [tools/formula_package.md](tools/formula_package.md) |
 | `scripts/build_dashboard.py` | （单命令） | spec → live 实时取数看板 HTML | [tools/build_dashboard.md](tools/build_dashboard.md) |
-| `scripts/compile_bespoke_page.py` | （单命令） | bespoke 模板 → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
-| `scripts/retrofit_share_shell.py` | （单命令） | 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell，可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
+| `scripts/compile_bespoke_page.py` | （单命令） | **【shell 处理脚本】** bespoke 模板 → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
+| `scripts/retrofit_share_shell.py` | （单命令） | **【shell 处理脚本】** 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell（`assets/share-shell/`），可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
 | `scripts/static_page.py` | `upload` / `update` / `download` / `list` / `revoke` / `thumbnail` / `templates` / `template` | 发布/替换/下载/管理静态页，得到公开链接（`update` 替换内容不换链接；`download` 取回 HTML 再编辑；`thumbnail` 设展示封面；`templates`/`template` 浏览复用公共模板；is_test 可跨用户） | [tools/static_page.md](tools/static_page.md) |
 | `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误 | — |
+| `scripts/render_cover.py` | （被 `build_dashboard` 调用） | 封面栅格化与合成兜底：`capture_page_cover` 用系统 Edge/Chrome 无头截"封面模式页"为整页 PNG；合成封面（全幅裸图/品牌海报）走 浏览器 → 纯 Python(cairosvg/svglib) → SVG 三层兜底。跨平台、零强依赖，不影响 HTML 发布 | — |
+| `scripts/render_existing_page_thumbnail.py` | （单命令） | 给已发布/公共模板 HTML 补封面：下载或读取 HTML → 解析内嵌公式包凭证 → 先取真实 outputs 并临时替换 `QB.query` → 再用系统 Edge/Chrome 截 1200×675 PNG；可带 `upload:true` 直接设置 `thumbnail_url` | [tools/static_page.md](tools/static_page.md) |
 | `assets/data-kernel.js` | （前端内核，非脚本） | 手搓 bespoke 页共用的「取数 + 清洗 + 容错」一份；内联进页面 `<script>` 用 | [guides/bespoke-page.md](guides/bespoke-page.md) |
-| `templates/_shared/share-shell/` | （公共组件） | 所有落地页共用的页头、页尾、刷新按钮、分享海报弹层、海报 canvas、复制链接与复制/下载行为 | [guides/share-shell.md](guides/share-shell.md) |
-| `templates/valuation-financial-profile/page.template.html` | （页面模板，非脚本） | 个股估值体检：估值水位、财务趋势、估值天平归因 | [templates/valuation-financial-profile/README.md](templates/valuation-financial-profile/README.md) |
-| `templates/index-anomaly/page.template.html` | （页面模板，非脚本） | 成分股异动榜：异动榜单、涨跌分布、指数 sparkline | [templates/index-anomaly/README.md](templates/index-anomaly/README.md) |
-| `templates/commodity-daily/page.template.html` | （页面模板，非脚本） | 商品多空日报：多空主导、异动榜、板块条、sparkline | [templates/commodity-daily/README.md](templates/commodity-daily/README.md) |
+| `assets/share-shell/` | （公共组件） | 所有落地页共用的页头、页尾、刷新按钮、分享海报弹层、海报 canvas、复制链接与复制/下载行为 | [guides/share-shell.md](guides/share-shell.md) |
+| `examples/valuation-financial-profile/page.template.html` | （离线参考模板，非脚本） | 个股估值体检：估值水位、财务趋势、估值天平归因 | [examples/valuation-financial-profile/README.md](examples/valuation-financial-profile/README.md) |
+| `examples/index-anomaly/page.template.html` | （离线参考模板，非脚本） | 成分股异动榜：异动榜单、涨跌分布、指数 sparkline | [examples/index-anomaly/README.md](examples/index-anomaly/README.md) |
+| `examples/commodity-daily/page.template.html` | （离线参考模板，非脚本） | 商品多空日报：多空主导、异动榜、板块条、sparkline | [examples/commodity-daily/README.md](examples/commodity-daily/README.md) |
 
 > **两条生产路**：标准看板走 `build_dashboard`（声明式快路）；要自定义版式/SVG 的设计页则**手搓 HTML**，
 > 数据层统一调 `assets/data-kernel.js`（`QB.query` 取数、`QB.series/lastValue/topValues` 解包清洗），别再每页各抄 `fetch`/解包、各踩"假 0/缺口"的坑。见 [guides/bespoke-page.md](guides/bespoke-page.md)。

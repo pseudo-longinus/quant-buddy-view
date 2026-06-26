@@ -23,11 +23,17 @@
 # 上传（推荐用 build_dashboard 产物文件）
 python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
 
+# 上传 HTML 成功后顺带设置缩略图（缩略图失败只返回 warning，不回滚 HTML）
+python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板","thumbnail_file":"output/thumbnails/dash.png"}'
+
 # 也可直接传 HTML 全文（中文走 @file/SP_PARAMS 防 GBK 截断）
 SP_PARAMS='{"html":"<!doctype html>...","title":"..."}' python scripts/static_page.py upload
 
 # 替换已发布页面内容（链接不变；page_id 来自上次 upload/list）
 python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html"}'
+
+# 替换 HTML 成功后顺带替换缩略图
+python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html","thumbnail_file":"output/thumbnails/dash.png"}'
 
 # 下载已发布页面的 HTML 再编辑（落盘到本地）
 python scripts/static_page.py download '{"page_id":"page_xxx","save":"output/pages/back.html"}'
@@ -50,7 +56,7 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 
 - 检查最终 HTML 是否有公共页头 `<header ... data-qb-share-shell>`；
 - 检查最终 HTML 是否有公共页尾 `<footer ... data-qb-share-shell-footer>`；
-- 缺公共页头 / 页尾时，直接在 `<body>` 顶部 / 底部插入 `templates/_shared/share-shell/`；
+- 缺公共页头 / 页尾时，直接在 `<body>` 顶部 / 底部插入 `assets/share-shell/`；
 - 自动内联 share shell CSS、JS、分享弹层、QR runtime；
 - `theme` 参数或 HTML 里已有的 `--qb-shell-*` 变量会被放到公共 CSS 之后，只改颜色不改布局；
 - 已内联旧版公共运行时的页面，会在发布前升级到新版截图优先分享海报和复制链接按钮；
@@ -132,6 +138,29 @@ python scripts/static_page.py update   '{"page_id":"page_other","html_file":"out
 
 > 这张图什么时候用：页面已经发布、想在后台/模板墙有个像样的封面时再补一张即可，是**可选**的额外信息，不影响页面本身能否打开或取数。
 
+### 给已发布公共模板生成封面
+
+对已经上线的公共模板，不要直接用浏览器打开公开 HTML 后立刻截图：实时取数页面的初始 DOM 往往还停在
+“等待取数”。应先用 `render_existing_page_thumbnail.py` 取公式包真实 outputs，并临时替换封面页里的
+`QB.query`，让页面离线渲染完成后再截图。
+
+```bash
+python scripts/render_existing_page_thumbnail.py "{\"url\":\"https://pages.quantbuddy.cn/pages/page_xxx.html\",\"page_id\":\"page_xxx\",\"out_file\":\"output/thumbnails/page_xxx.png\",\"upload\":true}"
+```
+
+返回会包含 `query.status`、`query.outputs_count`、`capture.rasterizer`、`width/height/bytes` 和
+`thumbnail_url`。脚本不会在返回里输出 `signature`；如果页面没有公式包凭证或取数失败，会退化为普通等待截图并把原因写进 `query`。
+
+### 随 upload / update 自动设置缩略图
+
+`upload` / `update` 也可以带 `thumbnail_file`（或 `thumbnail_image` / `thumbnail_path`）。脚本会先发布 HTML，
+拿到或复用 `page_id` 后再调用同一个 `thumbnail` 上传封面。
+
+- HTML 发布/替换成功是主结果；缩略图上传失败**不回滚 HTML**，返回 JSON 仍保持 `code:0`，并附带
+  `thumbnail_warning` / `warnings[]`。
+- 成功时会把 `thumbnail_url` 合并回 upload/update 的返回值。
+- `thumbnail_file` 仍是 PNG/JPG、≤2MB，相对路径按 skill 根目录解析。
+
 ## 公共模板：读取 / 复用（`templates` / `template`）
 
 公共模板 = 平台沉淀的、可被全员浏览复用的优质页面（底层就是 `is_template:true` 的静态页）。
@@ -186,6 +215,7 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `title` | string | ❌ | 取 `<title>` | 页面标题 |
 | `description` | string | ❌ | 空 | 页面说明（≤1000 字，列表/详情展示用） |
 | `ttl_days` | number | ❌ | 365 | 有效期，到期链接失效、记录与对象清理 |
+| `thumbnail_file` | string | ❌ | 无 | HTML 上传成功后再设置封面图；失败只返回 warning，不影响 upload 成功 |
 | `ensure_share_shell` | bool | ❌ | true | 发布前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 
@@ -199,6 +229,7 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `title` | string | ❌ | 沿用原标题 | 新标题；不传保留原标题 |
 | `description` | string | ❌ | 沿用原说明 | 新说明；不传保留原说明，传空串 `""` 则清空 |
 | `ttl_days` | number | ❌ | 不变 | 传了才从此刻顺延有效期；不传保持原到期时间 |
+| `thumbnail_file` | string | ❌ | 无 | HTML 替换成功后再替换封面图；失败只返回 warning，不影响 update 成功 |
 | `ensure_share_shell` | bool | ❌ | true | 替换前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 

@@ -38,6 +38,8 @@ r"""
       "out_file":   "可选，输出 HTML 路径（默认 output/pages/<slug>.html）",
       "upload":     "可选 true，则生成后顺带调用 static_page 上传，返回公开 url",
       "update_page_id": "可选 page_xxx，则替换该已发布页面的内容（URL/page_id 不变），优先于新上传",
+      "thumbnail_file": "可选，现成 PNG/JPG 缩略图；HTML 上传/更新成功后自动设封面",
+      "thumbnail":  "可选 true 或对象；自动生成 1200x675 封面（默认全幅裸图，style=poster 可生成品牌海报；无浏览器则走纯 Python PNG 或 SVG 兜底，均不影响 HTML）",
       "brand":      "可选对象：name/cn_name/tagline/homepage/page_type/footer_note",
       "official_url": "可选，默认 https://www.quantbuddy.cn"
     }
@@ -53,7 +55,9 @@ import datetime
 import hashlib
 from html import escape as html_escape
 import json
+import math
 import os
+import pathlib
 import re
 import sys
 import uuid
@@ -64,7 +68,7 @@ import formula_package as FP
 
 PAGES_DIR = os.path.join(C.SKILL_ROOT, "output", "pages")
 ASSETS_DIR = os.path.join(C.SKILL_ROOT, "assets")
-SHARED_SHELL_DIR = os.path.join(C.SKILL_ROOT, "templates", "_shared", "share-shell")
+SHARED_SHELL_DIR = os.path.join(C.SKILL_ROOT, "assets", "share-shell")
 
 _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
 _DEFAULT_OFFICIAL_URL = "https://www.quantbuddy.cn"
@@ -412,7 +416,12 @@ function renderChart(el, tab, panel) {
   window.addEventListener('resize', () => chart.resize());
 }
 
-function renderPanel(panel, outputs) {
+// 骨架先行：先把所有面板卡片铺出来，正文随产出到达再逐个填。
+// PANEL_REG 存每个面板的 body/span/是否已填；OUTPUT_INDEX 把产出名映射到引用它的面板（一个产出可被多个面板复用）。
+let PANEL_REG = [];
+let OUTPUT_INDEX = {};
+
+function createCard(panel) {
   const card = document.createElement('section');
   const type = panel.type || 'table';
   const defaultSpan = (type === 'line' || type === 'bar') ? 'full' : 'auto';
@@ -425,9 +434,11 @@ function renderPanel(panel, outputs) {
   body.className = 'body ' + type;
   card.appendChild(body);
   document.getElementById('grid').appendChild(card);
+  return {body: body, span: span};
+}
 
-  if (type === 'text') { renderText(body, panel); return; }
-  const out = outputs[panel.output];
+function renderPanelBody(body, panel, span, out) {
+  const type = panel.type || 'table';
   if (!out) { body.innerHTML = '<p class="empty">无产出：' + (panel.output || '') + '</p>'; return; }
   if (out.error) { body.innerHTML = '<p class="empty err">取数失败：' + out.error + '</p>'; return; }
   const tab = normalize(out.data);
@@ -441,51 +452,119 @@ function renderPanel(panel, outputs) {
   }
 }
 
-function renderAll(outputs) {
-  LAST_OUTPUTS = outputs || {};
-  document.getElementById('grid').innerHTML = '';
-  BOOT.panels.forEach(p => renderPanel(p, LAST_OUTPUTS));
+function buildSkeletons() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  PANEL_REG = [];
+  OUTPUT_INDEX = {};
+  BOOT.panels.forEach(panel => {
+    const type = panel.type || 'table';
+    const made = createCard(panel);
+    const reg = {panel: panel, body: made.body, span: made.span, filled: false};
+    PANEL_REG.push(reg);
+    if (type === 'text') { renderText(made.body, panel); reg.filled = true; return; }
+    made.body.innerHTML = '<p class="empty">加载中…</p>';
+    const name = panel.output;
+    if (name) (OUTPUT_INDEX[name] = OUTPUT_INDEX[name] || []).push(reg);
+  });
 }
 
-function parseSSE(text) {
-  // 解析 fetch 回来的整段 SSE 文本 → outputs（与服务端 query 的 result 事件对齐）
-  const outputs = {};
-  let event = null, dataLines = [];
-  const flush = () => {
-    if (event === 'result' && dataLines.length) {
-      try { const p = JSON.parse(dataLines.join('\n'));
-        outputs[p.output] = {read_mode: p.read_mode, data_id: p.data_id, data: p.data, error: p.error}; } catch (e) {}
-    }
-    event = null; dataLines = [];
-  };
-  text.split('\n').forEach(line => {
+// 某产出到达后，立刻渲染所有引用它的面板（先到先显）
+function applyOutput(name, out) {
+  (OUTPUT_INDEX[name] || []).forEach(reg => {
+    renderPanelBody(reg.body, reg.panel, reg.span, out);
+    reg.filled = true;
+  });
+}
+
+// 一次性渲染（封面模式 / 流式兜底）：先铺骨架，再把已知产出全部填上
+function renderAll(outputs) {
+  LAST_OUTPUTS = outputs || {};
+  buildSkeletons();
+  Object.keys(LAST_OUTPUTS).forEach(name => applyOutput(name, LAST_OUTPUTS[name]));
+}
+
+function parseSSEBlock(block) {
+  // 解析单个 SSE 事件块（event/data 行）→ {output, out} 或 null（与服务端 query 的 result 事件对齐）
+  let event = null;
+  const dataLines = [];
+  block.split('\n').forEach(line => {
     line = line.replace(/\r$/, '');
-    if (line === '') { flush(); return; }
     if (line.startsWith(':')) return;
     if (line.startsWith('event:')) event = line.slice(6).trim();
     else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
   });
-  flush();
+  if (event !== 'result' || !dataLines.length) return null;
+  try {
+    const p = JSON.parse(dataLines.join('\n'));
+    return {output: p.output, out: {read_mode: p.read_mode, data_id: p.data_id, data: p.data, error: p.error}};
+  } catch (e) { return null; }
+}
+
+function parseSSE(text) {
+  // 整段 SSE 文本 → outputs（流式兜底 / 封面模式用）。事件以空行分隔，先归一 CRLF 再按 \n\n 切块。
+  const outputs = {};
+  text.replace(/\r\n/g, '\n').split('\n\n').forEach(block => {
+    const r = parseSSEBlock(block);
+    if (r) outputs[r.output] = r.out;
+  });
   return outputs;
 }
 
 async function fetchLive() {
   const setMsg = m => { document.getElementById('grid').innerHTML = '<p class="empty">' + m + '</p>'; };
-  setMsg('正在拉取最新数据…');
+  buildSkeletons();          // 先把面板骨架铺出来，产出到一个就渲染一个
+  LAST_OUTPUTS = {};
+  let resp;
   try {
-    const resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
+    resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
       body: JSON.stringify({package_id: BOOT.packageId, signature: BOOT.signature}),
     });
-    if (!resp.ok) { setMsg('取数失败：HTTP ' + resp.status); return; }
-    const text = await resp.text();
-    const outputs = parseSSE(text);
-    renderAll(outputs);
-    return outputs;
   } catch (e) {
     setMsg('取数失败（可能是跨域/网络）：' + e);
+    return;
   }
+  if (!resp.ok) { setMsg('取数失败：HTTP ' + resp.status); return; }
+
+  // 老环境不支持可读流：回退到一次性取整段再渲染
+  if (!resp.body || typeof resp.body.getReader !== 'function') {
+    const text = await resp.text();
+    renderAll(parseSSE(text));
+    return LAST_OUTPUTS;
+  }
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const handle = block => {
+    const r = parseSSEBlock(block);
+    if (!r) return;
+    LAST_OUTPUTS[r.output] = r.out;
+    applyOutput(r.output, r.out);   // 边收边渲染：先到先显
+  };
+  try {
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      // 删掉所有 \r，使 \n\n 切块对 LF / CRLF 两种分隔都成立
+      buf += dec.decode(value, {stream: true}).replace(/\r/g, '');
+      const blocks = buf.split('\n\n');
+      buf = blocks.pop();           // 末段可能是半条事件，留到下个 chunk 续上
+      blocks.forEach(handle);
+    }
+    if (buf.trim()) handle(buf);     // 收尾残留块
+  } catch (e) {
+    // 流中途断开：已渲染的保留，未到的面板维持「加载中」
+  }
+  // 收尾：始终没等到产出的非 text 面板，标注无产出
+  PANEL_REG.forEach(reg => {
+    if (!reg.filled && (reg.panel.type || 'table') !== 'text') {
+      reg.body.innerHTML = '<p class="empty">无产出：' + (reg.panel.output || '') + '</p>';
+    }
+  });
+  return LAST_OUTPUTS;
 }
 
 function panelDisplayValue(panel) {
@@ -552,6 +631,13 @@ function getDashboardPosterData() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // 封面模式：构建期把已校验产出注入 window.__QB_COVER__，直接离线渲染整页内容（去头尾），
+  // 供 Edge 无头截图当封面。正常上传页面无此全局，分支 inert。
+  if (window.__QB_COVER__) {
+    document.body.classList.add('qb-cover');
+    try { renderAll((window.__QB_COVER__ && window.__QB_COVER__.outputs) || {}); } catch (e) {}
+    return;
+  }
   if (window.QBShareShell) {
     QBShareShell.init({
       templateName: (BOOT.share && BOOT.share.pageType) || '标准实时看板',
@@ -1019,9 +1105,9 @@ def _validate_template_contract(params, panels):
     return {
         "code": 1,
         "message": "单标的画像页未满足模板契约，拒绝生成旧版 1 条线 + 少量数字卡页面",
-        "template": "templates/single-stock/spec.template.json",
+        "template": "examples/single-stock/spec.template.json",
         "issues": issues,
-        "hint": "请从 templates/single-stock/spec.template.json 复制 spec，保留 template=single-stock，并替换资产、package_id、subtitle、阅读摘要与日期口径。",
+        "hint": "请从 examples/single-stock/spec.template.json 复制 spec，保留 template=single-stock，并替换资产、package_id、subtitle、阅读摘要与日期口径。",
     }
 
 
@@ -1035,6 +1121,435 @@ def _write_manifest(out_file, manifest):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     return path
+
+
+def _resolve_local_path(path):
+    if not path:
+        return None
+    return path if os.path.isabs(path) else os.path.join(C.SKILL_ROOT, path)
+
+
+def _provided_thumbnail_file(params):
+    for key in ("thumbnail_file", "thumbnail_image", "thumbnail_path"):
+        value = params.get(key)
+        if isinstance(value, str) and value.strip():
+            return _resolve_local_path(value.strip())
+    thumb = params.get("thumbnail")
+    if isinstance(thumb, str) and thumb.strip():
+        return _resolve_local_path(thumb.strip())
+    if isinstance(thumb, dict):
+        for key in ("file", "image_file", "thumbnail_file", "path"):
+            value = thumb.get(key)
+            if isinstance(value, str) and value.strip():
+                return _resolve_local_path(value.strip())
+    return None
+
+
+def _auto_thumbnail_requested(params):
+    for key in ("auto_thumbnail", "generate_thumbnail"):
+        if key in params:
+            return _as_bool(params.get(key), False)
+    thumb = params.get("thumbnail")
+    if isinstance(thumb, bool):
+        return thumb
+    if isinstance(thumb, dict):
+        if any(isinstance(thumb.get(k), str) and thumb.get(k).strip()
+               for k in ("file", "image_file", "thumbnail_file", "path")):
+            return False
+        if "enabled" in thumb:
+            return _as_bool(thumb.get("enabled"), True)
+        if "auto" in thumb:
+            return _as_bool(thumb.get("auto"), True)
+        if "generate" in thumb:
+            return _as_bool(thumb.get("generate"), True)
+        return True
+    return False
+
+
+def _thumbnail_tags(params):
+    tags = params.get("tags") if isinstance(params.get("tags"), list) else []
+    if tags:
+        return tags
+    out = []
+    for key in ("template", "page_type", "category"):
+        value = params.get(key)
+        if value:
+            out.append(value)
+    if params.get("upload") or params.get("update_page_id"):
+        out.append("可分享")
+    out.append("实时取数")
+    return out
+
+
+def _thumb_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            value = float(text)
+            return value if math.isfinite(value) else None
+        except ValueError:
+            return None
+    return None
+
+
+def _thumb_series_from_data(data):
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        for key in ("range_data", "last_value", "last_day_stats", "last_valid_per_asset"):
+            points = _thumb_series_from_data(data.get(key))
+            if points:
+                return points
+        dates = data.get("dates") or data.get("x") or data.get("labels") or data.get("categories")
+        values = data.get("values") or data.get("y") or data.get("series") or data.get("data")
+        if isinstance(dates, list) and isinstance(values, list):
+            if values and isinstance(values[0], list):
+                values = values[0]
+            pairs = []
+            for i in range(min(len(dates), len(values))):
+                pairs.append([dates[i], values[i]])
+            return _thumb_series_from_data(pairs)
+        if isinstance(data.get("columns"), list) and isinstance(data.get("rows"), list):
+            columns = data["columns"]
+            rows = data["rows"]
+            numeric_idx = None
+            for ci, _name in enumerate(columns):
+                if any(_thumb_number(row[ci]) is not None for row in rows if isinstance(row, list) and ci < len(row)):
+                    numeric_idx = ci
+            if numeric_idx is None:
+                return []
+            x_idx = 0 if numeric_idx != 0 else (1 if len(columns) > 1 else None)
+            points = []
+            for ri, row in enumerate(rows):
+                if not isinstance(row, list) or numeric_idx >= len(row):
+                    continue
+                y = _thumb_number(row[numeric_idx])
+                if y is None:
+                    continue
+                x = row[x_idx] if x_idx is not None and x_idx < len(row) else ri
+                points.append({"x": str(x), "y": y})
+            return points[-260:]
+        for key in ("points", "items", "records", "top_values"):
+            points = _thumb_series_from_data(data.get(key))
+            if points:
+                return points
+        return []
+    if not isinstance(data, list):
+        return []
+    points = []
+    for idx, item in enumerate(data):
+        x = idx
+        y = None
+        if isinstance(item, dict):
+            x = item.get("date", item.get("time", item.get("x", item.get("label", idx))))
+            for key in ("value", "y", "close", "price", "score"):
+                y = _thumb_number(item.get(key))
+                if y is not None:
+                    break
+            if y is None:
+                for val in item.values():
+                    y = _thumb_number(val)
+                    if y is not None:
+                        break
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            x = item[0]
+            y = _thumb_number(item[1])
+        else:
+            y = _thumb_number(item)
+        if y is not None:
+            points.append({"x": str(x), "y": y})
+    return points[-260:]
+
+
+def _thumbnail_series_from_outputs(panels, outputs):
+    if not isinstance(outputs, dict):
+        return []
+    preferred = []
+    fallback = []
+    for panel in panels:
+        if not isinstance(panel, dict) or not panel.get("output"):
+            continue
+        target = preferred if (panel.get("type") or "").lower() in ("line", "bar") else fallback
+        target.append(panel.get("output"))
+    for output in preferred + fallback:
+        item = outputs.get(output)
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        points = _thumb_series_from_data(item.get("data"))
+        if len(points) >= 2:
+            return points
+    return []
+
+
+def _default_thumbnail_file(out_file):
+    base = os.path.splitext(os.path.basename(out_file))[0] or "dashboard"
+    return os.path.join(C.SKILL_ROOT, "output", "thumbnails", base + ".png")
+
+
+_COVER_MODE_CSS = (
+    "<style id=\"qb-cover-css\">"
+    ":root{color-scheme:light !important;}"
+    "html,body{background:#f3f6fa !important;}"
+    ".qb-head,[data-qb-share-shell],.qb-footer,[data-qb-share-shell-footer],"
+    ".share-modal,#sharePosterModal,.qb-actions,#refresh,#shareBtn,.site-footer{display:none !important;}"
+    "main{max-width:1200px !important;margin:0 auto !important;padding:24px !important;}"
+    "@media (prefers-color-scheme: dark){"
+    "body{background:#f3f6fa !important;color:#1f2937 !important;}"
+    ".card{background:#fff !important;border-color:#dde5ef !important;box-shadow:none !important;}"
+    ".card h3,.std-hero h1{color:#172033 !important;} .card-head p,.desc{color:#697586 !important;}"
+    ".big{color:#111827 !important;} .text-panel{color:#334155 !important;}"
+    "th,td{border-color:#eef0f2 !important;} thead th{background:#fafbfc !important;}}"
+    "</style>"
+)
+
+
+def _echarts_local_path():
+    """确保 ECharts 本地缓存存在（缺则一次性从 CDN 下载落盘），返回缓存绝对路径或 None。
+
+    缓存到 assets/vendor/echarts.min.js；下载失败返回 None（封面页退回 CDN）。
+    """
+    cache = os.path.join(C.SKILL_ROOT, "assets", "vendor", "echarts.min.js")
+    if os.path.exists(cache) and os.path.getsize(cache) > 200000:
+        return cache
+    try:
+        import urllib.request
+        req = urllib.request.Request(_ECHARTS_CDN, headers={"User-Agent": "qb-view"})
+        with C._NO_PROXY_OPENER.open(req, timeout=30) as resp:
+            data = resp.read()
+        if len(data) < 200000:
+            return None
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(data)
+        return cache
+    except Exception:
+        return None
+
+
+def _build_cover_html(html, outputs):
+    """把渲染好的页面 html 改成一次性「封面模式页」：本地 ECharts + 注入构建期产出 + 隐藏头尾 + 强制浅色。
+
+    该文件只用于本地 Edge 无头截图，不上传；正常页面不含 window.__QB_COVER__，分支 inert。
+    把 CDN ECharts 换成本地文件引用后，封面页无需联网、秒加载、图表同步画完——保证截图时页面已完全渲染。
+    """
+    # 用本地文件引用替换 CDN <script src>（file:// 页面可加载 file:// 脚本），去掉 ~8s CDN 等待。
+    # 不内联文本：minified JS 里的 </script> 等序列会提前闭合标签、把源码当文本渲染。
+    cache = _echarts_local_path()
+    if cache:
+        cdn_tag = '<script src="' + _ECHARTS_CDN + '"></script>'
+        local_uri = pathlib.Path(cache).resolve().as_uri()
+        html = html.replace(cdn_tag, '<script src="' + local_uri + '"></script>', 1)
+
+    data = json.dumps({"outputs": outputs or {}}, ensure_ascii=False)
+    boot = "<script>window.__QB_COVER__=" + data + ";</script>"
+    if "</head>" in html:
+        html = html.replace("</head>", _COVER_MODE_CSS + "</head>", 1)
+    else:
+        html = _COVER_MODE_CSS + html
+    if "</body>" in html:
+        html = html.replace("</body>", boot + "</body>", 1)
+    else:
+        html = html + boot
+    return html
+
+
+def _estimate_cover_height(panels):
+    """按 panel 估算整页内容高度（用于 Edge 窗口高度）。宁可底部留白，不可裁切：上取整 ×1.1，cap[700,5000]。"""
+    total = 150 + 60  # hero + main padding
+    small = 0
+    for p in panels or []:
+        if not isinstance(p, dict):
+            continue
+        t = (p.get("type") or "table").lower()
+        span = p.get("span") or ("full" if t in ("line", "bar") else "auto")
+        if t in ("line", "bar") or span in ("full", "wide"):
+            try:
+                h = int(p.get("height") or 360)
+            except (TypeError, ValueError):
+                h = 360
+            total += h + 80 + 16
+        else:
+            small += 1
+    total += math.ceil(small / 2) * (240 + 16)
+    return max(700, min(5000, int(total * 1.08)))
+
+
+_THUMB_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _shrink_png_under(path, limit):
+    """可选增强：截图超 2MB 时用 Pillow 降采样/转 JPEG 压到限内；无 Pillow 返回 None。"""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        img = Image.open(path).convert("RGB")
+    except Exception:
+        return None
+    for scale in (1.0, 0.85, 0.7, 0.55, 0.42):
+        im = img if scale == 1.0 else img.resize(
+            (max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.LANCZOS)
+        try:
+            im.save(path, format="PNG", optimize=True)
+            if os.path.getsize(path) <= limit:
+                return path
+            jpg = os.path.splitext(path)[0] + ".jpg"
+            im.save(jpg, format="JPEG", quality=82, optimize=True)
+            if os.path.getsize(jpg) <= limit:
+                if os.path.abspath(jpg) != os.path.abspath(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return jpg
+        except Exception:
+            continue
+    return None
+
+
+def _generate_page_cover(html_file, panels, outputs, thumb_out):
+    """默认封面：截真实页面整页内容（去头尾、强制浅色、构建期数据离线渲染）。
+
+    失败/无浏览器/超 2MB 又压不下来 → 返回 None，交回调用方走合成 SVG 兜底。
+    """
+    _generate_page_cover.last_reason = None
+    try:
+        import render_cover as RC
+    except Exception:
+        _generate_page_cover.last_reason = "render_cover_import_failed"
+        return None
+    if not RC._find_browser():
+        _generate_page_cover.last_reason = "no_browser"
+        return None
+    try:
+        with open(html_file, "r", encoding="utf-8") as f:
+            html = f.read()
+    except OSError:
+        _generate_page_cover.last_reason = "html_read_failed"
+        return None
+
+    base = os.path.splitext(thumb_out)[0]
+    cover_html_path = base + ".cover-page.html"
+    out_png = base + ".png"
+    shot = None
+    try:
+        with open(cover_html_path, "w", encoding="utf-8") as f:
+            f.write(_build_cover_html(html, outputs or {}))
+        shot = RC.capture_page_cover(cover_html_path, out_png, _estimate_cover_height(panels))
+    except Exception as exc:
+        _generate_page_cover.last_reason = f"capture_exception:{exc}"
+        shot = None
+    finally:
+        try:
+            os.remove(cover_html_path)
+        except OSError:
+            pass
+    if not shot:
+        if not _generate_page_cover.last_reason:
+            _generate_page_cover.last_reason = "capture_failed"
+        return None
+
+    dims = RC._png_dims(shot)
+    size = os.path.getsize(shot)
+    if size > _THUMB_MAX_BYTES:
+        smaller = _shrink_png_under(shot, _THUMB_MAX_BYTES)
+        if not smaller:
+            _generate_page_cover.last_reason = "over_2mb_unshrinkable"
+            try:
+                os.remove(shot)
+            except OSError:
+                pass
+            return None
+        shot = smaller
+        size = os.path.getsize(shot)
+        dims = RC._png_dims(shot) or dims
+    return {
+        "code": 0,
+        "thumbnail_generation_status": "generated",
+        "out_file": shot,
+        "mode": "page",
+        "rasterizer": "edge-page",
+        "width": dims[0] if dims else None,
+        "height": dims[1] if dims else None,
+        "bytes": size,
+    }
+
+
+def _prepare_thumbnail(params, panels, out_file, outputs=None):
+    provided = _provided_thumbnail_file(params)
+    if provided:
+        return {
+            "file": provided,
+            "status": "provided" if os.path.exists(provided) else "provided_missing",
+            "generation": {"code": 0, "provided": True, "out_file": provided},
+        }
+
+    if not _auto_thumbnail_requested(params):
+        return {"file": None, "status": "not_requested", "generation": None}
+
+    thumb_cfg = params.get("thumbnail") if isinstance(params.get("thumbnail"), dict) else {}
+    thumb_out = _resolve_local_path(thumb_cfg.get("out_file")) if thumb_cfg.get("out_file") else _default_thumbnail_file(out_file)
+    render_params = {
+        "title": params.get("title"),
+        "subtitle": params.get("subtitle"),
+        "description": params.get("description"),
+        "template": params.get("template") or params.get("page_type"),
+        # 分类/数据模式：默认裸图只记录元信息；style=poster 时用于 eyebrow 与信息卡。
+        "template_type": thumb_cfg.get("template_type") or params.get("template_type") or params.get("category"),
+        "category": thumb_cfg.get("category") or params.get("category"),
+        "data_mode": thumb_cfg.get("data_mode") or params.get("data_mode"),
+        "tags": thumb_cfg.get("tags") if isinstance(thumb_cfg.get("tags"), list) else _thumbnail_tags(params),
+        "out_file": thumb_out,
+    }
+    for key in ("style", "cover_style"):
+        if thumb_cfg.get(key):
+            render_params[key] = thumb_cfg.get(key)
+    # 封面曲线用「构建期已校验数据」内联绘制：显式 series 优先，否则从产出抽首个 line/bar 序列。
+    series = thumb_cfg.get("series") or thumb_cfg.get("chart_series") or params.get("series") or params.get("chart_series")
+    if not series:
+        series = _thumbnail_series_from_outputs(panels, outputs or {})
+    if series:
+        render_params["series"] = series
+
+    # 封面模式：page=截真实页面整页（默认）/ chart=合成全幅曲线 / poster=品牌海报。
+    cover_mode = str(thumb_cfg.get("cover_mode") or params.get("cover_mode") or "page").lower()
+    if cover_mode == "poster":
+        render_params.setdefault("style", "poster")
+
+    # 1) 默认：截真实页面整页内容（去头尾）。失败/无浏览器/超 2MB 压不下 → 回退合成。
+    if cover_mode == "page":
+        page_gen = _generate_page_cover(out_file, panels, outputs, thumb_out)
+        if page_gen:
+            return {"file": page_gen.get("out_file"), "status": "generated", "generation": page_gen}
+
+    # 2) 合成 SVG 封面（chart/poster，或截图回退）：Edge 栅格化 → 纯 Python PNG → SVG 三层兜底。
+    try:
+        import render_cover as RC
+        generation = RC.render_cover(render_params)
+        if isinstance(generation, dict) and generation.get("code") == 0 and cover_mode == "page":
+            generation["mode"] = "chart-fallback"
+            generation["fallback_reason"] = getattr(_generate_page_cover, "last_reason", None) or "page_cover_failed"
+        elif isinstance(generation, dict) and generation.get("code") == 0 and cover_mode in ("chart", "poster"):
+            generation["mode"] = cover_mode
+        if isinstance(generation, dict) and generation.get("code") == 0 and generation.get("bytes") is None:
+            out = generation.get("out_file")
+            if out and os.path.exists(out):
+                generation["bytes"] = os.path.getsize(out)
+    except Exception as exc:
+        generation = {"code": 1, "message": str(exc), "thumbnail_generation_status": "failed"}
+
+    if isinstance(generation, dict) and generation.get("code") == 0:
+        return {"file": generation.get("out_file"), "status": "generated", "generation": generation}
+    if isinstance(generation, dict) and generation.get("skipped"):
+        return {"file": None, "status": "skipped", "generation": generation}
+    return {"file": None, "status": "failed", "generation": generation}
 
 
 def cmd_build(params):
@@ -1090,12 +1605,16 @@ def cmd_build(params):
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(html)
 
+    thumbnail_info = _prepare_thumbnail(params, panels, out_file, verify_outputs)
     manifest = {
         "schema_version": 1,
         "page_id": None,
         "url": None,
         "html_file": out_file,
         "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
+        "thumbnail_file": thumbnail_info.get("file"),
+        "thumbnail_url": None,
+        "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
         "endpoint": endpoint,
         "formula_packages": {
             "DEFAULT": {
@@ -1113,6 +1632,8 @@ def cmd_build(params):
             "publish_runtime_check": "not_run",
         },
     }
+    if thumbnail_info.get("generation"):
+        manifest["thumbnail_generation"] = thumbnail_info["generation"]
     manifest_path = _write_manifest(out_file, manifest)
 
     result = {
@@ -1123,8 +1644,12 @@ def cmd_build(params):
         "panels": len(panels),
         "size": len(html.encode("utf-8")),
         "manifest": manifest_path,
+        "thumbnail_file": thumbnail_info.get("file"),
+        "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
         "message": "已生成实时取数看板 HTML",
     }
+    if thumbnail_info.get("generation"):
+        result["thumbnail_generation"] = thumbnail_info["generation"]
     if legacy_mode and legacy_mode != "live":
         result["note"] = "spec 里的 mode 字段已忽略，页面按实时取数生成。"
     if single_stock_facts:
@@ -1138,6 +1663,7 @@ def cmd_build(params):
         import static_page as SP
         # 页面说明（列表/详情展示用）：仅显式传 spec.description 时透传；不传则不动（update 保留原值）
         page_desc = params.get("description")
+        thumbnail_file = thumbnail_info.get("file")
         if update_page_id:
             # 替换已发布页面：URL / page_id 不变，已分享链接照常可用
             up = SP.cmd_update({
@@ -1147,6 +1673,7 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
+                "thumbnail_file": thumbnail_file,
             })
             result["update"] = up
             verb = "替换"
@@ -1157,13 +1684,19 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
+                "thumbnail_file": thumbnail_file,
             })
             result["upload"] = up
             verb = "上传"
         if up.get("code") == 0 and up.get("url"):
             result["url"] = up["url"]
+            if up.get("thumbnail_url"):
+                result["thumbnail_url"] = up.get("thumbnail_url")
             manifest["page_id"] = up.get("page_id")
             manifest["url"] = up.get("url")
+            manifest["thumbnail_url"] = up.get("thumbnail_url") or None
+            if up.get("thumbnail_warning"):
+                manifest["thumbnail_upload_warning"] = up.get("thumbnail_warning")
             manifest["verification"]["publish_runtime_check"] = (
                 (up.get("_package_runtime_check") or {}).get("status")
                 or "not_verifiable_by_publish_key"

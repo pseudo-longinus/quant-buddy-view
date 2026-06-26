@@ -28,6 +28,9 @@ BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_da
 | `update_page_id` | string | ❌ | 替换已发布页面，URL/page_id 不变 |
 | `verify_packages` | bool | ❌ | 上传/替换后强制解析页面内 package_id + signature 做一次轻量 query 校验；默认仅服务端提示公式包异常时触发 |
 | `ttl_days` | number | ❌ | 配合 upload 透传 |
+| `thumbnail_file` | string | ❌ | 现成 PNG/JPG 缩略图；HTML upload/update 成功后自动上传封面，失败只返回 warning |
+| `thumbnail` | bool/object/string | ❌ | `true` 或对象表示自动生成 1200×675 封面；字符串表示现成文件路径。封面是自包含 SVG 海报，用系统 Edge/Chrome 无头栅格化成 PNG；无浏览器时直接产出 SVG，均不影响 HTML |
+| `series` / `chart_series` | array | ❌ | 自动生成封面时可选的真实曲线数据；不传则优先从构建期公式包取数结果里的 line/bar 面板抽取 |
 | `brand` | object | ❌ | 统一分享外壳配置，见下 |
 | `official_url` | string | ❌ | 官网入口，默认 `https://www.quantbuddy.cn` |
 | `show_qr` | bool | ❌ | 是否显示页面二维码，默认 `true` |
@@ -90,7 +93,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 ### 模板契约校验
 
-单标的画像页必须从 `templates/single-stock/spec.template.json` 起步，并保留 `template: "single-stock"`。
+单标的画像页必须从 `examples/single-stock/spec.template.json` 起步，并保留 `template: "single-stock"`。
 
 如果标题或 `page_type` 表明是“个股画像”，但 spec 仍是旧版 `1 条价格线 + 少量数字卡`，`build_dashboard` 会返回 `code:1`，并提示补齐：
 
@@ -106,7 +109,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 页面是实时取数的：HTML 骨架自包含（样式/脚本内联），数据在浏览器打开时实时 `fetch` 最新——底层数据更新后无需重新 build，页面打开即最新。
 
 - HTML 内写入 `endpoint / package_id / signature`，打开时调 `queryFormulaPackage` 取数（signature 会公开在页面里）。
-- 前置：端点须对页面域名放开 **CORS**，且页面与端点协议一致（https 页面配 https 端点，否则 mixed-content 被拦）。当前 `https://test.quantbuddy.cn/skill` 已满足。
+- 前置：端点须对页面域名放开 **CORS**，且页面与端点协议一致（https 页面配 https 端点，否则 mixed-content 被拦）。当前 `https://www.quantbuddy.cn/skill` 已满足。
 - 构建期仍会取一次数，用于质量体检 + 单标的文案一致性校验 + 产出 `facts`，不会内联进 HTML。
 - spec 不需要写 `mode` 字段；旧 spec 里残留的 `"mode"` 会被忽略。
 
@@ -116,10 +119,25 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 { "code": 0, "out_file": "output/pages/xxx.html", "mode": "live",
   "package_id": "pkg_...", "panels": 3, "size": 12345,
   "manifest": "output/pages/xxx.manifest.json",
+  "thumbnail_file": "output/thumbnails/xxx.png",
+  "thumbnail_generation_status": "generated",
   "facts": {"px":{"value": 166.41, "date": 20260616}},
   "url": "https://pages.quantbuddy.cn/..."  // 仅 upload=true 且成功时 }
 ```
 
-同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间和验证结果；不会记录 API key 或 signature。
+同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间、验证结果，以及
+`thumbnail_file`、`thumbnail_url`、`thumbnail_generation_status`。不会记录 API key 或 signature。
+
+### 缩略图生成与上传
+
+- 缩略图接口限 PNG/JPG、≤2MB；**封面尺寸不固定**（默认整页截图为竖图），后台可再裁。
+- 传 `thumbnail_file` 时，脚本不处理图片内容，只在 HTML upload/update 成功后调用 `static_page.py thumbnail` 上传。
+- 传 `"thumbnail": true` 或 `{ "enabled": true }` 时自动生成封面。`thumbnail.cover_mode` 选风格：
+  - **`page`（默认）= 真实页面整页截图**：用系统 Edge/Chrome 无头打开一个"封面模式页"（隐藏页头/页尾/分享按钮、强制浅色），截取**除页头页尾外的整页内容**（hero + 数字卡 + 真实 ECharts 图表 + 表格），最贴近"所见即所得"。数据用**构建期已校验产出离线渲染**（不实时取数、不闪）；ECharts 从本地缓存 `assets/vendor/echarts.min.js` 引入（缺失时一次性从 CDN 下载落盘），**封面页无需联网、秒加载，截图前页面已完全渲染**。窗口高度按 panel 估算，宁底部留白不裁切。
+  - `chart` = 合成全幅裸图（白底蓝色真实数据曲线，单图、轻量）。
+  - `poster` = 品牌海报（深色品牌栏 + 标题 + 信息卡 + 右图）。
+- **降级链（任一失败都不阻断 HTML 上传）**：`page` 无浏览器/截图失败/超 2MB 压不下 → 回退合成封面；合成封面再按 系统浏览器 → 纯 Python(cairosvg/svglib) → 裸 SVG 三层兜底。超 2MB 时若装了 Pillow 会自动降采样/转 JPEG，否则回退合成图保证可上传。
+- `page` 模式曲线/表格直接来自构建期校验产出；`chart`/`poster` 的曲线从产出抽首个 line/bar 序列，也可显式传 `series`。
+- manifest 的 `thumbnail_generation` 记录 `mode`（page/chart-fallback/...）、`rasterizer`（`edge-page`/`edge`/`svglib`/`svg` 等）、`width/height`、`bytes`。
 
 > 端到端示例：[workflows/dashboard-end-to-end.md](../workflows/dashboard-end-to-end.md)。

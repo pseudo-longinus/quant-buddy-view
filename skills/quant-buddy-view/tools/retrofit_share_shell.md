@@ -70,4 +70,4 @@ python scripts/retrofit_share_shell.py '{"html_file":"output/pages/old.html","ou
 - 不残留旧 QRCode 外链；
 - HTML 小于 2MB。
 
-公共页头、页尾、刷新、分享海报弹层、复制/下载 PNG 由 `templates/_shared/share-shell/` 统一提供。
+公共页头、页尾、刷新、分享海报弹层、复制/下载 PNG 由 `assets/share-shell/` 统一提供。

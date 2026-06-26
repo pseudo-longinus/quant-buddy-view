@@ -42,12 +42,12 @@
 
 ```json
 {
-  "template": "templates/multi-factor-screener/page.template.html",
+  "template": "examples/multi-factor-screener/page.template.html",
   "out_file": "output/pages/multi-factor-screener.html",
   "replacements": {
     "__PAGE_TITLE__": "AI 概念股多因子筛选",
     "__THEME_NAME__": "AI 概念股",
-    "__ENDPOINT__": "https://test.quantbuddy.cn/skill",
+    "__ENDPOINT__": "https://www.quantbuddy.cn/skill",
     "pkg_rank_xxxxxxxx": "pkg_xxx",
     "sig_rank_xxxxxxxx": "只写入 HTML，不在回复里展示",
     "pkg_backtest_xxxxxxxx": "pkg_xxx",
