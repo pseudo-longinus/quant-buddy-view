@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="560" viewBox="0 0 1800 560" role="img" aria-labelledby="title desc">
+  <title id="title">quant-buddy-view workflow</title>
+  <desc id="desc">From an investment research question to formula validation, a serverless data API, a hosted web dashboard, and live visitor access.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.55" stop-color="#111827"/>
+      <stop offset="1" stop-color="#171717"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f2937"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#334155" stroke-width="1" opacity="0.18"/>
+    </pattern>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2 12 7 2 12Z" fill="#f59e0b"/>
+    </marker>
+  </defs>
+
+  <rect width="1800" height="560" rx="34" fill="url(#bg)"/>
+  <rect width="1800" height="560" rx="34" fill="url(#grid)"/>
+  <path d="M90 430 C310 330 430 500 650 390 S980 320 1200 395 1520 435 1710 300" fill="none" stroke="#f59e0b" stroke-width="2" opacity="0.24"/>
+  <path d="M120 160 C360 95 520 185 715 140 S1045 80 1285 160 1530 240 1700 145" fill="none" stroke="#22c55e" stroke-width="2" opacity="0.18"/>
+
+  <text x="900" y="68" text-anchor="middle" font-family="Inter, Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="34" font-weight="800" fill="#f8fafc">从投研问题到实时网页看板</text>
+  <text x="900" y="106" text-anchor="middle" font-family="Inter, Microsoft YaHei, PingFang SC, Arial, sans-serif" font-size="18" fill="#94a3b8">Agent 验证公式，quant-buddy-view 注册接口并发布页面，访问者打开链接即可取最新数据</text>
+
+  <g font-family="Inter, Microsoft YaHei, PingFang SC, Arial, sans-serif">
+    <line x1="342" y1="288" x2="424" y2="288" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <line x1="642" y1="288" x2="724" y2="288" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <line x1="942" y1="288" x2="1024" y2="288" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <line x1="1242" y1="288" x2="1324" y2="288" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+    <g transform="translate(90 160)" filter="url(#shadow)">
+      <rect width="252" height="256" rx="24" fill="url(#card)" stroke="#334155"/>
+      <rect x="1" y="1" width="250" height="6" rx="3" fill="#f59e0b"/>
+      <circle cx="58" cy="66" r="27" fill="#f59e0b" opacity="0.16"/>
+      <text x="58" y="77" text-anchor="middle" font-size="36" font-weight="900" fill="#fbbf24">?</text>
+      <text x="32" y="150" font-size="27" font-weight="800" fill="#f8fafc">投研问题</text>
+      <text x="32" y="188" font-size="17" fill="#cbd5e1">
+        <tspan x="32" dy="0">股票、组合、策略</tspan>
+        <tspan x="32" dy="28">复盘或研究假设</tspan>
+      </text>
+    </g>
+
+    <g transform="translate(390 160)" filter="url(#shadow)">
+      <rect width="252" height="256" rx="24" fill="url(#card)" stroke="#334155"/>
+      <rect x="1" y="1" width="250" height="6" rx="3" fill="#38bdf8"/>
+      <g transform="translate(50 42) scale(0.84)">
+        <rect x="0" y="45" width="22" height="52" rx="5" fill="#38bdf8"/>
+        <rect x="38" y="18" width="22" height="79" rx="5" fill="#22c55e"/>
+        <rect x="76" y="0" width="22" height="97" rx="5" fill="#f59e0b"/>
+        <path d="M0 26 34 38 70 16 108 28" fill="none" stroke="#f8fafc" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <text x="32" y="150" font-size="27" font-weight="800" fill="#f8fafc">验证公式</text>
+      <text x="32" y="188" font-size="17" fill="#cbd5e1">
+        <tspan x="32" dy="0">行情 / 财务 / 因子</tspan>
+        <tspan x="32" dy="28">回测结果先跑通</tspan>
+      </text>
+    </g>
+
+    <g transform="translate(690 160)" filter="url(#shadow)">
+      <rect width="252" height="256" rx="24" fill="url(#card)" stroke="#334155"/>
+      <rect x="1" y="1" width="250" height="6" rx="3" fill="#22c55e"/>
+      <g transform="translate(66 18) scale(0.62)">
+        <path d="M45 70H138c26 0 47-17 47-40 0-21-18-38-42-39C134-29 111-42 84-42 47-42 18-19 15 10-6 14-22 29-22 48-22 60-14 70 0 70Z" transform="translate(20 45)" fill="#22c55e" opacity="0.16" stroke="#4ade80" stroke-width="4"/>
+        <circle cx="36" cy="138" r="7" fill="#f59e0b"/>
+        <circle cx="88" cy="138" r="7" fill="#f59e0b"/>
+        <circle cx="140" cy="138" r="7" fill="#f59e0b"/>
+        <path d="M36 112v26M88 112v26M140 112v26M36 138h104" stroke="#f59e0b" stroke-width="4" stroke-linecap="round"/>
+      </g>
+      <text x="32" y="150" font-size="27" font-weight="800" fill="#f8fafc">Serverless 接口</text>
+      <text x="32" y="188" font-size="17" fill="#cbd5e1">
+        <tspan x="32" dy="0">注册为专属公式包</tspan>
+        <tspan x="32" dy="28">package_id + signature</tspan>
+      </text>
+    </g>
+
+    <g transform="translate(990 160)" filter="url(#shadow)">
+      <rect width="252" height="256" rx="24" fill="url(#card)" stroke="#334155"/>
+      <rect x="1" y="1" width="250" height="6" rx="3" fill="#fb923c"/>
+      <g transform="translate(48 38) scale(0.82)">
+        <rect x="0" y="0" width="148" height="98" rx="14" fill="#0f172a" stroke="#475569" stroke-width="4"/>
+        <circle cx="22" cy="18" r="5" fill="#fb923c"/>
+        <circle cx="40" cy="18" r="5" fill="#fbbf24"/>
+        <circle cx="58" cy="18" r="5" fill="#22c55e"/>
+        <path d="M20 64 54 48 88 62 126 34" fill="none" stroke="#38bdf8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="20" y="76" width="22" height="14" rx="4" fill="#22c55e"/>
+        <rect x="54" y="68" width="22" height="22" rx="4" fill="#f59e0b"/>
+        <rect x="88" y="55" width="22" height="35" rx="4" fill="#38bdf8"/>
+      </g>
+      <text x="32" y="150" font-size="27" font-weight="800" fill="#f8fafc">免费托管网页</text>
+      <text x="32" y="188" font-size="17" fill="#cbd5e1">
+        <tspan x="32" dy="0">生成静态 HTML</tspan>
+        <tspan x="32" dy="28">发布到 pages.quantbuddy.cn</tspan>
+      </text>
+    </g>
+
+    <g transform="translate(1290 160)" filter="url(#shadow)">
+      <rect width="420" height="256" rx="24" fill="url(#card)" stroke="#334155"/>
+      <rect x="1" y="1" width="418" height="6" rx="3" fill="url(#accent)"/>
+      <g transform="translate(46 36) scale(0.88)">
+        <circle cx="54" cy="54" r="46" fill="#f59e0b" opacity="0.13" stroke="#fbbf24" stroke-width="4"/>
+        <path d="M54 12c18 17 27 31 27 42s-9 25-27 42M54 12C36 29 27 43 27 54s9 25 27 42M14 54h80" fill="none" stroke="#fbbf24" stroke-width="4" stroke-linecap="round"/>
+        <path d="M132 45h160M132 75h112M132 105h142" stroke="#475569" stroke-width="10" stroke-linecap="round"/>
+        <path d="M132 142 C170 112 206 172 246 130 S310 112 348 140" fill="none" stroke="#22c55e" stroke-width="5" stroke-linecap="round"/>
+      </g>
+      <text x="32" y="150" font-size="27" font-weight="800" fill="#f8fafc">实时访问</text>
+      <text x="32" y="188" font-size="17" fill="#cbd5e1">
+        <tspan x="32" dy="0">访问者打开链接</tspan>
+        <tspan x="32" dy="28">页面自动读取最新结果</tspan>
+      </text>
+      <rect x="262" y="192" width="124" height="36" rx="18" fill="#0f766e" opacity="0.26" stroke="#2dd4bf"/>
+      <text x="324" y="216" text-anchor="middle" font-size="16" font-weight="800" fill="#99f6e4">访问免费</text>
+    </g>
+  </g>
+</svg>
