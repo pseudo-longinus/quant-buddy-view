@@ -175,7 +175,7 @@ npx skills update quant-buddy-view -g -y
 安装并配置完成后，可以直接对 Agent 说：
 
 ```text
-帮我使用 QuantBuddy 模板市场里的「全球资产泡沫监测」模板，
+用 quant-buddy-view 套用 QuantBuddy 模板市场里的「全球资产泡沫监测」模板，
 替换成我关注的资产和指标，
 注册我自己的公式包，
 并发布成一个可分享、会自动更新的活页。
@@ -184,7 +184,7 @@ npx skills update quant-buddy-view -g -y
 也可以换成更具体的需求：
 
 ```text
-帮我做一个贵州茅台的估值体检活页，
+用 quant-buddy-view 做一个贵州茅台的估值体检活页，
 页面参考模板市场里的「贵州茅台 · 个股估值体检」，
 用我的公式重新注册数据接口，
 发布后给我公开链接。
