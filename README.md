@@ -63,7 +63,7 @@
 你不需要写代码，只要对装好 skill 的 Agent 说一句话：
 
 ```text
-帮我做一个沪深300、中证1000、纳斯达克100和黄金近一年的收益风险比较活页，
+用 quant-buddy-view 做一个沪深300、中证1000、纳斯达克100和黄金近一年的收益风险比较活页，
 展示累计收益、最大回撤、波动率和相关性，发布成可分享、会自动更新的链接。
 ```
 
@@ -121,7 +121,7 @@ Agent 在后台完成三件事，然后把链接交给你：
 最快的成功路径就三步：
 
 1. 去 [www.quantbuddy.cn](https://www.quantbuddy.cn) 申请一个 API Key。
-2. 对装好 skill 的 Agent 说一句话：**「帮我做一个 ⟨你关注的投研问题⟩ 页并发布，我的 key 是 ⟨你的 key⟩」**。
+2. 对装好 skill 的 Agent 说一句话：**「用 quant-buddy-view 做一个 ⟨你关注的投研问题⟩ 页并发布，我的 key 是 ⟨你的 key⟩」**。
 3. Agent 返回一个可打开、属于你自己的活页链接。
 
 > 下面是 skill 安装、API Key 配置和模板改造的详细步骤；想从官方活页改起，也可以先在 [模板市场](https://www.quantbuddy.cn/templates) 选一个再让 Agent 改造。
