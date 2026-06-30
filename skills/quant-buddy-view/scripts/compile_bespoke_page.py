@@ -5,7 +5,7 @@ The compiler replaces shared-shell placeholders and inlines local runtime assets
 Input is JSON via @file, CB_PARAMS, command JSON, or stdin:
 
 {
-  "template": "examples/valuation-financial-profile/page.template.html",
+  "template": "output/templates/page_xxx.html",
   "out_file": "output/pages/demo.html",
   "inline_data_kernel": true,
   "inline_qr_mini": true

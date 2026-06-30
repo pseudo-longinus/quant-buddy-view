@@ -683,7 +683,6 @@ document.addEventListener('DOMContentLoaded', () => {
          background: var(--qb-canvas); color: var(--qb-text); }}
   a {{ color: inherit; }}
   a:focus-visible {{ outline: 2px solid #d8a54b; outline-offset: 3px; }}
-  .share-shell {{ background: #101827; color: #fff; border-bottom: 4px solid #d8a54b; }}
   .shell-inner {{ max-width: 1180px; margin: 0 auto; padding: 0 20px; }}
   .topbar {{ min-height: 62px; display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid rgba(255,255,255,.1); }}
   .brand-lockup {{ display:flex; align-items:center; gap:10px; text-decoration:none; min-width:0; }}
@@ -785,7 +784,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }}
   @media (prefers-color-scheme: dark) {{
     body {{ background:#0d1117; color:#c9d1d9; }}
-    .share-shell {{ background:#0b1220; }}
     .card {{ background:#161b22; border-color:#30363d; box-shadow:none; }}
     .card h3 {{ color:#dbe2ee; }}
     .card-head p, .desc {{ color:#8b949e; }}
@@ -1105,9 +1103,9 @@ def _validate_template_contract(params, panels):
     return {
         "code": 1,
         "message": "单标的画像页未满足模板契约，拒绝生成旧版 1 条线 + 少量数字卡页面",
-        "template": "examples/single-stock/spec.template.json",
+        "template": "online templates / single-stock contract",
         "issues": issues,
-        "hint": "请从 examples/single-stock/spec.template.json 复制 spec，保留 template=single-stock，并替换资产、package_id、subtitle、阅读摘要与日期口径。",
+        "hint": "请先通过 static_page.py templates/template 复用在线个股画像模板；若自行构建 spec，保留 template=single-stock，并补齐阅读摘要、px/chg/ret20/ret60/pe/pb/amt_yi、subtitle 与日期口径。",
     }
 
 

@@ -101,7 +101,7 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 - **写操作本脚本不暴露**，按权责分两类，记住边界即可：
   - 提交新模板 / 改写模板内容或元数据 / 上下线（draft↔published↔offline）：**仅 is_test**，走服务端
     `submitTemplate` / `updateTemplate` / `publishTemplate`（本 skill 不开放，避免误把普通页当模板发布）。
-  - 把**某个已有用户页面**转成公共模板（就地翻 `is_template`、链接去掉用户片段）：是**后台
+  - 把**某个已有用户页面**转成公共模板（就地翻 `is_template`，**page_id 与分享链接均不变**）：是**后台
     管理端（growthX）** 的动作，不在 skill 侧。
 - 本 skill 对公共模板只做 **「读取 + 复用」**：浏览 → 看详情拿 `download_url` → 直连 OSS 取 HTML →
   改成自己的内容 → 用 `upload` 发布成自己的页面（见下「公共模板：读取 / 复用」）。
@@ -283,6 +283,8 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `PAGE_ID_REQUIRED` | 下载：page_id / url 都没传 |
 | `PAGE_NOT_FOUND` / `FORBIDDEN` | 下载/替换/撤销：页面不存在 / 无权（非本人且非 is_test 互通） |
 | `NOT_ACTIVE` | 替换/下载：页面已撤销（替换需重新 upload；下载链接已失效） |
+
+> 若公开 URL 明明可访问，但 `download` / `update` 返回 `PAGE_NOT_FOUND`，先用 `template --page_id <page_id>` 检查是否已转成公共模板。若 `template_status=published`，普通静态页维护路径不再适用；需要保留原模板链接更新时，应走后台/admin `updateTemplate` 路径，不能用新 URL 代替。
 
 ## 安全与隔离
 

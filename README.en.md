@@ -101,6 +101,14 @@ Update for existing users:
 npx skills update quant-buddy-view -g -y
 ```
 
+Live-data pages also need `quant-buddy-skill` to validate formulas before registration. If your Agent reports that the companion skill is missing, let it install the bundle, or install / refresh the Quant Buddy skills bundle directly:
+
+```bash
+npx skills add pseudo-longinus/quant-buddy-skills -g --all
+# If already installed and you only need a refresh
+npx skills update pseudo-longinus/quant-buddy-skills -y
+```
+
 New to Agents and skills? Follow the [step-by-step illustrated tutorial](https://tcn8bvcbyokw.feishu.cn/wiki/E1zswck3oiiJjJkP07QcmSG3nle?from=from_copylink).
 
 ### 2. Configure The API Key
@@ -170,22 +178,13 @@ Reusable public templates live in the [QuantBuddy Template Market](https://www.q
 | Replace formula package | Swap the template author's data source for your own formula package |
 | Upload and publish | Generate your own public dashboard page |
 
-### Bundled Examples
+### No Bundled Offline Examples
 
-The `skills/quant-buddy-view/examples/` folder contains offline reference templates that show dashboard layouts and patterns. They are examples and starting points, not the official templates from the market.
-
-| Example | What it shows |
-|---|---|
-| `single-stock` | Single-stock snapshot: stat cards for latest price, change, 20d, 60d, PE, PB and turnover, plus a price chart |
-| `valuation-financial-profile` | Valuation check-up: PE/PB/PCF historical bands, financial trends, cash-flow quality and valuation attribution |
-| `index-anomaly` | Constituent anomaly board: anomaly ranking, up/down distribution and index sparkline |
-| `multi-factor-screener` | Multi-factor screener: theme pool, factor scores, TopN, backtest/rankIC, candlestick and formula audit |
-| `commodity-daily` | Commodity long/short daily: sector dominance, today's anomalies and top-name sparklines |
-| `bubble-watch` | Bubble-watch terminal: composite temperature gauge, multi-market bubble levels and macro backdrop |
+This repository no longer ships offline examples as a page starting point, and legacy demo HTML is not bundled into the skill. Fixed page types should start from the Template Market / online template API: your Agent selects a public live page, downloads the template HTML, validates and registers your own formula package, then replaces the copy and credentials before publishing your own link.
 
 ### Custom Pages
 
-Public templates and bundled examples are only starting points. If your use case needs a more specific question, layout or interaction, ask your Agent to build a custom dashboard and publish it with quant-buddy-view as the same kind of shareable, self-updating web link. Advanced notes live in `skills/quant-buddy-view/guides/bespoke-page.md`.
+Official public templates are the default starting point. If the Template Market does not have a matching page, ask your Agent to build a custom dashboard and publish it with quant-buddy-view as the same kind of shareable, self-updating web link. Custom pages should only own the page body; the header, footer, refresh button and share/poster modal come from `assets/share-shell/`. Advanced notes live in `skills/quant-buddy-view/guides/bespoke-page.md`.
 
 ## Page Maintenance
 
@@ -202,8 +201,8 @@ Public templates and bundled examples are only starting points. If your use case
 ## Runtime
 
 - **Python 3.8+**: the core pipeline for registering, building and publishing uses only the Python standard library; no `pip install` needed.
-- **Node.js 18+ (optional)**: only required for `scripts/verify_page.mjs` page verification.
-- **playwright (optional)**: required for the visual checks in `verify_page.mjs`; if missing, the visual check is skipped without affecting structural checks.
+- **Node.js 18+ (recommended)**: used by `scripts/verify_page.mjs` for pre-publish page verification.
+- **Playwright / Chrome / Edge (at least one recommended)**: `verify_page.mjs` tries Playwright first, then falls back to the system Chrome / Edge browser. Use `--require-browser` before publishing; a `static-only` result is not a complete browser verification.
 
 ## Billing
 

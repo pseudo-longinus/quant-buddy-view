@@ -1,6 +1,6 @@
 # QuantBuddy Share Shell
 
-公共落地页组件，供 `quant-buddy-view` 的 bespoke 模板和 `build_dashboard.py` 标准页在构建期内联使用。
+公共落地页组件，供 `quant-buddy-view` 的 bespoke 主体和 `build_dashboard.py` 标准页在构建期内联使用。它只提供固定页头、页尾、分享弹层和运行时行为，不是页面模板；Agent 不应把这里的片段复制成完整页面起点。
 
 ## 文件
 

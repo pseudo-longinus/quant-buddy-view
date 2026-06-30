@@ -3,15 +3,17 @@
 > 场景：`build_dashboard` 的通用 panel 满足不了——你要的是有版式设计感、自定义 SVG/交互的那种页面
 > （像商品期货研报、泡沫监测终端、个股画像卡）。**呈现自由发挥，但"拿数据"这层别再各写各的。**
 
-## 两条生产路，先选对
+## 三条生产路，先选对
 
 | 路 | 怎么做 | 何时用 |
 |---|---|---|
-| **快路** `build_dashboard` | 写 `spec.json`，声明式出 line/bar/number/table | 标准看板、要得急、长相无所谓 |
-| **手搓 bespoke**（本剧本） | Agent 直接写 HTML/CSS/SVG，数据层调**取数内核** | 要版式设计、自定义图形、快路做不出的样子 |
+| **在线模板** `static_page.py templates` / `template` | 先找公共模板，下载 HTML 后替换标的、文案和公式包凭证 | 个股画像、估值体检、异动榜、选股看板等固定页面形态 |
+| **快路** `build_dashboard` | 写 `spec.json`，声明式出 line/bar/number/table | 没有合适在线模板，但标准看板足够 |
+| **手搓 bespoke**（本剧本） | Agent 直接写 HTML/CSS/SVG，数据层调**取数内核** | 在线模板和快路都做不出的自定义版式/交互 |
 
 > 快路里那套"取数 + 清洗 + 容错"已经写对了一份（内联在生成的 HTML 里）。手搓页够不着它，
 > 所以单独抽了一份同口径的 **取数内核** `assets/data-kernel.js` 给手搓页用——**别再自己抄 `fetch`/解包逻辑**。
+> 手搓只负责主体内容。公共 shell 不是页面模板；不要复制 demo 样式或另起一套页头、页尾、二维码、刷新按钮。
 
 ## 核心原则：分层
 
@@ -20,16 +22,24 @@
 - **呈现层（完全自由）**：页面长什么样、用什么图形、配色版式 —— 你随意，内核不管。
 - **环境配置（保持灵活）**：取数地址 `endpoint` 由你按环境填（测试/正式），内核不写死。
 
-## 五步骨架
+## 五步接入
 
-完整可跑骨架见 [assets/example.html](../assets/example.html)。要点：
+1. 先查在线模板；没有合适模板时，才写 bespoke 主体 HTML。
+2. 主体 HTML 放入 `QB_SHARED_*` 占位，并调用 `QBShareShell.init({ onRefresh: load, getPosterData })`。
+3. 填 `CONFIG = { endpoint, package_id, signature }`；地址按测试/正式环境填写。
+4. 用 `QB.query(CONFIG)` 取数，再用 `QB.series` / `QB.lastValue` / `QB.topValues` 解包。
+5. 用 `compile_bespoke_page.py` 编译发布，脚本会内联 share shell、logo、qr-mini 和 data-kernel。
 
-```
-1) 接 shell  模板放入 `QB_SHARED_*` 占位，调用 `QBShareShell.init({ onRefresh: load, getPosterData })`
-2) 填 CONFIG  { endpoint, package_id, signature }；地址按环境填
-3) 拿数据    const out = await QB.query(CONFIG);
-4) 解包清洗  用 QB.* 取，拿到的就是干净数据（缺口/假 0 已剔除、无效值给 null）
-5) 编译发布  `compile_bespoke_page.py` 会内联 share shell、logo、qr-mini 和 data-kernel
+```js
+const CONFIG = { endpoint, package_id, signature };
+
+async function load() {
+  const out = await QB.query(CONFIG);
+  const px = QB.series(out, "px", { dropZero: true });
+  const chg = QB.lastValue(out, "chg");
+  const leaders = QB.topValues(out, "GAIN").slice(0, 5);
+  return { px, chg, leaders };
+}
 ```
 
 > 发布是自包含 HTML，所以不要手工保留 `<script src>` 外链。用 `python scripts/compile_bespoke_page.py @params.json` 编译，编译器负责内联公共组件和运行时资产。

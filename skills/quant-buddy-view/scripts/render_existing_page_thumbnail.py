@@ -39,11 +39,14 @@ _SCRIPT_CONFIG_RE = re.compile(r"<script>\s*const\s+CONFIG\s*=\s*\{", re.I)
 _CFGS_RE = re.compile(r"\b(?:var|let|const)\s+CFGS\s*=", re.I)
 _CONFIG_ASSIGN_RE = re.compile(r"\b(?:var|let|const)\s+CONFIG\s*=", re.I)
 _LOAD_ALL_CALL_RE = re.compile(r"\bloadAll\s*\(\s*\)\s*;", re.I)
+_LOAD_CALL_RE = re.compile(r"\bload\s*\(\s*\)\s*;", re.I)
 _MAIN_CALL_RE = re.compile(r"\bmain\s*\(\s*\)\s*;", re.I)
 _OBJECT_RE = re.compile(r"\{[^{}]{0,4000}\}", re.S)
 _PACKAGE_RE = re.compile(r"(?:[\"']?package_id[\"']?|[\"']?packageId[\"']?)\s*:\s*[\"']([^\"']+)[\"']")
 _SIGNATURE_RE = re.compile(r"(?:[\"']?signature[\"']?)\s*:\s*[\"']([^\"']+)[\"']")
 _ENDPOINT_RE = re.compile(r"(?:[\"']?endpoint[\"']?)\s*:\s*[\"']([^\"']+)[\"']")
+_ENDPOINT_REF_RE = re.compile(r"(?:[\"']?endpoint[\"']?)\s*:\s*([A-Za-z_$][\w$]*)")
+_CONST_STRING_RE = re.compile(r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[\"']([^\"']+)[\"']")
 
 
 def _abs(path):
@@ -83,6 +86,7 @@ def _read_html(params):
 def _extract_credentials(html):
     endpoint = _ENDPOINT_RE.search(html or "")
     endpoint_value = endpoint.group(1) if endpoint else ""
+    const_strings = dict(_CONST_STRING_RE.findall(html or ""))
     creds = []
     seen = set()
 
@@ -95,6 +99,8 @@ def _extract_credentials(html):
         if not (pkg and sig):
             continue
         ep = _ENDPOINT_RE.search(text)
+        ep_ref = _ENDPOINT_REF_RE.search(text)
+        ep_value = ep.group(1) if ep else const_strings.get(ep_ref.group(1), endpoint_value) if ep_ref else endpoint_value
         key = (pkg.group(1), sig.group(1))
         if key in seen:
             continue
@@ -102,7 +108,7 @@ def _extract_credentials(html):
         creds.append({
             "package_id": pkg.group(1),
             "signature": sig.group(1),
-            "endpoint": ep.group(1) if ep else endpoint_value,
+            "endpoint": ep_value,
         })
 
     for pkg in _PACKAGE_RE.finditer(html or ""):
@@ -182,14 +188,18 @@ def _offline_patch_js(outputs):
     return (
         "/* qb-cover-offline-data: injected before page data boot. */\n"
         f"window.__QB_COVER_OUTPUTS__ = {data};\n"
+        "window.__QB_COVER__ = window.__QB_COVER__ || {};\n"
+        "window.__QB_COVER__.outputs = window.__QB_COVER_OUTPUTS__;\n"
         "(function(){\n"
         "  function applyCoverData(){\n"
         "    try {\n"
         "      var api = window.QB || (typeof QB !== 'undefined' ? QB : null);\n"
-        "      if (!api) return false;\n"
         "      var query = async function(){ return window.__QB_COVER_OUTPUTS__ || {}; };\n"
-        "      api.query = query;\n"
-        "      api.queryFormulaPackage = query;\n"
+        "      window.queryPackage = query;\n"
+        "      if (api) {\n"
+        "        api.query = query;\n"
+        "        api.queryFormulaPackage = query;\n"
+        "      }\n"
         "      window.__QB_COVER_PATCHED__ = true;\n"
         "      return true;\n"
         "    } catch (e) {\n"
@@ -208,7 +218,7 @@ def _offline_patch_js(outputs):
 
 
 def _insert_patch(html, patch_js):
-    for pattern in (_CFGS_RE, _CONFIG_ASSIGN_RE, _LOAD_ALL_CALL_RE, _MAIN_CALL_RE):
+    for pattern in (_LOAD_ALL_CALL_RE, _LOAD_CALL_RE, _MAIN_CALL_RE, _CFGS_RE, _CONFIG_ASSIGN_RE):
         m = pattern.search(html)
         if m:
             if _is_inside_script(html, m.start()):

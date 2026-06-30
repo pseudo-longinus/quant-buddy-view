@@ -93,7 +93,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 ### 模板契约校验
 
-单标的画像页必须从 `examples/single-stock/spec.template.json` 起步，并保留 `template: "single-stock"`。
+单标的画像页必须使用在线模板接口复用合适模板，或自行提供满足契约的 spec，并保留 `template: "single-stock"`。
 
 如果标题或 `page_type` 表明是“个股画像”，但 spec 仍是旧版 `1 条价格线 + 少量数字卡`，`build_dashboard` 会返回 `code:1`，并提示补齐：
 
