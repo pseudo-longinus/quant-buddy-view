@@ -5,25 +5,30 @@ r"""
 对接接口文档：见 skill_server docs「静态页托管」对外接口文档。
 工具说明文档：tools/static_page.md
 
-八个子命令（全部需 API Key）：
+十二个子命令（全部需 API Key）：
     upload     上传 HTML，返回 page_id + 公开 url
     update     替换已有页面内容（URL / page_id 不变，已分享链接照常可用）
     download   取回已发布页面的 HTML（再编辑用）：服务端鉴权返回 url，脚本直连 OSS 下载
     list       列出我的页面
     revoke     撤销页面（删对象 + 标记失效，链接立即 404）
     thumbnail  给页面设置 / 替换缩略图（纯展示封面，直传 PNG/JPG，独立于 HTML 上传）
-    templates  列出公共模板（全体登录用户可见 published；is_test 可见全部状态）
-    template   公共模板详情：标题/说明/缩略图/关联公式包 + 公开下载链接（拿来克隆复用）
+    tags       查询 upload/update 可用标签（scene 场景 / paradigm 范式；recommend 仅后台维护）
+    publish_community    将自己的 active 普通页发布到社区（内部受控打 recommend:社区 标签）
+    unpublish_community  取消社区发布（移除固定 recommend:社区 标签）
+    templates  列出官方精选页面（后台 recommend:官方精选 标签口径）
+    template   官方精选详情：标题/说明/缩略图/关联公式包 + 公开下载链接（拿来克隆复用）
+    update_template  官方精选/旧模板安全改写：metadata 复查后走 updateTemplate
 
 权限 / 权责（is_test 内部互通）：归属由 api_key（Bearer）认定。
   · 自己的页面（upload/update/download/list/revoke/thumbnail）：默认只能操作本人页面；
     is_test=true 的用户可 download / update / thumbnail 其他 is_test 用户的页面、并用 list 的
     scope=test_all 列出全部 test 用户页面。对普通（非 is_test）用户的页面一律 FORBIDDEN。
-  · 公共模板（templates/template）：浏览 / 复制对**全体登录用户**开放，但普通用户只看得到
-    已发布（published）的模板；is_test 用户可见 draft/offline 全部状态。
-  · 模板的「提交 / 改写 / 上下线 / 把某个用户页转成公共模板」属于写操作，**本脚本不暴露**：
-    提交/改写/上下线仅 is_test（走服务端 submit/update/publishTemplate）；把已有页面转公共模板
-    是后台（growthX 管理端）动作。本 skill 侧只做「读取 + 复用」公共模板。
+  · 官方精选（templates/template）：浏览 / 复制对**全体登录用户**开放，发现口径是后台
+    推荐标签 recommend:官方精选；不再要求 is_template=true 或 template_status=published。
+  · 官方精选标签、旧模板元数据、上下线、删除、把某个用户页转成旧公共模板都属于后台写操作，
+    本 skill 侧默认只做「读取 + 复用」官方精选。
+  · update_template 只作为已转 published template / 官方精选页需要保留原链接时的
+    安全维护 helper；写回前必须复查 metadata，避免覆盖他人更新。
 
 参数传递（规避 PowerShell GBK 截断）：优先级 SP_PARAMS 环境变量 > @file > 命令行 JSON > stdin
 
@@ -34,9 +39,18 @@ upload 参数：
       "title":       "可选，不传则服务端从 <title> 抽取",
       "description": "可选，页面说明（≤1000 字，列表/详情展示用）",
       "ttl_days":    "可选，默认 365",
-      "thumbnail_file": "可选，本地 PNG/JPG；HTML 上传成功后再设封面，失败只返回 warning"
+      "thumbnail_file": "可选，本地 PNG/JPG；HTML 上传成功后再设封面，失败只返回 warning",
+      "scene_tags":    "可选，场景标签（数组/逗号串/单值）；只能选已有，查无报 SCENE_TAG_NOT_FOUND",
+      "paradigm_tags": "可选，范式标签（数组/逗号串/单值）；可选已有或现写新名自动入池(source=user)",
+      "verify_cover_card": "可选 true；上传前验收默认页和 ?cover=1 宽宝活卡，失败不上传",
+      "cover_card_url": "可选，模板库 live iframe URL",
+      "has_cover_card": "可选，模板库是否展示 live card"
     }
-update 参数：page_id 必填；title / description / ttl_days 仅在传了才改（description 传空串=清空，不传保留原值）。
+    标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
+    先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
+update 参数：page_id 必填；title / description / ttl_days / scene_tags / paradigm_tags /
+    cover_card_url / has_cover_card / verify_cover_card 仅在传了才改
+    （description 传空串=清空，不传保留原值；标签字段传 [] 清空、不传保留原标签）。
     可同样传 thumbnail_file，HTML 更新成功后再替换封面；缩略图失败不回滚 HTML。
 download 参数：
     {
@@ -52,7 +66,9 @@ thumbnail 参数：
     }
     直传图片到 OSS（pages/thumbnails/{page_id}.png，public-read），仅回写页面的 thumbnail_url；
     不动 HTML、不占活跃页配额。缩略图只是「列表/详情/模板墙」的展示封面，纯展示用。
-templates 参数：{ "category":可选, "status":可选(仅 is_test 生效), "page":1, "page_size":20 }
+tags 参数：{ "tag_type":可选("scene" 或 "paradigm") }；不传则同时返回 scene_tags / paradigm_tags。
+publish_community / unpublish_community 参数：{ "page_id":"page_xxx" }；仅 owner 可操作自己的 active 普通页。
+templates 参数：{ "category":可选, "status":可选, "scene_tag_id":可选, "paradigm_tag_id":可选, "recommend_tag_id":可选, "page":1, "page_size":20 }；默认已限定 recommend:官方精选，recommend_tag_id 是额外叠加筛选。
 template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选一）
 
 用法示例：
@@ -63,8 +79,12 @@ template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选
     python scripts/static_page.py list '{"scope":"test_all"}'   # 仅 is_test：列出全部 test 用户页面
     python scripts/static_page.py revoke '{"page_id":"page_xxx"}'
     python scripts/static_page.py thumbnail '{"page_id":"page_xxx","image_file":"output/pages/cover.png"}'
-    python scripts/static_page.py templates '{"page":1,"page_size":20}'        # 浏览公共模板
-    python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'          # 模板详情/拿下载链接克隆
+    python scripts/static_page.py tags '{}'                                      # 查询可用场景/范式标签
+    python scripts/static_page.py tags '{"tag_type":"scene"}'                 # 只查场景标签
+    python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'   # 发布到社区（全员可发现）
+    python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}' # 取消社区发布
+    python scripts/static_page.py templates '{"page":1,"page_size":20}'        # 浏览官方精选
+    python scripts/static_page.py template  '{"template_id":"page_xxx"}'        # 官方精选详情/拿下载链接克隆
 
 输出：结果打印到 stdout（UTF-8），并写一份到临时目录 sp_out.txt。
 """
@@ -74,7 +94,9 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse as _up
 import urllib.request
@@ -89,8 +111,12 @@ _PATH = {
     "list":      "/skill/listStaticPages",
     "revoke":    "/skill/revokeStaticPage",
     "thumbnail": "/skill/setPageThumbnail",
+    "tags":      "/skill/listPageTags",
+    "publish_community":   "/skill/publishStaticPageToCommunity",
+    "unpublish_community": "/skill/unpublishStaticPageFromCommunity",
     "templates": "/skill/listTemplates",
     "template":  "/skill/getTemplate",
+    "update_template": "/skill/updateTemplate",
 }
 
 _UPLOAD_TIMEOUT = 120
@@ -106,6 +132,76 @@ _PACKAGE_ISSUE_RE = re.compile(
     r"formula[_ -]?package|package_id|signature|公式包|签名|查无|失效|无效|not[_ -]?found|invalid",
     re.I,
 )
+
+
+def _with_cover_query(url):
+    if not url:
+        return ""
+    url = str(url)
+    if "cover=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return url + sep + "cover=1"
+
+
+def _attach_cover_fields(out, *, base_url=None, params=None):
+    """Normalize cover-card fields in service responses without hiding raw data."""
+    if not isinstance(out, dict):
+        return out
+    params = params or {}
+    explicit_url = params.get("cover_card_url")
+    explicit_has = params.get("has_cover_card")
+    if explicit_url and not out.get("cover_card_url"):
+        out["cover_card_url"] = explicit_url
+    elif out.get("has_cover_card") and not out.get("cover_card_url"):
+        out["cover_card_url"] = _with_cover_query(base_url or out.get("url") or out.get("public_url") or out.get("download_url"))
+    elif params.get("verify_cover_card") and base_url and not out.get("cover_card_url"):
+        out["cover_card_url"] = _with_cover_query(base_url)
+
+    if explicit_has is not None:
+        out["has_cover_card"] = bool(explicit_has)
+    elif out.get("cover_card_url"):
+        out["has_cover_card"] = True
+    else:
+        out.setdefault("has_cover_card", False)
+    return out
+
+
+def _record_url(record):
+    if not isinstance(record, dict):
+        return ""
+    return record.get("cover_card_url") or record.get("download_url") or record.get("public_url") or record.get("url") or ""
+
+
+def _normalize_cover_response(out):
+    if not isinstance(out, dict):
+        return out
+    _attach_cover_fields(out, base_url=_record_url(out))
+    data = out.get("data")
+    if isinstance(data, dict):
+        _attach_cover_fields(data, base_url=_record_url(data))
+        items = data.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    _attach_cover_fields(item, base_url=_record_url(item))
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                _attach_cover_fields(item, base_url=_record_url(item))
+    return out
+
+
+def _template_record(out):
+    if not isinstance(out, dict):
+        return {}
+    data = out.get("data")
+    if isinstance(data, dict):
+        for key in ("template", "item", "page"):
+            if isinstance(data.get(key), dict):
+                return data[key]
+        return data
+    return out
 
 _SHELL_THEME_VARS = {
     "--qb-shell-bg",
@@ -389,6 +485,63 @@ def _attach_thumbnail_if_requested(out, params):
     return out
 
 
+def _run_verify(target, *, cover_card=False):
+    script = os.path.join(C.SKILL_ROOT, "scripts", "verify_page.mjs")
+    args = ["node", script, target, "--require-browser"]
+    if cover_card:
+        args.append("--cover-card")
+    cp = subprocess.run(
+        args,
+        cwd=C.SKILL_ROOT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=90,
+    )
+    raw = (cp.stdout or cp.stderr or "").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {"code": cp.returncode, "message": raw[-1000:] or "verify_page 无输出"}
+    data["_exit_code"] = cp.returncode
+    return data
+
+
+def _verify_cover_card_html(html):
+    with tempfile.TemporaryDirectory(prefix="qb_cover_verify_") as td:
+        path = os.path.join(td, "page.html")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(html)
+        default_result = _run_verify(path, cover_card=False)
+        if default_result.get("code") != 0:
+            return {
+                "ok": False,
+                "stage": "default",
+                "default": default_result,
+                "message": "默认页面浏览器验收未通过",
+            }
+        cover_result = _run_verify(path + "?cover=1", cover_card=True)
+        if cover_result.get("code") != 0:
+            return {
+                "ok": False,
+                "stage": "cover",
+                "default": default_result,
+                "cover": cover_result,
+                "message": "宽宝活卡浏览器验收未通过",
+            }
+        return {"ok": True, "default": default_result, "cover": cover_result}
+
+
+def _maybe_verify_cover_card(html, params):
+    if not params.get("verify_cover_card"):
+        return None
+    result = _verify_cover_card_html(html)
+    if not result.get("ok"):
+        return result
+    return result
+
+
 def _has_shared_header(html):
     return bool(re.search(r"<header\b[^>]*\bdata-qb-share-shell(?:\s|=|>)", html, flags=re.I))
 
@@ -633,15 +786,23 @@ def cmd_upload(params):
     head = html.lstrip()[:64].lower()
     if not (head.startswith("<!doctype html") or head.startswith("<html")):
         return {"code": 1, "message": "内容不是 HTML 文档（需以 <!doctype html> 或 <html> 开头）"}
+    cover_verification = _maybe_verify_cover_card(html, params)
+    if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
+        return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
 
     body = {"html": html}
-    for k in ("title", "description", "ttl_days"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
         if params.get(k) is not None:
             body[k] = params[k]
+    if cover_verification and body.get("has_cover_card") is None:
+        body["has_cover_card"] = True
     out = C.http_json("POST", C.api_url(endpoint, _PATH["upload"]),
                       C.headers(api_key), body, timeout=_UPLOAD_TIMEOUT)
     if isinstance(out, dict):
         out["share_shell"] = shell_check
+        if cover_verification:
+            out["cover_verification"] = cover_verification
+            _attach_cover_fields(out, base_url=out.get("url"), params=params)
         if out.get("code") == 0 or _server_mentions_package_issue(out):
             out["_package_runtime_check"] = _package_runtime_check(
                 endpoint,
@@ -673,15 +834,23 @@ def cmd_update(params):
     head = html.lstrip()[:64].lower()
     if not (head.startswith("<!doctype html") or head.startswith("<html")):
         return {"code": 1, "message": "内容不是 HTML 文档（需以 <!doctype html> 或 <html> 开头）"}
+    cover_verification = _maybe_verify_cover_card(html, params)
+    if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
+        return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
 
     body = {"page_id": params["page_id"], "html": html}
-    for k in ("title", "description", "ttl_days"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
         if params.get(k) is not None:
             body[k] = params[k]
+    if cover_verification and body.get("has_cover_card") is None:
+        body["has_cover_card"] = True
     out = C.http_json("POST", C.api_url(endpoint, _PATH["update"]),
                       C.headers(api_key), body, timeout=_UPLOAD_TIMEOUT)
     if isinstance(out, dict):
         out["share_shell"] = shell_check
+        if cover_verification:
+            out["cover_verification"] = cover_verification
+            _attach_cover_fields(out, base_url=out.get("url") or params.get("url"), params=params)
         if out.get("code") == 0 or _server_mentions_package_issue(out):
             out["_package_runtime_check"] = _package_runtime_check(
                 endpoint,
@@ -739,8 +908,15 @@ def cmd_download(params):
         "is_live": bool(meta.get("is_live")),
         "package_ids": meta.get("package_ids") or [],
         "status": meta.get("status"),
+        "community_status": meta.get("community_status") or "none",
+        "scene_tags": meta.get("scene_tags") or [],
+        "paradigm_tags": meta.get("paradigm_tags") or [],
+        "recommend_tags": meta.get("recommend_tags") or [],
         "expires_at": meta.get("expires_at"),
+        "cover_card_url": meta.get("cover_card_url") or "",
+        "has_cover_card": bool(meta.get("has_cover_card")),
     }
+    _attach_cover_fields(out, base_url=out.get("url"))
 
     # 4) 落盘或回传 html
     save = params.get("save")
@@ -765,7 +941,7 @@ def cmd_list(params):
     if params.get("all"):
         qs_pairs.append(("all", params["all"]))
     url = C.api_url(endpoint, _PATH["list"]) + "?" + _up.urlencode(qs_pairs)
-    return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+    return _normalize_cover_response(C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT))
 
 
 def cmd_revoke(params):
@@ -843,15 +1019,46 @@ def cmd_thumbnail(params):
                            "file", img_bytes, file_name, content_type)
 
 
+def cmd_tags(params):
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    qs_pairs = []
+    if params.get("tag_type"):
+        qs_pairs.append(("tag_type", params["tag_type"]))
+    url = C.api_url(endpoint, _PATH["tags"])
+    if qs_pairs:
+        url += "?" + _up.urlencode(qs_pairs)
+    return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+
+
+def _cmd_community(params, path_key, label):
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    if not params.get("page_id"):
+        return {"code": 1, "message": f"{label} 需要 page_id"}
+    body = {"page_id": params["page_id"]}
+    return C.http_json("POST", C.api_url(endpoint, _PATH[path_key]),
+                       C.headers(api_key), body, timeout=_DEFAULT_TIMEOUT)
+
+
+def cmd_publish_community(params):
+    return _cmd_community(params, "publish_community", "publish_community")
+
+
+def cmd_unpublish_community(params):
+    return _cmd_community(params, "unpublish_community", "unpublish_community")
+
+
 def cmd_templates(params):
     cfg = C.load_config_require_key()
     endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
     qs_pairs = [("page", params.get("page", 1)), ("page_size", params.get("page_size", 20))]
-    for k in ("category", "status"):  # status 仅 is_test 生效（普通用户恒为 published）
+    # 服务端默认限定 recommend:官方精选；*_tag_id / category / status 只做叠加筛选。
+    for k in ("category", "status", "scene_tag_id", "paradigm_tag_id", "recommend_tag_id"):
         if params.get(k):
             qs_pairs.append((k, params[k]))
     url = C.api_url(endpoint, _PATH["templates"]) + "?" + _up.urlencode(qs_pairs)
-    return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+    return _normalize_cover_response(C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT))
 
 
 def cmd_template(params):
@@ -862,7 +1069,92 @@ def cmd_template(params):
         return {"code": 1, "message": "template 需要 template_id 或 page_id"}
     key = "template_id" if params.get("template_id") else "page_id"
     url = C.api_url(endpoint, _PATH["template"]) + "?" + _up.urlencode([(key, tid)])
-    return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+    return _normalize_cover_response(C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT))
+
+
+def _expected_template_metadata(params):
+    expected = params.get("expected_metadata") if isinstance(params.get("expected_metadata"), dict) else {}
+    for key in ("download_url", "title", "description", "category", "size", "sha256", "updated_at"):
+        flag = "expected_" + key
+        if flag in params:
+            expected[key] = params[flag]
+    return expected
+
+
+def _metadata_changes(current, expected):
+    changes = []
+    for key, old in expected.items():
+        if key not in current:
+            continue
+        now = current.get(key)
+        if str(now or "") != str(old or ""):
+            changes.append({"field": key, "expected": old, "current": now})
+    return changes
+
+
+def cmd_update_template(params):
+    """Safely update a published template without creating a replacement URL."""
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    tid = params.get("template_id") or params.get("page_id")
+    if not tid:
+        return {"code": 1, "message": "update_template 需要 template_id 或 page_id"}
+
+    before = cmd_template({"template_id": tid} if params.get("template_id") else {"page_id": tid})
+    if not (isinstance(before, dict) and before.get("code") == 0):
+        return {"code": 1, "message": "写回前读取模板失败", "template": before}
+    current = _template_record(before)
+    expected = _expected_template_metadata(params)
+    if expected:
+        changes = _metadata_changes(current, expected)
+        if changes:
+            return {
+                "code": 1,
+                "message": "模板 metadata 已变化，停止写回以避免覆盖他人更新",
+                "changes": changes,
+                "template": before,
+            }
+
+    body = {"template_id": current.get("template_id") or current.get("page_id") or tid}
+    html = None
+    if params.get("html") or params.get("html_file"):
+        html, err = _read_html(params)
+        if err:
+            return err
+        try:
+            html, shell_check = _ensure_share_shell(html, params)
+        except ValueError as e:
+            return {"code": 1, "message": str(e)}
+        cover_verification = _maybe_verify_cover_card(html, params)
+        if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
+            return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
+        body["html"] = html
+    else:
+        shell_check = None
+        cover_verification = None
+
+    for key in ("title", "description", "category", "cover_card_url", "has_cover_card"):
+        if params.get(key) is not None:
+            body[key] = params[key]
+    if cover_verification and body.get("has_cover_card") is None:
+        body["has_cover_card"] = True
+    if params.get("verify_cover_card") and not body.get("cover_card_url"):
+        public_url = current.get("download_url") or current.get("public_url") or current.get("url")
+        if public_url:
+            body["cover_card_url"] = _with_cover_query(public_url)
+
+    out = C.http_json("POST", C.api_url(endpoint, _PATH["update_template"]),
+                      C.headers(api_key), body, timeout=_UPLOAD_TIMEOUT)
+    after = cmd_template({"template_id": body["template_id"]})
+    if isinstance(out, dict):
+        out["preflight_template"] = before
+        out["postflight_template"] = after
+        if shell_check:
+            out["share_shell"] = shell_check
+        if cover_verification:
+            out["cover_verification"] = cover_verification
+            _attach_cover_fields(out, base_url=body.get("cover_card_url") or current.get("download_url"), params=body)
+    return _normalize_cover_response(out)
 
 
 _COMMANDS = {
@@ -872,8 +1164,12 @@ _COMMANDS = {
     "list": cmd_list,
     "revoke": cmd_revoke,
     "thumbnail": cmd_thumbnail,
+    "tags": cmd_tags,
+    "publish_community": cmd_publish_community,
+    "unpublish_community": cmd_unpublish_community,
     "templates": cmd_templates,
     "template": cmd_template,
+    "update_template": cmd_update_template,
 }
 
 

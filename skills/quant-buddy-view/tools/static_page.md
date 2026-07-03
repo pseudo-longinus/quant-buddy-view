@@ -14,8 +14,12 @@
 | 列表 | `GET /skill/listStaticPages?page=&page_size=&scope=` |
 | 撤销 | `POST /skill/revokeStaticPage` |
 | 缩略图 | `POST /skill/setPageThumbnail` （multipart：`file`=PNG/JPG + `page_id`） |
-| 模板列表 | `GET /skill/listTemplates?category=&status=&page=&page_size=` |
+| 标签列表 | `GET /skill/listPageTags?tag_type=`（`scene` / `paradigm`；不传返回两类） |
+| 发布到社区 | `POST /skill/publishStaticPageToCommunity` |
+| 取消社区发布 | `POST /skill/unpublishStaticPageFromCommunity` |
+| 模板列表 | `GET /skill/listTemplates?category=&status=&scene_tag_id=&paradigm_tag_id=&recommend_tag_id=&page=&page_size=` |
 | 模板详情 | `GET /skill/getTemplate?template_id=`（或 `page_id=`） |
+| 模板改写 | `POST /skill/updateTemplate`（is_test/admin；脚本命令 `update_template` 带并发复查） |
 
 ## 调用方式
 
@@ -45,9 +49,20 @@ python scripts/static_page.py revoke '{"page_id":"page_xxx"}'
 # 给页面设置/替换缩略图（纯展示封面，直传 PNG/JPG）
 python scripts/static_page.py thumbnail '{"page_id":"page_xxx","image_file":"output/pages/cover.png"}'
 
-# 浏览公共模板 / 看某个模板的详情（拿下载链接克隆复用）
+# 如需打标签，可查询当前可用标签（场景/范式）
+python scripts/static_page.py tags '{}'
+python scripts/static_page.py tags '{"tag_type":"scene"}'
+
+# 发布到社区 / 取消社区发布（仅 owner 可操作自己的 active 普通页）
+python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'
+python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
+
+# 浏览官方精选 / 看某个精选页面详情（拿下载链接克隆复用）
 python scripts/static_page.py templates '{"page":1,"page_size":20}'
 python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
+
+# 已转 published template 的页面：保持原 page_id/public_url 安全改写
+python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file":"output/pages/x.html","verify_cover_card":true,"expected_metadata":{"download_url":"https://..."}}'
 ```
 
 ## 公共页头页尾门禁
@@ -65,6 +80,15 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 
 返回 JSON 会带 `share_shell` 字段，说明是否检查以及自动补了哪些内容。默认必须开启；仅内部调试可传 `"ensure_share_shell": false` 跳过。
 
+## 宽宝活卡发布门禁
+
+`upload` / `update` 可传 `verify_cover_card:true`。脚本会先把最终 HTML 写入临时文件并执行两次浏览器验收：
+
+- 默认页：`verify_page.mjs <html> --require-browser`
+- 活卡页：`verify_page.mjs <html>?cover=1 --require-browser --cover-card`
+
+任一失败都会返回 `code:1`，不会上传或覆盖线上页面。通过后，脚本会在请求体中带上 `has_cover_card:true`；如果服务端响应没有 `cover_card_url`，脚本会在返回 JSON 中补出建议值 `<url>?cover=1`。
+
 ## 下载 / 取回 HTML 再编辑（`download`）
 
 把一份**已发布**的页面拉回本地再编辑，然后 `update` 同一个 `page_id` 覆盖。
@@ -78,13 +102,13 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 | `url` | string | 二选一 | 页面公开链接（会自动从中解析 page_id） |
 | `save` | string | ❌ | 落盘路径（相对则相对 skill 根）；不传则把 `html` 放进返回 JSON |
 
-返回（save 时）：`{ code:0, page_id, owner, title, description, url, size, sha256, sha256_match, saved_to }`
+返回（save 时）：`{ code:0, page_id, owner, title, description, url, cover_card_url, has_cover_card, size, sha256, sha256_match, saved_to }`
 
 ## 权限 / 权责（is_test 内部互通）
 
 归属由 `api_key`（Bearer）认定。两类对象、两套口径：
 
-**A. 自己的页面**（upload / update / download / list / revoke / **thumbnail**）
+**A. 自己的页面**（upload / update / download / list / revoke / **thumbnail** / publish_community / unpublish_community）
 
 - 默认：所有操作**只针对本人页面**。
 - `is_test=true` 的用户（内部）可以：
@@ -92,19 +116,18 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
   - `list` 传 `scope=test_all`（或 `all=1`）列出**全部 is_test 用户**的页面（items 带 `owner`）。
 - 对**普通（非 is_test）用户**的页面：跨用户访问一律 `FORBIDDEN`。
 - `revoke`（撤销）**不开放**跨用户，始终仅本人。
+- `publish_community` / `unpublish_community` 是用户主动公开/取消公开动作，也**不开放** is_test 跨用户互通：只能由页面 owner 操作自己的 active 普通页。
 
-**B. 公共模板**（templates / template）—— 全员可读、写操作受限
+**B. 官方精选 / 公共模板**（templates / template）—— 全员可读、写操作受限
 
 - **浏览 / 复制**对**全体登录用户**开放：`templates` 列表 + `template` 详情都凭 api_key 即可读。
-  - 普通用户只看得到 **published**（已发布）的模板；`status` 过滤对普通用户无效（恒为 published）。
-  - `is_test` 用户可见 **draft / offline / published 全部状态**，`status` 过滤生效。
+  - 发现口径统一为后台推荐标签 `recommend:官方精选`：只要页面带该标签就会进入列表/详情。
+  - 不再要求 `is_template=true` 或 `template_status=published`；这些字段只是历史兼容/后台管理字段，返回时用于展示真实状态。
 - **写操作本脚本不暴露**，按权责分两类，记住边界即可：
-  - 提交新模板 / 改写模板内容或元数据 / 上下线（draft↔published↔offline）：**仅 is_test**，走服务端
-    `submitTemplate` / `updateTemplate` / `publishTemplate`（本 skill 不开放，避免误把普通页当模板发布）。
-  - 把**某个已有用户页面**转成公共模板（就地翻 `is_template`，**page_id 与分享链接均不变**）：是**后台
-    管理端（growthX）** 的动作，不在 skill 侧。
-- 本 skill 对公共模板只做 **「读取 + 复用」**：浏览 → 看详情拿 `download_url` → 直连 OSS 取 HTML →
-  改成自己的内容 → 用 `upload` 发布成自己的页面（见下「公共模板：读取 / 复用」）。
+  - 官方精选标签、旧模板元数据、上下线、删除等由后台管理端（growthX）维护；本 skill 不开放任意 `recommend` 标签写入。
+  - 把**某个已有用户页面**转成旧公共模板（就地翻 `is_template`，**page_id 与分享链接均不变**）：仍是后台管理端动作，不在 skill 侧。
+- 本 skill 对官方精选只做 **「读取 + 复用」**：浏览 → 看详情拿 `download_url` → 直连 OSS 取 HTML →
+  改成自己的内容 → 用 `upload` 发布成自己的页面（见下「官方精选：读取 / 复用」）。
 
 ```bash
 # 仅 is_test：列出全部 test 用户的页面
@@ -161,20 +184,25 @@ python scripts/render_existing_page_thumbnail.py "{\"url\":\"https://pages.quant
 - 成功时会把 `thumbnail_url` 合并回 upload/update 的返回值。
 - `thumbnail_file` 仍是 PNG/JPG、≤2MB，相对路径按 skill 根目录解析。
 
-## 公共模板：读取 / 复用（`templates` / `template`）
+## 官方精选：读取 / 复用（`templates` / `template`）
 
-公共模板 = 平台沉淀的、可被全员浏览复用的优质页面（底层就是 `is_template:true` 的静态页）。
-本 skill 侧的用法是「照着现成模板做一份自己的页」。
+官方精选 = 后台打了推荐标签 `recommend:官方精选` 的优质页面。接口沿用 `templates` / `template` 的历史命名，但发现口径已经是纯标签：不再要求 `is_template:true` 或 `template_status:published`。
+本 skill 侧的用法是「照着现成精选页做一份自己的页」。
 
-**1) 浏览**：`templates` 列出模板（普通用户只见 published）
+**1) 浏览**：`templates` 列出官方精选页面
 
 ```bash
 python scripts/static_page.py templates '{"page":1,"page_size":20}'
 python scripts/static_page.py templates '{"category":"个股画像"}'
+# 也可按标签筛选（id 来自后台标签表 / 详情回显）
+python scripts/static_page.py templates '{"scene_tag_id":"tag_xxx"}'
 ```
 
-返回 items 每条含：`template_id` / `title` / `description` / `thumbnail_url` / `category` /
-`template_status` / `download_url` 等（具体以服务端为准）。
+返回 items 每条含：`template_id`（兼容字段，等同 `page_id`）/ `page_id` / `title` / `description` / `thumbnail_url` / `category` /
+`cover_card_url` / `has_cover_card` / `is_template` / `template_status` / `download_url` /
+`scene_tags` / `paradigm_tags` / `recommend_tags` 等（具体以服务端为准）。
+默认已经限定 `recommend:官方精选`；可传 `scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 作为叠加标签过滤。若服务端只返回
+`has_cover_card:true`，脚本会用 `download_url/public_url/url + ?cover=1` 补出 `cover_card_url`。
 
 **2) 看详情 / 拿下载链接**：`template`
 
@@ -182,8 +210,9 @@ python scripts/static_page.py templates '{"category":"个股画像"}'
 python scripts/static_page.py template '{"template_id":"tpl_xxx"}'
 ```
 
-返回：`{ code:0, template_id, title, description, thumbnail_url, category, template_status,
-download_url, is_live, package_ids, packages }`。其中：
+返回：`{ code:0, template_id, page_id, title, description, thumbnail_url, category, is_template, template_status,
+download_url, cover_card_url, has_cover_card, is_live, package_ids, packages,
+scene_tags, paradigm_tags, recommend_tags }`。其中：
 
 - `download_url` 是模板 HTML 的**公开下载链接**（OSS public-read），直接 GET 即得整页 HTML。
 - `is_live` / `package_ids` / `packages` 说明该模板是否实时取数页、关联了哪些公式包（克隆后通常要
@@ -202,6 +231,22 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 > quant-buddy-skill 验证公式后用 `formula_package register` 注册**你自己的**包，把页面里的
 > package_id + signature 换掉再 `upload`；否则页面取的还是模板原本那套数据。
 
+### 公共模板：安全改写（`update_template`）
+
+当一个原页面已被转成 published template，普通 `download/update` 可能返回 `PAGE_NOT_FOUND`。此时如果必须保持原模板链接，只能走 `update_template`，不要创建新页面顶替。
+
+`update_template` 的安全流程：
+
+1. 先调用 `template` 读取当前 metadata。
+2. 如传入 `expected_metadata`，脚本比较 `download_url/title/description/category/size/sha256/updated_at` 等字段；发现变化就停止。
+3. 编译公共 share shell；如传 `verify_cover_card:true`，先跑默认页和 `?cover=1` 浏览器验收。
+4. 调 `POST /skill/updateTemplate` 写回同一个 `template_id/page_id`。
+5. 写后再次 `template` 回查，并把 `preflight_template/postflight_template` 放进返回 JSON。
+
+常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`cover_card_url`、`has_cover_card`、`verify_cover_card`、`expected_metadata`。
+
+写回后必须以 `template` / `templates` 回查为准。若服务端暂未持久化 `cover_card_url` / `has_cover_card`，脚本返回里可能会根据本次参数补出建议值，但模板列表仍可能显示 `has_cover_card:false`。这种情况下 HTML 与 `?cover=1` 已经可用，前端可临时由 `download_url + "?cover=1"` 派生 iframe；metadata 持久化要作为后端阻塞项单独交接。
+
 ## 配置
 
 `static_page.py` 读取 `config.json` / `config.local.json` 里的 `endpoint`，并在该地址后调用上面的 `/skill/...` 静态页托管路径。
@@ -216,8 +261,15 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `description` | string | ❌ | 空 | 页面说明（≤1000 字，列表/详情展示用） |
 | `ttl_days` | number | ❌ | 365 | 有效期，到期链接失效、记录与对象清理 |
 | `thumbnail_file` | string | ❌ | 无 | HTML 上传成功后再设置封面图；失败只返回 warning，不影响 upload 成功 |
+| `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 场景标签，**只能选已有**；任一项查无即整体报 `SCENE_TAG_NOT_FOUND`。详见下「标签」 |
+| `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 范式标签，可选已有、也可现写新名（自动以 `source=user` 进共享池）。详见下「标签」 |
+| `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为发布 URL + `?cover=1` |
+| `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
+| `verify_cover_card` | bool | ❌ | false | 发布前本地验收默认页和 `?cover=1 --cover-card`；失败不上传 |
 | `ensure_share_shell` | bool | ❌ | true | 发布前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
+
+> **推荐标签（recommend）由后台运营维护，本接口不接受**；传了也会被忽略。
 
 ## update 参数
 
@@ -230,6 +282,11 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `description` | string | ❌ | 沿用原说明 | 新说明；不传保留原说明，传空串 `""` 则清空 |
 | `ttl_days` | number | ❌ | 不变 | 传了才从此刻顺延有效期；不传保持原到期时间 |
 | `thumbnail_file` | string | ❌ | 无 | HTML 替换成功后再替换封面图；失败只返回 warning，不影响 update 成功 |
+| `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留原标签；只能选已有，查无报 `SCENE_TAG_NOT_FOUND` |
+| `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留；可选已有或现写新名自动入池 |
+| `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为原页面 URL + `?cover=1` |
+| `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
+| `verify_cover_card` | bool | ❌ | false | 替换前本地验收默认页和 `?cover=1 --cover-card`；失败不覆盖 |
 | `ensure_share_shell` | bool | ❌ | true | 替换前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 
@@ -245,10 +302,14 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
   "package_ids": ["pkg_fa4d477b4c57c2f584a2dbdf", "pkg_2a200c46cf1eecfaec7596a2"],
   "packages": [{ "package_id": "pkg_fa4d...", "found": true, "status": "active" }],
   "notice": "实时取数页面：已关联 2 个公式任务包，平台数据更新时页面自动刷新。",
+  "scene_tags": [{ "tag_id": "tag_...", "name": "盘前", "source": "system" }],
+  "paradigm_tags": [{ "tag_id": "tag_...", "name": "量价背离", "source": "user" }],
   "expires_at": "2027-..." }
 ```
 
 `url` 即对外分享链接，浏览器直接可开（自定义域名内联渲染，不触发下载）。
+
+> `scene_tags` / `paradigm_tags` 回显解析后的 `{tag_id,name,source}`；范式里现写的新名 `source=user`。`update` 响应同结构。读接口（`getStaticPage` / `list` / `templates` / `template`）也透出 `scene_tags` / `paradigm_tags`，并附后台维护的 `recommend_tags`（**只读**）。
 
 > 尺寸字段：`uploaded_size` = 你上传的原始 HTML 字节数；`served_size` = 服务端注入访问统计脚本后实际托管的字节数（即 `sha256` 对应的内容）；`tracker_injected=true` 表示已注入统计脚本。`size` 为兼容旧字段，等于 `served_size`。`update` 响应同此结构。
 
@@ -264,6 +325,71 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `notice` | 人话提示：静态页会提示"平台数据更新不会刷新此页面"；实时页有失联包会提示"实时取数可能失败" |
 
 > ⚠️ 拿到 `is_live=false` 时，多半是把数据焊死进了 HTML（没走 `queryFormulaPackage` 实时取数）。若本意是 live 看板，应改回实时取数再 `update`；如确为一次性静态报告，可忽略提示。发布前把 `notice` 转告用户。
+
+## 标签（场景 / 范式 / 推荐）
+
+与「公共模板分类」并存的新聚合维度，**普通页和模板都能打**。三类标签都多选，落库存 tag_id、读时回查名字。
+
+上传/替换前先查当前可用标签：
+
+```bash
+# 同时返回 scene_tags / paradigm_tags
+python scripts/static_page.py tags '{}'
+
+# 只查场景或范式
+python scripts/static_page.py tags '{"tag_type":"scene"}'
+python scripts/static_page.py tags '{"tag_type":"paradigm"}'
+```
+
+`tags` 调 `/skill/listPageTags`，不计费；不传 `tag_type` 返回 `{code:0, scene_tags:[...], paradigm_tags:[...]}`，传 `tag_type` 返回 `{code:0, tag_type, list:[...]}`。
+
+| 标签类型 | 入参 | 取值规则 | 来源 |
+|---|---|---|---|
+| 场景 `scene` | `scene_tags` | **只能选已有**（按 name 或 tag_id 匹配）；任一项查无→整体报 `SCENE_TAG_NOT_FOUND`，不落库 | 后台维护（`source=system`） |
+| 范式 `paradigm` | `paradigm_tags` | 可选已有，也可**现写新名**：未命中的名字按 `source=user` 自动建并立刻进共享池，之后别人也能选 | 后台建(`system`) + 用户现写(`user`) |
+| 推荐 `recommend` | —（本接口不接受） | 仅后台运营给页面打；读接口里 `recommend_tags` 只读透出 | 后台维护 |
+
+- 三种入参都接受 **数组 / 逗号分隔串 / 单值字符串**，内部统一去空白去重。
+- `upload` 不传标签=不打；`update` 不传=保留原标签、传 `[]`=清空、传值=整体覆盖。
+- 现写范式标签先**确认名字规范**再发：一旦入池即全员可见，错别字也会留痕。
+
+## 发布到社区（publish_community / unpublish_community）
+
+社区发布是用户把自己的页面提交到社区入口、让全部用户可发现的动作。当前服务端内部实现是给页面追加固定的 `recommend:社区` 标签；这不是开放任意推荐标签写入，`recommend_tags` 的自由维护仍只在后台。
+
+```bash
+# 发布到社区：成功后页面进入社区聚合入口
+python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'
+
+# 取消社区发布：从社区聚合入口移除
+python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
+```
+
+入参：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `page_id` | string | ✅ | 要发布/取消发布的普通静态页 ID |
+
+权限与语义：
+
+- 只能操作**自己的 active 普通页**，不支持 is_test 跨用户代发。
+- 公共模板不走这个用户侧接口；模板仍按模板/后台流程管理。
+- 发布是幂等的：已发布到社区的页面重复调用仍返回成功，不重复写标签。
+- 取消也是幂等的：未发布到社区时取消仍返回成功。
+- 返回会包含 `community_status`、`community_tag`、`recommend_tags` 等字段。后续若接入审核，`community_status` 可能从当前的 `published` 调整为 `pending`。
+
+示例响应：
+
+```json
+{
+  "code": 0,
+  "page_id": "page_xxx",
+  "community_status": "published",
+  "community_tag": { "tag_id": "tag_xxx", "tag_type": "recommend", "name": "社区", "source": "system" },
+  "recommend_tags": [{ "tag_id": "tag_xxx", "name": "社区", "source": "system" }]
+}
+```
 
 ## 限制
 
@@ -283,6 +409,10 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `PAGE_ID_REQUIRED` | 下载：page_id / url 都没传 |
 | `PAGE_NOT_FOUND` / `FORBIDDEN` | 下载/替换/撤销：页面不存在 / 无权（非本人且非 is_test 互通） |
 | `NOT_ACTIVE` | 替换/下载：页面已撤销（替换需重新 upload；下载链接已失效） |
+| `BAD_TAG_TYPE` | tags：`tag_type` 不是 `scene` / `paradigm` |
+| `SCENE_TAG_NOT_FOUND` | upload/update：`scene_tags` 里有未登记的场景标签（场景只能选已有） |
+| `TEMPLATE_NOT_ALLOWED` | publish_community/unpublish_community：公共模板不走用户侧社区发布接口 |
+| `COMMUNITY_TAG_FAILED` | publish_community/unpublish_community：固定 `社区` 标签读取或创建失败 |
 
 > 若公开 URL 明明可访问，但 `download` / `update` 返回 `PAGE_NOT_FOUND`，先用 `template --page_id <page_id>` 检查是否已转成公共模板。若 `template_status=published`，普通静态页维护路径不再适用；需要保留原模板链接更新时，应走后台/admin `updateTemplate` 路径，不能用新 URL 代替。
 
@@ -293,5 +423,5 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 
 ## 计费
 
-上传 / 替换 / 设置缩略图各固定 1 RU；下载 / 列表 / 撤销 / 浏览模板（templates、template）不计费
+上传 / 替换 / 设置缩略图各固定 1 RU；下载 / 列表 / 撤销 / 查标签（tags）/ 发布到社区 / 取消社区发布 / 浏览模板（templates、template）不计费
 （下载字节直连 OSS，不经服务端）。替换、设缩略图都不占新的活跃页配额。

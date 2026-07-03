@@ -65,6 +65,7 @@ from urllib.parse import quote
 
 import common as C
 import formula_package as FP
+import live_card as LC
 
 PAGES_DIR = os.path.join(C.SKILL_ROOT, "output", "pages")
 ASSETS_DIR = os.path.join(C.SKILL_ROOT, "assets")
@@ -252,6 +253,11 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     shared_modal = _shared_shell_section("MODAL")
     shared_css = _shared_shell_css()
     shared_runtime_js = _shared_shell_js()
+    live_card_config = LC.dashboard_config(spec, panels)
+    live_card_html = LC.card_html(live_card_config) if live_card_config else ""
+    live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
+    live_card_js = _read_text(os.path.join(ASSETS_DIR, "live-card.js")) if live_card_config else ""
+    live_card_binding = LC.binding_script(live_card_config) if live_card_config else ""
 
     # 渲染脚本：把任意 data 形态归一为 {columns, rows}，再按 panel.type 出图/表
     render_js = r"""
@@ -477,11 +483,20 @@ function applyOutput(name, out) {
   });
 }
 
+function syncLiveCard(outputs) {
+  try {
+    const payload = outputs || LAST_OUTPUTS || {};
+    window.dispatchEvent(new CustomEvent('qb:outputs', {detail: {outputs: payload}}));
+    if (window.QBLiveCardHydrate) window.QBLiveCardHydrate(payload);
+  } catch (e) {}
+}
+
 // 一次性渲染（封面模式 / 流式兜底）：先铺骨架，再把已知产出全部填上
 function renderAll(outputs) {
   LAST_OUTPUTS = outputs || {};
   buildSkeletons();
   Object.keys(LAST_OUTPUTS).forEach(name => applyOutput(name, LAST_OUTPUTS[name]));
+  syncLiveCard(LAST_OUTPUTS);
 }
 
 function parseSSEBlock(block) {
@@ -543,6 +558,7 @@ async function fetchLive() {
     if (!r) return;
     LAST_OUTPUTS[r.output] = r.out;
     applyOutput(r.output, r.out);   // 边收边渲染：先到先显
+    syncLiveCard(LAST_OUTPUTS);
   };
   try {
     for (;;) {
@@ -802,11 +818,13 @@ document.addEventListener('DOMContentLoaded', () => {
   .std-hero .meta-pill {{ background:#eef3f8; color:#4b5b70; }}
   .std-hero .meta-pill-strong {{ background:rgba(216,165,75,.16); color:#87611d; border:1px solid rgba(216,165,75,.34); }}
 {shared_css}
+{live_card_css}
 </style>
 </head>
 <body>
 {shared_header}
 <main>
+  {live_card_html}
   <section class="std-hero">
     <div class="eyebrow">{mode_note}</div>
     <h1>{title_esc}</h1>
@@ -824,8 +842,10 @@ document.addEventListener('DOMContentLoaded', () => {
 <script src="{_ECHARTS_CDN}"></script>
 <script>
 {shared_runtime_js}
+{live_card_js}
 {render_js}
 </script>
+{live_card_binding}
 </body>
 </html>
 """
@@ -1588,6 +1608,7 @@ def cmd_build(params):
         return copy_err
 
     generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    live_card_enabled = params.get("live_card") is not None and params.get("live_card") is not False
     html = _render_html(params, title=title, subtitle=params.get("subtitle"),
                         panels=panels, endpoint=endpoint, package_id=pkg, signature=sig,
                         generated_at=generated_at)
@@ -1628,6 +1649,11 @@ def cmd_build(params):
             "build_time_query": "ok",
             "output_health": "ok",
             "publish_runtime_check": "not_run",
+        },
+        "live_card": {
+            "enabled": live_card_enabled,
+            "cover_card_url": None,
+            "has_cover_card": False,
         },
     }
     if thumbnail_info.get("generation"):
@@ -1671,6 +1697,9 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
+                "verify_cover_card": params.get("verify_cover_card", live_card_enabled),
+                "cover_card_url": params.get("cover_card_url"),
+                "has_cover_card": params.get("has_cover_card", live_card_enabled if live_card_enabled else None),
                 "thumbnail_file": thumbnail_file,
             })
             result["update"] = up
@@ -1682,6 +1711,9 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
+                "verify_cover_card": params.get("verify_cover_card", live_card_enabled),
+                "cover_card_url": params.get("cover_card_url"),
+                "has_cover_card": params.get("has_cover_card", live_card_enabled if live_card_enabled else None),
                 "thumbnail_file": thumbnail_file,
             })
             result["upload"] = up
@@ -1690,9 +1722,17 @@ def cmd_build(params):
             result["url"] = up["url"]
             if up.get("thumbnail_url"):
                 result["thumbnail_url"] = up.get("thumbnail_url")
+            if up.get("cover_card_url"):
+                result["cover_card_url"] = up.get("cover_card_url")
+            if up.get("has_cover_card") is not None:
+                result["has_cover_card"] = bool(up.get("has_cover_card"))
             manifest["page_id"] = up.get("page_id")
             manifest["url"] = up.get("url")
             manifest["thumbnail_url"] = up.get("thumbnail_url") or None
+            manifest["live_card"]["cover_card_url"] = up.get("cover_card_url") or None
+            manifest["live_card"]["has_cover_card"] = bool(up.get("has_cover_card"))
+            if up.get("cover_verification"):
+                manifest["verification"]["cover_card"] = "ok"
             if up.get("thumbnail_warning"):
                 manifest["thumbnail_upload_warning"] = up.get("thumbnail_warning")
             manifest["verification"]["publish_runtime_check"] = (

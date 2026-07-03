@@ -30,6 +30,7 @@ BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_da
 | `ttl_days` | number | ❌ | 配合 upload 透传 |
 | `thumbnail_file` | string | ❌ | 现成 PNG/JPG 缩略图；HTML upload/update 成功后自动上传封面，失败只返回 warning |
 | `thumbnail` | bool/object/string | ❌ | `true` 或对象表示自动生成 1200×675 封面；字符串表示现成文件路径。封面是自包含 SVG 海报，用系统 Edge/Chrome 无头栅格化成 PNG；无浏览器时直接产出 SVG，均不影响 HTML |
+| `live_card` | bool/object | ❌ | 生成同页 `?cover=1` 宽宝活卡；对象可传 `title`、`description`、`theme`、`metrics`、`tags`、`date_output` |
 | `series` / `chart_series` | array | ❌ | 自动生成封面时可选的真实曲线数据；不传则优先从构建期公式包取数结果里的 line/bar 面板抽取 |
 | `brand` | object | ❌ | 统一分享外壳配置，见下 |
 | `official_url` | string | ❌ | 官网入口，默认 `https://www.quantbuddy.cn` |
@@ -91,6 +92,28 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 > ⚠️ **构建期取数失败即硬失败**：构建时会先取一次数做质量体检（只用于校验，不内联进 HTML）。若有任一产出失败或体检为空（如 range_data 全 null / 区间无数据），`build_dashboard` 返回 `code:1` 并在 `failed_outputs` 指明哪个 output、疑因，**不生成 HTML**。务必检查返回 `code`，不要把「没报错」当成功。
 
+### 宽宝活卡（`live_card`）
+
+传 `"live_card": true` 时，标准看板会在同一份 HTML 内生成隐藏的宽宝活卡；普通 URL 不显示，`?cover=1` 进入 4:3 card-only 模式。上传/更新时会自动把 `verify_cover_card` 默认打开，通过后返回 `cover_card_url=<url>?cover=1` 与 `has_cover_card=true`。
+
+```json
+{
+  "title": "市场温度监测",
+  "live_card": {
+    "theme": "red",
+    "title": "短线情绪一眼看懂",
+    "description": "核心指标实时刷新，打开即取最新公式包输出。",
+    "metrics": [
+      {"label": "温度", "output": "TEMP", "field": "value", "unit": "分"},
+      {"label": "涨停", "output": "LIMIT_UP", "field": "count"}
+    ],
+    "tags": ["实时取数", "重点摘要"]
+  }
+}
+```
+
+`metrics` 不传时会优先从 number panels 自动取 2-3 个核心指标。卡片运行时监听页面同一轮公式包 outputs，不需要另起独立 card HTML，也不要新增 `ratio/gallery` 参数。卡片左上角只保留官方标签预留位，不显示固定「宽宝活卡」文案。
+
 ### 模板契约校验
 
 单标的画像页必须使用在线模板接口复用合适模板，或自行提供满足契约的 spec，并保留 `template: "single-stock"`。
@@ -121,6 +144,8 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
   "manifest": "output/pages/xxx.manifest.json",
   "thumbnail_file": "output/thumbnails/xxx.png",
   "thumbnail_generation_status": "generated",
+  "cover_card_url": "https://pages.quantbuddy.cn/...html?cover=1",
+  "has_cover_card": true,
   "facts": {"px":{"value": 166.41, "date": 20260616}},
   "url": "https://pages.quantbuddy.cn/..."  // 仅 upload=true 且成功时 }
 ```
