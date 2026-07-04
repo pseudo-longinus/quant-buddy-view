@@ -8,6 +8,7 @@
  *   node scripts/verify_page.mjs output/pages/demo.html --manifest output/pages/demo.manifest.json
  *   node scripts/verify_page.mjs output/pages/demo.html --require-browser
  *   node scripts/verify_page.mjs output/pages/demo.html?cover=1 --require-browser --cover-card
+ *   node scripts/verify_page.mjs output/pages/demo.html --card-runtime-only
  */
 
 import fs from 'node:fs';
@@ -16,11 +17,14 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
 const coverCard = args.includes('--cover-card');
+const cardRuntimeOnly = args.includes('--card-runtime-only');
+const cardRuntime = args.includes('--card-runtime') || cardRuntimeOnly;
 const manifestIdx = args.indexOf('--manifest');
 const manifestPath = manifestIdx >= 0 ? args[manifestIdx + 1] : '';
 const valueFlags = new Set(['--manifest']);
@@ -59,7 +63,7 @@ function fail(message) {
 }
 
 if (!target) {
-  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--manifest manifest.json] [--require-browser] [--cover-card]');
+  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--manifest manifest.json] [--require-browser] [--cover-card] [--card-runtime] [--card-runtime-only]');
 }
 
 function delay(ms) {
@@ -118,12 +122,362 @@ function staticChecks(html) {
   return { ok: problems.length === 0, problems, hasPackage };
 }
 
+function firstTaggedBlock(html, tag, marker) {
+  const re = new RegExp(`<${tag}\\b(?=[^>]*\\b${marker}\\b)[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+  const match = re.exec(html || '');
+  return match ? match[1].trim() : '';
+}
+
+function sseUrl(endpoint) {
+  return new URL('/skill/queryFormulaPackage', endpoint).toString();
+}
+
+function manifestPackages(manifest) {
+  const list = [];
+  if (Array.isArray(manifest?.packages)) {
+    manifest.packages.forEach((item, index) => {
+      if (!item || typeof item !== 'object') return;
+      const endpoint = item.endpoint || manifest.endpoint;
+      const packageId = item.package_id || item.packageId;
+      const signature = item.signature;
+      if (!endpoint || !packageId || !signature) return;
+      list.push({
+        role: item.role || `package_${index + 1}`,
+        endpoint,
+        package_id: packageId,
+        signature,
+        outputs: Array.isArray(item.outputs) ? item.outputs : [],
+      });
+    });
+  }
+  if (list.length) return list;
+  if (manifest?.endpoint && manifest?.package_id && manifest?.signature) {
+    return [{
+      role: 'default',
+      endpoint: manifest.endpoint,
+      package_id: manifest.package_id,
+      signature: manifest.signature,
+      outputs: Array.isArray(manifest.required_outputs) ? manifest.required_outputs : [],
+    }];
+  }
+  return [];
+}
+
+async function parseSseOutputs(resp, expectedOutputs = []) {
+  const outputs = {};
+  if (!resp.body) return outputs;
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const expected = new Set(expectedOutputs || []);
+  function hasExpectedOutputs() {
+    if (!expected.size) return false;
+    for (const key of expected) {
+      if (outputs[key] == null) return false;
+    }
+    return true;
+  }
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
+    const blocks = buffer.split('\n\n');
+    buffer = blocks.pop() || '';
+    for (const block of blocks) {
+      let event = '';
+      const lines = [];
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) lines.push(line.slice(5).replace(/^ /, ''));
+      }
+      if (event !== 'result' || !lines.length) continue;
+      try {
+        const payload = JSON.parse(lines.join('\n'));
+        if (payload.output) outputs[payload.output] = payload;
+      } catch {}
+      if (hasExpectedOutputs()) {
+        try {
+          await reader.cancel();
+        } catch {}
+        return outputs;
+      }
+    }
+  }
+  return outputs;
+}
+
+function countStandaloneZeroPct(text) {
+  return ((text || '').match(/(^|[^0-9])0\.0%/g) || []).length;
+}
+
+function countLongDash(text) {
+  return ((text || '').match(/—/g) || []).length;
+}
+
+async function artifactHydrateChecks(template, style, runtimeScript, outputs, options = {}) {
+  const result = { checked: false, skipped: false, reason: '', text: '', sizes: [], problems: [] };
+  const pw = await loadPlaywright();
+  if (!pw) {
+    result.skipped = true;
+    result.reason = 'playwright package is not available';
+    if (options.requireBrowser) result.problems.push(`card artifact 独立 hydrate 未执行: ${result.reason}`);
+    return result;
+  }
+
+  let browser;
+  try {
+    browser = await launchPlaywrightBrowser(pw);
+    const page = await browser.newPage({ viewport: { width: 720, height: 540 } });
+    const sizes = [
+      { label: '720x540', width: 720, height: 540 },
+      { label: '410x308', width: 410, height: 308 },
+      { label: '320x240', width: 320, height: 240 },
+    ];
+    const hydratedSizes = [];
+    for (const size of sizes) {
+      await page.setViewportSize({ width: size.width, height: size.height });
+      await page.setContent(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>html,body{margin:0;width:${size.width}px;height:${size.height}px;overflow:hidden}#root{width:${size.width}px;height:${size.height}px}</style>
+  <style data-qb-card-style>${style}</style>
+</head>
+<body>
+  <div id="root"></div>
+  <template data-qb-card-template>${template}</template>
+  <script>${runtimeScript.replace(/<\/script/gi, '<\\/script')}<\/script>
+</body>
+</html>`, { waitUntil: 'load' });
+      const hydrated = await page.evaluate((cardOutputs) => {
+      const root = document.getElementById('root');
+      const runtime = window.QBCardRuntimeV1;
+      if (runtime && typeof runtime.mount === 'function') {
+        const mounted = runtime.mount(root, { outputs: cardOutputs || {} });
+        if (mounted && typeof mounted.hydrate === 'function') mounted.hydrate(cardOutputs || {});
+      } else {
+        const templateEl = document.querySelector('template[data-qb-card-template]');
+        if (templateEl) root.replaceChildren(templateEl.content.cloneNode(true));
+        if (runtime && typeof runtime.hydrate === 'function') runtime.hydrate(root, cardOutputs || {});
+      }
+      function visibleText(scope) {
+        const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
+          acceptNode(node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            const tag = parent.tagName.toLowerCase();
+            if (tag === 'style' || tag === 'script' || tag === 'template') return NodeFilter.FILTER_REJECT;
+            const text = (node.nodeValue || '').trim();
+            return text ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          },
+        });
+        const parts = [];
+        while (walker.nextNode()) parts.push(walker.currentNode.nodeValue.trim());
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+      }
+      const card = root.querySelector('[data-qb-live-card]');
+      const rect = card ? card.getBoundingClientRect() : null;
+      return {
+        runtimePresent: !!(runtime && typeof runtime.hydrate === 'function'),
+        rootHasCard: !!card,
+        text: visibleText(root),
+        rect: rect ? { width: rect.width, height: rect.height } : null,
+        overflow: card ? {
+          scrollWidth: card.scrollWidth,
+          clientWidth: card.clientWidth,
+          scrollHeight: card.scrollHeight,
+          clientHeight: card.clientHeight,
+        } : null,
+      };
+      }, outputs || {});
+      hydrated.label = size.label;
+      hydratedSizes.push(hydrated);
+    }
+    const hydrated = hydratedSizes[0] || {};
+    result.checked = true;
+    result.sizes = hydratedSizes.map(item => ({
+      label: item.label,
+      rect: item.rect || null,
+      overflow: item.overflow || null,
+      text_length: (item.text || '').length,
+    }));
+    result.text = hydrated.text || '';
+    for (const item of hydratedSizes) {
+      if (!item.runtimePresent) result.problems.push(`card runtime 独立 hydrate 未暴露 hydrate(root, outputs) (${item.label})`);
+      if (!item.rootHasCard) result.problems.push(`card artifact 独立 hydrate 后缺少 data-qb-live-card 根节点 (${item.label})`);
+      if (!item.text || item.text.length < 6) result.problems.push(`card artifact 独立 hydrate 后内容疑似空白 (${item.label})`);
+      if (/待更新|取数中|判断生成中/.test(item.text) || countStandaloneZeroPct(item.text) || countLongDash(item.text) >= 3) {
+        result.problems.push(`card artifact 独立 hydrate 后仍含长期占位态 (${item.label})`);
+      }
+      if (item.overflow) {
+        const xOverflow = item.overflow.scrollWidth > item.overflow.clientWidth + 2;
+        const yOverflow = item.overflow.scrollHeight > item.overflow.clientHeight + 2;
+        if (xOverflow || yOverflow) {
+          result.problems.push(
+            `card artifact 独立 hydrate 后内容溢出 (${item.label}): ${item.overflow.scrollWidth}x${item.overflow.scrollHeight} > ${item.overflow.clientWidth}x${item.overflow.clientHeight}`,
+          );
+        }
+      }
+    }
+    return result;
+  } catch (err) {
+    result.skipped = true;
+    result.reason = err && err.message ? err.message : String(err);
+    if (options.requireBrowser) result.problems.push(`card artifact 独立 hydrate 失败: ${result.reason}`);
+    return result;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+  }
+}
+
+async function cardRuntimeChecks(html, options = {}) {
+  const problems = [];
+  const template = firstTaggedBlock(html, 'template', 'data-qb-card-template');
+  const style = firstTaggedBlock(html, 'style', 'data-qb-card-style');
+  const manifestText = firstTaggedBlock(html, 'script', 'data-qb-card-manifest');
+  const runtimeScript = firstTaggedBlock(html, 'script', 'data-qb-card-runtime');
+  let manifest = null;
+  let sampledOutputs = null;
+  let artifactHydrate = { checked: false, skipped: true, reason: 'card artifact 不完整，跳过独立 hydrate', text: '', problems: [] };
+
+  if (!template) problems.push('缺少 template[data-qb-card-template]');
+  else if (!/\bdata-qb-live-card\b/i.test(template)) problems.push('card template 缺少 data-qb-live-card 根标记');
+  if (!style) problems.push('缺少 style[data-qb-card-style]');
+  if (!manifestText) {
+    problems.push('缺少 script[type="application/json"][data-qb-card-manifest]');
+  } else {
+    try {
+      manifest = JSON.parse(manifestText);
+    } catch (err) {
+      problems.push(`card manifest JSON 解析失败: ${err && err.message ? err.message : err}`);
+    }
+  }
+  if (!runtimeScript) {
+    problems.push('缺少 script[data-qb-card-runtime]');
+  } else {
+    if (!/window\.QBCardRuntimeV1\b/.test(runtimeScript)) problems.push('card runtime 未暴露 window.QBCardRuntimeV1');
+    if (/\b(fetch|XMLHttpRequest|EventSource)\b|queryFormulaPackage/i.test(runtimeScript)) {
+      problems.push('card runtime 不应自动发起取数请求');
+    }
+    if (/sourceCard\s*\(/.test(runtimeScript) || /document\.querySelectorAll\(\s*["']\[data-qb-live-card\]/.test(runtimeScript)) {
+      problems.push('card runtime 依赖完整页面 DOM/源 card，不能作为官网独立 artifact 运行');
+    }
+  }
+
+  if (manifest) {
+    const required = ['version', 'kind', 'required_outputs', 'aspect_ratio'];
+    for (const key of required) {
+      if (manifest[key] === undefined || manifest[key] === null || manifest[key] === '') problems.push(`card manifest 缺少 ${key}`);
+    }
+    const packages = manifestPackages(manifest);
+    if (!packages.length) problems.push('card manifest 缺少 package_id/signature/endpoint 或 packages[]');
+    if (manifest.kind !== 'embedded-card-v1') problems.push(`card manifest kind 不支持: ${manifest.kind}`);
+    if (!Array.isArray(manifest.required_outputs) || manifest.required_outputs.length === 0) {
+      problems.push('card manifest required_outputs 必须是非空数组');
+    }
+    if (Array.isArray(manifest.required_outputs) && manifest.required_outputs.length > 0 && packages.length) {
+      sampledOutputs = {};
+      for (const pkg of packages) {
+        const expected = (pkg.outputs && pkg.outputs.length ? pkg.outputs : manifest.required_outputs)
+          .filter(key => manifest.required_outputs.includes(key));
+        if (!expected.length) continue;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60000);
+        try {
+          const resp = await fetch(sseUrl(pkg.endpoint), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              package_id: pkg.package_id,
+              signature: pkg.signature,
+              outputs: expected,
+            }),
+          });
+          if (!resp.ok) {
+            problems.push(`card required_outputs 取数失败(${pkg.role}): HTTP ${resp.status}`);
+          } else {
+            const outputs = await parseSseOutputs(resp, expected);
+            Object.assign(sampledOutputs, outputs);
+          }
+        } catch (err) {
+          problems.push(`card required_outputs 取数异常(${pkg.role}): ${err && err.message ? err.message : err}`);
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      const missing = manifest.required_outputs.filter(key => sampledOutputs[key] == null);
+      if (missing.length) {
+        problems.push(`card manifest required_outputs 不存在或未返回: ${missing.slice(0, 12).join(', ')}`);
+      }
+    }
+  }
+
+  if (template) {
+    const compactText = template.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, '').replace(/\s+/g, '');
+    const pendingCount = (compactText.match(/待更新/g) || []).length;
+    const zeroPctCount = countStandaloneZeroPct(compactText);
+    const dashCount = countLongDash(compactText);
+    if (pendingCount || zeroPctCount || dashCount >= 3) {
+      problems.push(`card template 含长期占位态: 待更新 x${pendingCount}, 0.0% x${zeroPctCount}, — x${dashCount}`);
+    }
+  }
+
+  if (template && style && runtimeScript && sampledOutputs) {
+    artifactHydrate = await artifactHydrateChecks(template, style, runtimeScript, sampledOutputs, options);
+    if (artifactHydrate.problems.length) problems.push(...artifactHydrate.problems);
+  }
+
+  return {
+    ok: problems.length === 0,
+    problems,
+    artifact_hydrate: artifactHydrate,
+    manifest: manifest ? {
+      version: manifest.version || '',
+      kind: manifest.kind || '',
+      required_outputs: Array.isArray(manifest.required_outputs) ? manifest.required_outputs : [],
+      package_count: manifestPackages(manifest).length,
+      aspect_ratio: manifest.aspect_ratio || '',
+    } : null,
+  };
+}
+
 async function loadPlaywright() {
   try {
     return await import('playwright');
-  } catch {
-    return null;
+  } catch {}
+  const roots = [
+    ...(process.env.NODE_PATH || '').split(path.delimiter),
+    path.join(process.cwd(), 'node_modules'),
+    path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'node_modules'),
+  ]
+    .map(item => (item || '').trim())
+    .filter(Boolean);
+  for (const root of [...new Set(roots)]) {
+    const candidates = [path.join(root, 'playwright', 'package.json')];
+    const pnpmRoot = path.join(root, '.pnpm');
+    if (fs.existsSync(pnpmRoot)) {
+      try {
+        for (const name of fs.readdirSync(pnpmRoot)) {
+          if (name.startsWith('playwright@')) {
+            candidates.push(path.join(pnpmRoot, name, 'node_modules', 'playwright', 'package.json'));
+          }
+        }
+      } catch {}
+    }
+    for (const pkg of candidates) {
+      if (!fs.existsSync(pkg)) continue;
+      try {
+        const requireFromPlaywright = createRequire(pkg);
+        return requireFromPlaywright('playwright');
+      } catch {}
+    }
   }
+  return null;
 }
 
 async function launchPlaywrightBrowser(pw) {
@@ -914,15 +1268,48 @@ function fontSizeProblem(label, info, min, max) {
 try {
   const html = await readHtml(target);
   const staticResult = staticChecks(html);
+  const cardRuntimeResult = cardRuntime ? await cardRuntimeChecks(html, { requireBrowser: requireBrowser || cardRuntimeOnly }) : { ok: true, problems: [] };
+  if (cardRuntimeOnly) {
+    const artifactHydrate = cardRuntimeResult.artifact_hydrate || {};
+    const result = {
+      code: cardRuntimeResult.ok ? 0 : 1,
+      target,
+      verification_level: artifactHydrate.checked ? 'card-runtime-artifact' : 'card-runtime-static',
+      require_browser: requireBrowser,
+      card_runtime: true,
+      card_runtime_only: true,
+      static: staticResult,
+      card_runtime_check: cardRuntimeResult,
+      browser: {
+        checked: false,
+        skipped: true,
+        reason: '--card-runtime-only skips full-page browser viewport checks',
+        viewports: [],
+        consoleErrors: [],
+      },
+      warnings: [],
+      problems: cardRuntimeResult.problems,
+    };
+    updateManifest(manifestPath, result);
+    emit(result);
+    process.exit(cardRuntimeResult.ok ? 0 : 1);
+  }
   const browserResult = await browserChecks(target, { coverCard });
   const summary = summarize(staticResult, browserResult, { requireBrowser, coverCard });
+  if (cardRuntimeResult.problems.length) {
+    summary.ok = false;
+    summary.problems.push(...cardRuntimeResult.problems);
+  }
   const result = {
     code: summary.ok ? 0 : 1,
     target,
     verification_level: browserResult.checked ? 'browser' : 'static-only',
     require_browser: requireBrowser,
     cover_card: coverCard,
+    card_runtime: cardRuntime,
+    card_runtime_only: false,
     static: staticResult,
+    card_runtime_check: cardRuntimeResult,
     browser: browserResult,
     warnings: summary.warnings,
     problems: summary.problems,

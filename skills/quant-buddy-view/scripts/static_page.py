@@ -5,7 +5,7 @@ r"""
 对接接口文档：见 skill_server docs「静态页托管」对外接口文档。
 工具说明文档：tools/static_page.md
 
-十二个子命令（全部需 API Key）：
+静态页子命令（除直连 URL 验收外需 API Key）：
     upload     上传 HTML，返回 page_id + 公开 url
     update     替换已有页面内容（URL / page_id 不变，已分享链接照常可用）
     download   取回已发布页面的 HTML（再编辑用）：服务端鉴权返回 url，脚本直连 OSS 下载
@@ -18,6 +18,8 @@ r"""
     templates  列出官方精选页面（后台 recommend:官方精选 标签口径）
     template   官方精选详情：标题/说明/缩略图/关联公式包 + 公开下载链接（拿来克隆复用）
     update_template  官方精选/旧模板安全改写：metadata 复查后走 updateTemplate
+    retrofit_card_runtime  为已发布模板重建独立 card runtime artifact，可原链接写回
+    verify_card_runtime  批量快速验收独立 card runtime artifact（下载 HTML + required_outputs + 独立 hydrate）
 
 权限 / 权责（is_test 内部互通）：归属由 api_key（Bearer）认定。
   · 自己的页面（upload/update/download/list/revoke/thumbnail）：默认只能操作本人页面；
@@ -43,13 +45,14 @@ upload 参数：
       "scene_tags":    "可选，场景标签（数组/逗号串/单值）；只能选已有，查无报 SCENE_TAG_NOT_FOUND",
       "paradigm_tags": "可选，范式标签（数组/逗号串/单值）；可选已有或现写新名自动入池(source=user)",
       "verify_cover_card": "可选 true；上传前验收默认页和 ?cover=1 宽宝活卡，失败不上传",
+      "verify_card_runtime": "可选 true；上传前只验收 card runtime artifact，失败不上传",
       "cover_card_url": "可选，模板库 live iframe URL",
       "has_cover_card": "可选，模板库是否展示 live card"
     }
     标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
     先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
 update 参数：page_id 必填；title / description / ttl_days / scene_tags / paradigm_tags /
-    cover_card_url / has_cover_card / verify_cover_card 仅在传了才改
+    cover_card_url / has_cover_card / verify_cover_card / verify_card_runtime 仅在传了才改
     （description 传空串=清空，不传保留原值；标签字段传 [] 清空、不传保留原标签）。
     可同样传 thumbnail_file，HTML 更新成功后再替换封面；缩略图失败不回滚 HTML。
 download 参数：
@@ -70,6 +73,7 @@ tags 参数：{ "tag_type":可选("scene" 或 "paradigm") }；不传则同时返
 publish_community / unpublish_community 参数：{ "page_id":"page_xxx" }；仅 owner 可操作自己的 active 普通页。
 templates 参数：{ "category":可选, "status":可选, "scene_tag_id":可选, "paradigm_tag_id":可选, "recommend_tag_id":可选, "page":1, "page_size":20 }；默认已限定 recommend:官方精选，recommend_tag_id 是额外叠加筛选。
 template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选一）
+verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, "timeout_sec":180 }
 
 用法示例：
     python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
@@ -85,6 +89,7 @@ template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选
     python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}' # 取消社区发布
     python scripts/static_page.py templates '{"page":1,"page_size":20}'        # 浏览官方精选
     python scripts/static_page.py template  '{"template_id":"page_xxx"}'        # 官方精选详情/拿下载链接克隆
+    python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"]}' # 快速批量验收 card artifact
 
 输出：结果打印到 stdout（UTF-8），并写一份到临时目录 sp_out.txt。
 """
@@ -100,8 +105,10 @@ import tempfile
 import urllib.error
 import urllib.parse as _up
 import urllib.request
+from datetime import datetime
 
 import compile_bespoke_page as CB
+import card_runtime_retrofit as CRT
 import common as C
 
 _PATH = {
@@ -588,6 +595,15 @@ def _ensure_share_shell(html, params):
         actions.append(f"removed_qrcode_script:{n}")
 
     html, n = _sub_count(
+        r"\s*<div\b(?=[^>]*(?:id=[\"']qr[\"']|class=[\"'][^\"']*\bqr\b[^\"']*[\"']))[^>]*>[\s\S]*?手机扫码查看[\s\S]*?</div>",
+        "",
+        html,
+        count=1,
+    )
+    if n:
+        actions.append("removed_legacy_qr_div")
+
+    html, n = _sub_count(
         r"\nfunction setupShareShell\(\) \{.*?\n\}\n\n(?=document\.addEventListener\('DOMContentLoaded')",
         "\n",
         html,
@@ -789,6 +805,13 @@ def cmd_upload(params):
     cover_verification = _maybe_verify_cover_card(html, params)
     if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
         return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
+    card_runtime_verification = _maybe_verify_card_runtime(html, params)
+    if isinstance(card_runtime_verification, dict) and not card_runtime_verification.get("ok"):
+        return {
+            "code": 1,
+            "message": card_runtime_verification.get("message") or "card runtime artifact 验收未通过",
+            "card_runtime_verification": card_runtime_verification,
+        }
 
     body = {"html": html}
     for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
@@ -803,6 +826,8 @@ def cmd_upload(params):
         if cover_verification:
             out["cover_verification"] = cover_verification
             _attach_cover_fields(out, base_url=out.get("url"), params=params)
+        if card_runtime_verification:
+            out["card_runtime_verification"] = card_runtime_verification
         if out.get("code") == 0 or _server_mentions_package_issue(out):
             out["_package_runtime_check"] = _package_runtime_check(
                 endpoint,
@@ -837,6 +862,13 @@ def cmd_update(params):
     cover_verification = _maybe_verify_cover_card(html, params)
     if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
         return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
+    card_runtime_verification = _maybe_verify_card_runtime(html, params)
+    if isinstance(card_runtime_verification, dict) and not card_runtime_verification.get("ok"):
+        return {
+            "code": 1,
+            "message": card_runtime_verification.get("message") or "card runtime artifact 验收未通过",
+            "card_runtime_verification": card_runtime_verification,
+        }
 
     body = {"page_id": params["page_id"], "html": html}
     for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
@@ -851,6 +883,8 @@ def cmd_update(params):
         if cover_verification:
             out["cover_verification"] = cover_verification
             _attach_cover_fields(out, base_url=out.get("url") or params.get("url"), params=params)
+        if card_runtime_verification:
+            out["card_runtime_verification"] = card_runtime_verification
         if out.get("code") == 0 or _server_mentions_package_issue(out):
             out["_package_runtime_check"] = _package_runtime_check(
                 endpoint,
@@ -1128,10 +1162,18 @@ def cmd_update_template(params):
         cover_verification = _maybe_verify_cover_card(html, params)
         if isinstance(cover_verification, dict) and not cover_verification.get("ok"):
             return {"code": 1, "message": cover_verification.get("message") or "宽宝活卡验收未通过", "cover_verification": cover_verification}
+        card_runtime_verification = _maybe_verify_card_runtime(html, params)
+        if isinstance(card_runtime_verification, dict) and not card_runtime_verification.get("ok"):
+            return {
+                "code": 1,
+                "message": card_runtime_verification.get("message") or "card runtime artifact 验收未通过",
+                "card_runtime_verification": card_runtime_verification,
+            }
         body["html"] = html
     else:
         shell_check = None
         cover_verification = None
+        card_runtime_verification = None
 
     for key in ("title", "description", "category", "cover_card_url", "has_cover_card"):
         if params.get(key) is not None:
@@ -1154,7 +1196,346 @@ def cmd_update_template(params):
         if cover_verification:
             out["cover_verification"] = cover_verification
             _attach_cover_fields(out, base_url=body.get("cover_card_url") or current.get("download_url"), params=body)
+        if card_runtime_verification:
+            out["card_runtime_verification"] = card_runtime_verification
     return _normalize_cover_response(out)
+
+
+def _fetch_public_html(url):
+    if not url:
+        raise ValueError("缺少可下载的 public/download URL")
+    req = urllib.request.Request(url, headers={"Accept": "text/html,application/xhtml+xml"}, method="GET")
+    with C._NO_PROXY_OPENER.open(req, timeout=_DEFAULT_TIMEOUT) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _default_retrofit_out_file(page_id):
+    base = os.path.join(C.SKILL_ROOT, "output", "card-runtime-retrofit")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "%s.html" % (page_id or "page"))
+
+
+def _run_card_runtime_verify(html_file, *, cover=False, artifact_only=False, require_browser=True, timeout_sec=180):
+    target = html_file + ("?cover=1" if cover else "")
+    cmd = ["node", os.path.join(C.SKILL_ROOT, "scripts", "verify_page.mjs"), target, "--card-runtime"]
+    if require_browser:
+        cmd.append("--require-browser")
+    if artifact_only:
+        cmd.append("--card-runtime-only")
+    if cover:
+        cmd.append("--cover-card")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=C.SKILL_ROOT,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raw = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
+        return {
+            "code": 124,
+            "message": "card runtime 验收超时",
+            "target": target,
+            "timeout_sec": timeout_sec,
+            "raw": raw[-1000:],
+        }
+    raw = (proc.stdout or proc.stderr or "").strip()
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {"code": proc.returncode, "raw": raw[-1000:]}
+    data.setdefault("code", proc.returncode)
+    return data
+
+
+def _verify_card_runtime_html(html, *, require_browser=True, timeout_sec=180):
+    with tempfile.TemporaryDirectory(prefix="qb_card_runtime_verify_") as td:
+        path = os.path.join(td, "page.html")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(html)
+        return _run_card_runtime_verify(
+            path,
+            artifact_only=True,
+            require_browser=require_browser,
+            timeout_sec=timeout_sec,
+        )
+
+
+def _maybe_verify_card_runtime(html, params):
+    if not params.get("verify_card_runtime"):
+        return None
+    result = _verify_card_runtime_html(
+        html,
+        require_browser=params.get("verify_card_runtime_browser", True),
+        timeout_sec=int(params.get("verify_card_runtime_timeout_sec", 180)),
+    )
+    return {
+        "ok": isinstance(result, dict) and result.get("code") == 0,
+        "mode": "card-runtime-only",
+        "result": result,
+        "message": "card runtime artifact 验收未通过" if not (isinstance(result, dict) and result.get("code") == 0) else "",
+    }
+
+
+def _as_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [value]
+
+
+def _safe_stem(value):
+    stem = re.sub(r"[^0-9A-Za-z._-]+", "_", str(value or "").strip())
+    return stem.strip("._-") or "target"
+
+
+def _card_runtime_verify_targets(params):
+    targets = []
+    for item in _as_list(params.get("targets")):
+        if isinstance(item, dict):
+            targets.append(dict(item))
+        elif isinstance(item, str) and re.match(r"https?://", item, re.I):
+            targets.append({"url": item})
+        elif item:
+            targets.append({"page_id": str(item)})
+    for page_id in _as_list(params.get("page_ids")) + _as_list(params.get("page_id")):
+        if page_id:
+            targets.append({"page_id": str(page_id)})
+    for template_id in _as_list(params.get("template_ids")) + _as_list(params.get("template_id")):
+        if template_id:
+            targets.append({"template_id": str(template_id)})
+    for url in _as_list(params.get("urls")) + _as_list(params.get("url")):
+        if url:
+            targets.append({"url": str(url)})
+    return targets
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _resolve_card_runtime_target(spec):
+    spec = dict(spec or {})
+    tid = spec.get("template_id") or spec.get("page_id")
+    record = {}
+    template = None
+    url = spec.get("url") or spec.get("download_url")
+    if tid:
+        template = cmd_template({"template_id": tid} if spec.get("template_id") else {"page_id": tid})
+        if not (isinstance(template, dict) and template.get("code") == 0):
+            if not url:
+                downloaded = cmd_download({"page_id": tid})
+                if isinstance(downloaded, dict) and downloaded.get("code") == 0:
+                    record = dict(downloaded)
+                    record.pop("html", None)
+                    url = record.get("download_url") or record.get("public_url") or record.get("url")
+                    tid = record.get("template_id") or record.get("page_id") or tid
+                else:
+                    raise ValueError("读取模板失败: %s" % json.dumps(template, ensure_ascii=False)[:500])
+        else:
+            record = _template_record(template)
+            url = url or record.get("download_url") or record.get("public_url") or record.get("url")
+            tid = record.get("template_id") or record.get("page_id") or tid
+    if not url:
+        raise ValueError("缺少可验收的 url/download_url")
+    return tid or "", url, record, template
+
+
+def cmd_verify_card_runtime(params):
+    """Fast batch verification for standalone card runtime artifacts."""
+    targets = _card_runtime_verify_targets(params)
+    if not targets:
+        return {"code": 1, "message": "verify_card_runtime 需要 page_id/template_id/url 或对应列表"}
+
+    out_dir = params.get("out_dir") or os.path.join(
+        C.SKILL_ROOT,
+        "output",
+        "card-runtime-verify",
+        datetime.now().strftime("%Y%m%d-%H%M%S"),
+    )
+    if not os.path.isabs(out_dir):
+        out_dir = os.path.join(C.SKILL_ROOT, out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    summary_file = os.path.join(out_dir, "summary.json")
+    require_browser = params.get("require_browser", True)
+    timeout_sec = int(params.get("timeout_sec", 180))
+    results = []
+
+    def flush():
+        _write_json(summary_file, {
+            "code": 0 if all(item.get("code") == 0 for item in results) else 1,
+            "checked": len(results),
+            "passed": len([item for item in results if item.get("code") == 0]),
+            "failed": len([item for item in results if item.get("code") != 0]),
+            "out_dir": out_dir,
+            "results": results,
+        })
+
+    for index, spec in enumerate(targets, start=1):
+        entry = {"index": index, "input": spec}
+        try:
+            tid, url, record, template = _resolve_card_runtime_target(spec)
+            label = tid or ("url_" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:10])
+            html_file = os.path.join(out_dir, _safe_stem(label) + ".html")
+            html = _fetch_public_html(url)
+            with open(html_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(html)
+            verification = _run_card_runtime_verify(
+                html_file,
+                artifact_only=True,
+                require_browser=require_browser,
+                timeout_sec=timeout_sec,
+            )
+            card_check = verification.get("card_runtime_check") if isinstance(verification, dict) else {}
+            manifest = card_check.get("manifest") if isinstance(card_check, dict) else {}
+            artifact = card_check.get("artifact_hydrate") if isinstance(card_check, dict) else {}
+            entry.update({
+                "code": verification.get("code") if isinstance(verification, dict) else 1,
+                "page_id": tid,
+                "url": url,
+                "html_file": html_file,
+                "json_file": os.path.join(out_dir, _safe_stem(label) + ".json"),
+                "title": record.get("title") if isinstance(record, dict) else "",
+                "required_outputs": (manifest or {}).get("required_outputs") or [],
+                "artifact_text": (artifact or {}).get("text") or "",
+                "problems": verification.get("problems") if isinstance(verification, dict) else ["verify_page 无法解析输出"],
+                "verification": verification,
+            })
+            if template is not None:
+                entry["template"] = {
+                    "template_id": record.get("template_id") or record.get("page_id") or tid,
+                    "download_url": record.get("download_url"),
+                    "updated_at": record.get("updated_at"),
+                    "sha256": record.get("sha256"),
+                }
+        except Exception as exc:
+            fallback = spec.get("page_id") or spec.get("template_id") or spec.get("url") or "target_%s" % index
+            entry.update({
+                "code": 1,
+                "page_id": spec.get("page_id") or spec.get("template_id") or "",
+                "url": spec.get("url") or "",
+                "json_file": os.path.join(out_dir, _safe_stem(fallback) + ".json"),
+                "message": str(exc),
+                "problems": [str(exc)],
+            })
+        _write_json(entry["json_file"], entry)
+        results.append(entry)
+        flush()
+
+    failed = [item for item in results if item.get("code") != 0]
+    return {
+        "code": 1 if failed else 0,
+        "checked": len(results),
+        "passed": len(results) - len(failed),
+        "failed": len(failed),
+        "out_dir": out_dir,
+        "summary_file": summary_file,
+        "results": results,
+    }
+
+
+def cmd_retrofit_card_runtime(params):
+    """Rebuild standalone card-runtime artifacts for a published template/page."""
+    tid = params.get("template_id") or params.get("page_id")
+    url = params.get("url") or params.get("download_url")
+    if not tid and not url:
+        return {"code": 1, "message": "retrofit_card_runtime 需要 page_id/template_id 或 url"}
+
+    before = None
+    record = {}
+    if tid:
+        before = cmd_template({"template_id": tid} if params.get("template_id") else {"page_id": tid})
+        if not (isinstance(before, dict) and before.get("code") == 0):
+            if not url:
+                return {"code": 1, "message": "读取模板失败", "template": before}
+        else:
+            record = _template_record(before)
+            url = url or record.get("download_url") or record.get("public_url") or record.get("url")
+            tid = record.get("template_id") or record.get("page_id") or tid
+
+    html = _fetch_public_html(url)
+    next_html, info = CRT.retrofit_html(
+        html,
+        page_id=tid or params.get("page_id") or "",
+        title=params.get("title") or record.get("title") or "",
+    )
+
+    out_file = params.get("out_file") or _default_retrofit_out_file(tid or params.get("page_id") or "page")
+    if not os.path.isabs(out_file):
+        out_file = os.path.join(C.SKILL_ROOT, out_file)
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    with open(out_file, "w", encoding="utf-8", newline="\n") as f:
+        f.write(next_html)
+
+    verify_default = _run_card_runtime_verify(out_file, cover=False) if params.get("verify", True) else None
+    verify_cover = _run_card_runtime_verify(out_file, cover=True) if params.get("verify_cover_card", True) else None
+    if verify_default and verify_default.get("code") != 0:
+        return {"code": 1, "message": "card runtime 独立验收未通过", "html_file": out_file, "retrofit": info, "verification": verify_default}
+    if verify_cover and verify_cover.get("code") != 0:
+        return {"code": 1, "message": "cover/card runtime 验收未通过", "html_file": out_file, "retrofit": info, "cover_verification": verify_cover}
+
+    update_result = None
+    if params.get("update"):
+        if not tid:
+            return {"code": 1, "message": "url 模式不能 update；请传 page_id/template_id", "html_file": out_file, "retrofit": info}
+        expected = _expected_template_metadata(params)
+        if not expected and record:
+            expected = {
+                key: record.get(key)
+                for key in ("download_url", "title", "description", "category", "size", "sha256", "updated_at")
+                if record.get(key) is not None
+            }
+        update_params = {
+            "template_id": tid,
+            "html_file": out_file,
+            "expected_metadata": expected,
+            "verify_cover_card": False,
+        }
+        if params.get("verify_cover_card") or params.get("has_cover_card"):
+            update_params["has_cover_card"] = True
+            update_params["cover_card_url"] = _with_cover_query(url)
+        update_result = cmd_update_template(update_params)
+        err_code = ""
+        if isinstance(update_result, dict):
+            err = update_result.get("error") if isinstance(update_result.get("error"), dict) else {}
+            template = update_result.get("template") if isinstance(update_result.get("template"), dict) else {}
+            template_err = template.get("error") if isinstance(template.get("error"), dict) else {}
+            err_code = str(err.get("code") or template_err.get("code") or update_result.get("code") or "")
+        if not (isinstance(update_result, dict) and update_result.get("code") == 0) and err_code == "TEMPLATE_NOT_FOUND":
+            update_result = cmd_update({
+                "page_id": tid,
+                "html_file": out_file,
+                "verify_cover_card": False,
+                **({
+                    "has_cover_card": True,
+                    "cover_card_url": _with_cover_query(url),
+                } if (params.get("verify_cover_card") or params.get("has_cover_card")) else {}),
+            })
+        if not (isinstance(update_result, dict) and update_result.get("code") == 0):
+            return {"code": 1, "message": "写回失败", "html_file": out_file, "retrofit": info, "update": update_result}
+
+    return {
+        "code": 0,
+        "page_id": tid or params.get("page_id") or "",
+        "url": url,
+        "html_file": out_file,
+        "retrofit": info,
+        "verification": verify_default,
+        "cover_verification": verify_cover,
+        "update": update_result,
+        "preflight_template": before,
+    }
 
 
 _COMMANDS = {
@@ -1170,6 +1551,8 @@ _COMMANDS = {
     "templates": cmd_templates,
     "template": cmd_template,
     "update_template": cmd_update_template,
+    "retrofit_card_runtime": cmd_retrofit_card_runtime,
+    "verify_card_runtime": cmd_verify_card_runtime,
 }
 
 

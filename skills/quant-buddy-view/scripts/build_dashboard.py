@@ -258,6 +258,16 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
     live_card_js = _read_text(os.path.join(ASSETS_DIR, "live-card.js")) if live_card_config else ""
     live_card_binding = LC.binding_script(live_card_config) if live_card_config else ""
+    card_runtime_artifacts = LC.card_runtime_artifacts(
+        live_card_config,
+        endpoint=endpoint,
+        package_id=package_id,
+        signature=signature,
+        style=live_card_css,
+        fallback_title=title or "",
+        fallback_description=subtitle or "",
+    ) if live_card_config else ""
+    card_runtime_js = LC.card_runtime_script() if live_card_config else ""
 
     # 渲染脚本：把任意 data 形态归一为 {columns, rows}，再按 panel.type 出图/表
     render_js = r"""
@@ -825,6 +835,7 @@ document.addEventListener('DOMContentLoaded', () => {
 {shared_header}
 <main>
   {live_card_html}
+  {card_runtime_artifacts}
   <section class="std-hero">
     <div class="eyebrow">{mode_note}</div>
     <h1>{title_esc}</h1>
@@ -845,6 +856,7 @@ document.addEventListener('DOMContentLoaded', () => {
 {live_card_js}
 {render_js}
 </script>
+{card_runtime_js}
 {live_card_binding}
 </body>
 </html>

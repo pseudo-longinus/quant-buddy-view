@@ -10,6 +10,8 @@ import re
 LIVE_CARD_MARKER = "data-qb-live-card"
 CSS_TOKEN = "<!-- QB_LIVE_CARD_CSS -->"
 JS_TOKEN = "<!-- QB_LIVE_CARD_JS -->"
+CARD_RUNTIME_KIND = "embedded-card-v1"
+CARD_RUNTIME_VERSION = "1.0.0"
 
 
 def has_live_card(html):
@@ -140,6 +142,152 @@ def card_html(config=None, *, fallback_title="", fallback_description=""):
         metrics="\n              ".join(metrics),
         tags=tags,
     )
+
+
+def required_outputs(config=None, *, fallback_title="", fallback_description=""):
+    cfg = normalize_config(config, fallback_title=fallback_title, fallback_description=fallback_description)
+    values = []
+    for item in [cfg.get("primary"), *(cfg.get("metrics") or [])]:
+        if isinstance(item, dict) and _clean_text(item.get("output")):
+            values.append(_clean_text(item.get("output")))
+    if _clean_text(cfg.get("date_output")):
+        values.append(_clean_text(cfg.get("date_output")))
+    out = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def card_runtime_artifacts(config=None, *, endpoint="", package_id="", signature="", style="", fallback_title="", fallback_description=""):
+    cfg = normalize_config(config, fallback_title=fallback_title, fallback_description=fallback_description)
+    card = card_html(cfg)
+    card = re.sub(r'\s+id="essenceSection"', "", card, flags=re.I)
+    card = re.sub(r"\s+hidden(?=[\s>])", "", card, flags=re.I)
+    manifest = {
+        "version": CARD_RUNTIME_VERSION,
+        "kind": CARD_RUNTIME_KIND,
+        "package_id": _clean_text(package_id),
+        "signature": _clean_text(signature),
+        "endpoint": _clean_text(endpoint),
+        "required_outputs": required_outputs(cfg),
+        "aspect_ratio": "4/3",
+    }
+    manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2).replace("</", "<\\/")
+    return """
+<template data-qb-card-template>
+{card}
+</template>
+<style data-qb-card-style>
+{style}
+</style>
+<script type="application/json" data-qb-card-manifest>
+{manifest}
+</script>""".format(card=card, style=style or "", manifest=manifest_json)
+
+
+def card_runtime_script():
+    return r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
+(function(){
+  function text(value, fallback){
+    var raw = value == null ? "" : String(value).trim();
+    return raw || fallback || "";
+  }
+  function isObj(v){ return v && typeof v === "object" && !Array.isArray(v); }
+  function unwrap(data){
+    if (data && data.data != null && (data.read_mode || data.data_id || data.error == null)) data = data.data;
+    if (isObj(data)) {
+      var keys = ["last_value", "last_day_stats", "last_valid_per_asset", "range_data"];
+      for (var i = 0; i < keys.length; i++) if (data[keys[i]] != null) return unwrap(data[keys[i]]);
+    }
+    return data;
+  }
+  function firstUseful(data, field){
+    data = unwrap(data);
+    if (Array.isArray(data)) {
+      for (var i = data.length - 1; i >= 0; i--) {
+        var item = data[i];
+        if (Array.isArray(item)) {
+          for (var j = item.length - 1; j >= 0; j--) if (item[j] != null && item[j] !== "") return item[j];
+        } else if (isObj(item)) {
+          if (field && item[field] != null) return item[field];
+          var vals = Object.keys(item).map(function(k){ return item[k]; }).filter(function(v){ return v != null && v !== ""; });
+          if (vals.length) return vals[vals.length - 1];
+        } else if (item != null && item !== "") {
+          return item;
+        }
+      }
+    }
+    if (isObj(data)) {
+      if (field && data[field] != null) return data[field];
+      if (Array.isArray(data.values)) {
+        for (var k = data.values.length - 1; k >= 0; k--) if (data.values[k] != null) return data.values[k];
+      }
+      var keys = Object.keys(data).filter(function(k){ return data[k] != null && data[k] !== ""; });
+      if (keys.length) return data[keys[keys.length - 1]];
+    }
+    return data;
+  }
+  function outputValue(outputs, output, field){
+    if (!output || !outputs) return null;
+    return firstUseful(outputs[output], field);
+  }
+  function fmt(v, unit){
+    if (v == null || v === "") return "待更新";
+    if (typeof v === "number" && isFinite(v)) {
+      var abs = Math.abs(v);
+      v = abs >= 100 ? v.toFixed(0) : abs >= 10 ? v.toFixed(1) : v.toFixed(2);
+    }
+    return String(v) + (unit ? " " + unit : "");
+  }
+  function hydrate(root, outputs){
+    if (!root) return;
+    outputs = outputs || {};
+    var dateEl = root.querySelector("[data-qb-live-card-date]");
+    if (dateEl) {
+      var date = "";
+      Object.keys(outputs).some(function(key){
+        var data = unwrap(outputs[key]);
+        date = firstUseful(data, "trade_date") || firstUseful(data, "date") || "";
+        return !!date;
+      });
+      if (date) {
+        dateEl.textContent = String(date).slice(0, 10);
+        if (dateEl.tagName && dateEl.tagName.toLowerCase() === "time") dateEl.setAttribute("datetime", String(date).slice(0, 10));
+      }
+    }
+    var primaryWrap = root.querySelector("[data-qb-live-card-primary-output]");
+    var primary = root.querySelector("[data-qb-live-card-primary]");
+    if (primary && primaryWrap) {
+      var pv = outputValue(outputs, primaryWrap.getAttribute("data-qb-live-card-primary-output"), primaryWrap.getAttribute("data-qb-live-card-primary-field"));
+      primary.textContent = fmt(pv, primaryWrap.getAttribute("data-qb-live-card-primary-unit") || "");
+    }
+    Array.prototype.forEach.call(root.querySelectorAll("[data-qb-live-card-metric]"), function(item){
+      var valueEl = item.querySelector("b");
+      if (!valueEl) return;
+      var value = outputValue(outputs, item.getAttribute("data-qb-live-card-output"), item.getAttribute("data-qb-live-card-field"));
+      valueEl.textContent = fmt(value, item.getAttribute("data-qb-live-card-unit") || "");
+    });
+  }
+  window.QBCardRuntimeV1 = {
+    mount: function(root, options){
+      var template = document.querySelector("template[data-qb-card-template]");
+      if (!root || !template) return null;
+      root.replaceChildren(template.content.cloneNode(true));
+      if (options && options.outputs) hydrate(root, options.outputs);
+      return {
+        hydrate: function(outputs){ hydrate(root, outputs); },
+        dispose: function(){ root.replaceChildren(); }
+      };
+    },
+    hydrate: function(root, outputs){ hydrate(root, outputs); },
+    dispose: function(root){ if (root) root.replaceChildren(); }
+  };
+})();
+</script>"""
 
 
 def binding_script(config=None, *, fallback_title="", fallback_description=""):

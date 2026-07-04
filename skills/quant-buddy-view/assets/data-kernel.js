@@ -76,7 +76,11 @@ const QB = (function () {
     const resp = await fetch(apiUrl(endpoint, '/skill/queryFormulaPackage'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ package_id, signature }),
+      body: JSON.stringify({
+        package_id,
+        signature,
+        outputs: Array.isArray(cfg.outputs) ? cfg.outputs : (Array.isArray(opts && opts.outputs) ? opts.outputs : undefined),
+      }),
     });
     if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
 

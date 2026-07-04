@@ -2,7 +2,7 @@
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
-> 通过本地脚本 `scripts/static_page.py` 调用，**全部命令凭 `config.json` 的 API Key 认身份**（归属由 api_key 推定，本技能无会话 / task_id 概念）。
+> 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定，本技能无会话 / task_id 概念）；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
 
@@ -63,6 +63,9 @@ python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 
 # 已转 published template 的页面：保持原 page_id/public_url 安全改写
 python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file":"output/pages/x.html","verify_cover_card":true,"expected_metadata":{"download_url":"https://..."}}'
+
+# 批量快速验收范式卡 card runtime artifact，不跑整页多视口
+python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"require_browser":true}'
 ```
 
 ## 公共页头页尾门禁
@@ -88,6 +91,29 @@ python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file"
 - 活卡页：`verify_page.mjs <html>?cover=1 --require-browser --cover-card`
 
 任一失败都会返回 `code:1`，不会上传或覆盖线上页面。通过后，脚本会在请求体中带上 `has_cover_card:true`；如果服务端响应没有 `cover_card_url`，脚本会在返回 JSON 中补出建议值 `<url>?cover=1`。
+
+## 范式卡 artifact 快速门禁
+
+`upload` / `update` / `update_template` 可传 `verify_card_runtime:true`。脚本会把最终 HTML 写入临时文件，执行：
+
+```bash
+node scripts/verify_page.mjs <html> --card-runtime-only --require-browser
+```
+
+这条路径只验收嵌入的 card artifact，不跑默认页 / `?cover=1` 的整页多视口，因此适合模板库批量回归。检查项包括：
+
+- `template[data-qb-card-template]`、`style[data-qb-card-style]`、`script[data-qb-card-manifest]`、`script[data-qb-card-runtime]` 齐全；
+- runtime 不主动 `fetch` / `XMLHttpRequest` / `EventSource`，不依赖完整页面 DOM；
+- manifest 的 `required_outputs` 能通过 `queryFormulaPackage` 返回；
+- 独立空白宿主中调用 `QBCardRuntimeV1.mount/hydrate(root, outputs)` 后不空白、不残留长期占位态。
+
+已发布/官方精选页可批量跑：
+
+```bash
+python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"timeout_sec":180}'
+```
+
+返回会包含每张卡的 `artifact_text`、`required_outputs`、`problems`，并把逐项 HTML/JSON 和 `summary.json` 保存到 `output/card-runtime-verify/<timestamp>/`。长任务中途失败时，已完成项仍会留在该目录。
 
 ## 下载 / 取回 HTML 再编辑（`download`）
 
@@ -239,11 +265,11 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 
 1. 先调用 `template` 读取当前 metadata。
 2. 如传入 `expected_metadata`，脚本比较 `download_url/title/description/category/size/sha256/updated_at` 等字段；发现变化就停止。
-3. 编译公共 share shell；如传 `verify_cover_card:true`，先跑默认页和 `?cover=1` 浏览器验收。
+3. 编译公共 share shell；如传 `verify_cover_card:true`，先跑默认页和 `?cover=1` 浏览器验收；如传 `verify_card_runtime:true`，先跑 artifact 快速门禁。
 4. 调 `POST /skill/updateTemplate` 写回同一个 `template_id/page_id`。
 5. 写后再次 `template` 回查，并把 `preflight_template/postflight_template` 放进返回 JSON。
 
-常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`cover_card_url`、`has_cover_card`、`verify_cover_card`、`expected_metadata`。
+常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`cover_card_url`、`has_cover_card`、`verify_cover_card`、`verify_card_runtime`、`expected_metadata`。
 
 写回后必须以 `template` / `templates` 回查为准。若服务端暂未持久化 `cover_card_url` / `has_cover_card`，脚本返回里可能会根据本次参数补出建议值，但模板列表仍可能显示 `has_cover_card:false`。这种情况下 HTML 与 `?cover=1` 已经可用，前端可临时由 `download_url + "?cover=1"` 派生 iframe；metadata 持久化要作为后端阻塞项单独交接。
 
@@ -266,6 +292,8 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为发布 URL + `?cover=1` |
 | `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
 | `verify_cover_card` | bool | ❌ | false | 发布前本地验收默认页和 `?cover=1 --cover-card`；失败不上传 |
+| `verify_card_runtime` | bool | ❌ | false | 发布前只验收 card runtime artifact；失败不上传 |
+| `verify_card_runtime_timeout_sec` | number | ❌ | 180 | 单次 artifact 门禁超时时间 |
 | `ensure_share_shell` | bool | ❌ | true | 发布前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 
@@ -287,6 +315,8 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为原页面 URL + `?cover=1` |
 | `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
 | `verify_cover_card` | bool | ❌ | false | 替换前本地验收默认页和 `?cover=1 --cover-card`；失败不覆盖 |
+| `verify_card_runtime` | bool | ❌ | false | 替换前只验收 card runtime artifact；失败不覆盖 |
+| `verify_card_runtime_timeout_sec` | number | ❌ | 180 | 单次 artifact 门禁超时时间 |
 | `ensure_share_shell` | bool | ❌ | true | 替换前强制检查/自动补公共页头页尾；生产路径不要关闭 |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 

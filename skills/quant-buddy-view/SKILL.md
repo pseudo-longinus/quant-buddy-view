@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.4.4
+version: 0.4.5
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, thumbnails, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
@@ -11,7 +11,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.4.4
+  version: 0.4.5
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -141,13 +141,14 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
    - 产物默认写到 `output/pages/<slug>.html`；传 `"upload": true` 可一步生成并发布。
 
 3. **发布 / 管理**（`scripts/static_page.py`）
-   - `upload`：上传 HTML → 返回 `page_id` + 公开 `url`；可带 `title`（缺省取 `<title>`）和 `description`（页面说明，≤1000 字，列表/详情展示用）。宽宝活卡页面可传 `verify_cover_card:true`，本地通过默认页与 `?cover=1 --cover-card` 后再上传，并返回 / 透传 `cover_card_url`、`has_cover_card`。
-   - `update`：替换已发布页面的内容，**URL / page_id 不变**（页面已分享后想补充/调整时用，访问者刷新即见新内容，不占新配额）。也可只改 `title` / `description`（`description` 传空串 `""` 清空，不传保留原值）。同样支持 `verify_cover_card`、`cover_card_url`、`has_cover_card`。
+   - `upload`：上传 HTML → 返回 `page_id` + 公开 `url`；可带 `title`（缺省取 `<title>`）和 `description`（页面说明，≤1000 字，列表/详情展示用）。宽宝活卡页面可传 `verify_cover_card:true`，本地通过默认页与 `?cover=1 --cover-card` 后再上传，并返回 / 透传 `cover_card_url`、`has_cover_card`；范式卡 artifact 可传 `verify_card_runtime:true`，只跑快速 card runtime artifact 门禁。
+   - `update`：替换已发布页面的内容，**URL / page_id 不变**（页面已分享后想补充/调整时用，访问者刷新即见新内容，不占新配额）。也可只改 `title` / `description`（`description` 传空串 `""` 清空，不传保留原值）。同样支持 `verify_cover_card`、`verify_card_runtime`、`cover_card_url`、`has_cover_card`。
    - `download`：取回已发布页面的 HTML 再编辑（鉴权拿 url → 直连 OSS 下载，不占服务端带宽），改完 `update` 覆盖。
    - `list` / `revoke`：列出 / 撤销我的页面（活跃页上限 200，单页 ≤ 2MB）。
    - `thumbnail`：给某个已发布页面设置 / 替换一张**纯展示封面图**（直传 PNG/JPG，≤2MB）。只用于列表/详情/模板墙的 `<img>` 预览，**不进入 HTML、不影响取数、不占活跃页配额**；按 page_id 命名存 OSS，转模板后仍有效。`upload` / `update` 可带 `thumbnail_file`，HTML 成功后再自动上传封面；缩略图失败只返回 warning，不回滚 HTML。
    - `templates` / `template`：**浏览 / 复用官方精选**——`templates` 列出带 `recommend:官方精选` 的页面（不再以 `is_template/template_status` 作为发现门槛），`template` 看详情拿 `download_url`，直连 OSS 取回 HTML，换成自己的标的/文案/公式包后再 `upload` 成自己的页；返回会透传或派生 `cover_card_url` / `has_cover_card`。
-   - `update_template`：已转 published template / 官方精选页需要保留原链接时的安全维护 helper；写回前先 re-query metadata，对 `expected_metadata` 做并发检查，再调用后台 `updateTemplate`，保持同一个 `template_id/page_id/public_url`。
+   - `update_template`：已转 published template / 官方精选页需要保留原链接时的安全维护 helper；写回前先 re-query metadata，对 `expected_metadata` 做并发检查，再调用后台 `updateTemplate`，保持同一个 `template_id/page_id/public_url`。可传 `verify_card_runtime:true` 做写回前 artifact 快速门禁。
+   - `verify_card_runtime`：批量验收已发布/官方精选页的独立 card artifact；输入 `page_ids` / `template_ids` / `urls`，脚本会下载 HTML、检查 artifact/manifest/runtime、查询 `required_outputs`，并在空白宿主中独立 hydrate，逐项保存 HTML/JSON 结果。
    - `upload` / `update` 发布前会强制检查公共 share shell；缺公共页头/页尾会自动插入并编译，主题色只能通过 `theme` / `--qb-shell-*` 变量覆盖，仍有占位符或旧二维码残留则拒绝发布。
    - 如果一个公开 URL 明明可访问，但 `download` / `update` 返回 `PAGE_NOT_FOUND`，可用 `template --page_id <page_id>` 检查它是否已进入官方精选/旧模板口径；本 skill 对这类页面默认只读取和复用，不要擅自新建 URL 或走普通 `update` 覆盖。若用户明确要求保留原链接更新，停下说明需要后台/admin 路径，不能用新 URL 代替。
    - 权限 / 权责：自己的页面默认仅本人；`is_test` 用户可跨 download / update / thumbnail 其他 is_test 用户页面、`list` 传 `scope=test_all` 看全部 test 用户（普通用户页面一律 `FORBIDDEN`）。**官方精选浏览/复用对全员开放**；官方精选标签、旧模板元数据/上下线/删除、把已有页转旧公共模板都是后台（growthX）动作——本 skill 侧只「读取 + 复用」，不做这些写操作。
@@ -180,8 +181,8 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `scripts/build_dashboard.py` | （单命令） | spec → live 实时取数看板 HTML | [tools/build_dashboard.md](tools/build_dashboard.md) |
 | `scripts/compile_bespoke_page.py` | （单命令） | **【shell 处理脚本】** bespoke 主体 HTML → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
 | `scripts/retrofit_share_shell.py` | （单命令） | **【shell 处理脚本】** 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell（`assets/share-shell/`），可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
-| `scripts/static_page.py` | `upload` / `update` / `download` / `list` / `revoke` / `thumbnail` / `tags` / `publish_community` / `unpublish_community` / `templates` / `template` / `update_template` | 发布/替换/下载/管理静态页，得到公开链接（`update` 替换内容不换链接；宽宝活卡可加 `verify_cover_card`；`thumbnail` 设展示封面；`templates`/`template` 浏览复用官方精选；`update_template` 安全改写需要保留原链接的官方精选/旧模板；is_test 可跨用户） | [tools/static_page.md](tools/static_page.md) |
-| `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误；发布前可加 `--require-browser` 强制浏览器验收；宽宝活卡加 `--cover-card` 检查 4:3 视口填满、浅色主题、统一骨架、DOM 标记、无滚动条、无长期占位态 | — |
+| `scripts/static_page.py` | `upload` / `update` / `download` / `list` / `revoke` / `thumbnail` / `tags` / `publish_community` / `unpublish_community` / `templates` / `template` / `update_template` / `retrofit_card_runtime` / `verify_card_runtime` | 发布/替换/下载/管理静态页，得到公开链接（`update` 替换内容不换链接；宽宝活卡可加 `verify_cover_card`；范式卡 artifact 可加 `verify_card_runtime` 或批量跑 `verify_card_runtime`；`thumbnail` 设展示封面；`templates`/`template` 浏览复用官方精选；`update_template` 安全改写需要保留原链接的官方精选/旧模板；is_test 可跨用户） | [tools/static_page.md](tools/static_page.md) |
+| `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误；发布前可加 `--require-browser` 强制浏览器验收；宽宝活卡加 `--cover-card` 检查 4:3 视口填满、浅色主题、统一骨架、DOM 标记、无滚动条、无长期占位态；范式卡 artifact 可加 `--card-runtime-only` 跳过整页视口，只验收 artifact/manifest/required_outputs/独立 hydrate | — |
 | `scripts/render_cover.py` | （被 `build_dashboard` 调用） | 封面栅格化与合成兜底：`capture_page_cover` 用系统 Edge/Chrome 无头截"封面模式页"为整页 PNG；合成封面（全幅裸图/品牌海报）走 浏览器 → 纯 Python(cairosvg/svglib) → SVG 三层兜底。跨平台、零强依赖，不影响 HTML 发布 | — |
 | `scripts/render_existing_page_thumbnail.py` | （单命令） | 给已发布/官方精选 HTML 补封面：下载或读取 HTML → 解析内嵌公式包凭证 → 先取真实 outputs 并临时替换 `QB.query` → 再用系统 Edge/Chrome 截 1200×675 PNG；可带 `upload:true` 直接设置 `thumbnail_url` | [tools/static_page.md](tools/static_page.md) |
 | `assets/data-kernel.js` | （前端内核，非脚本） | 手搓 bespoke 页共用的「取数 + 清洗 + 容错」一份；内联进页面 `<script>` 用 | [guides/bespoke-page.md](guides/bespoke-page.md) |
