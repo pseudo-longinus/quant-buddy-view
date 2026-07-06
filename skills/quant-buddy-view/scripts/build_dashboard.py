@@ -233,6 +233,9 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
         "endpoint": endpoint,
         "packageId": package_id,
         "signature": signature,
+        # 构建时的 quant-buddy-view 版本/名，随实时取数上报给服务端 audit
+        "skillVersion": C.SKILL_VERSION,
+        "skillName": C.SKILL_NAME,
     }
 
     boot_json = json.dumps(boot, ensure_ascii=False)
@@ -544,7 +547,10 @@ async function fetchLive() {
   try {
     resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
+      headers: Object.assign(
+        {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
+        BOOT.skillVersion ? {'x-skill-version': BOOT.skillVersion, 'x-skill-name': BOOT.skillName || 'quant-buddy-view'} : {}
+      ),
       body: JSON.stringify({package_id: BOOT.packageId, signature: BOOT.signature}),
     });
   } catch (e) {

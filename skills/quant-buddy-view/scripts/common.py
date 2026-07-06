@@ -246,8 +246,12 @@ def _write_json_file(path, data):
 
 def _in_dev_checkout() -> bool:
     """SKILL_ROOT 处于 git 工作副本（上溯存在 .git）时视为源码/调试目录，跳过自更新，
-    避免把开发中的仓库副本静默覆盖（与 SKILL.md「源码 checkout 调试不要 bundle 覆盖」一致）。"""
-    d = SKILL_ROOT
+    避免把开发中的仓库副本静默覆盖（与 SKILL.md「源码 checkout 调试不要 bundle 覆盖」一致）。
+    先 realpath 解析 junction/symlink：全局安装若是指向 git 源码仓库的 junction，也能识别并跳过。"""
+    try:
+        d = os.path.realpath(SKILL_ROOT)
+    except Exception:
+        d = SKILL_ROOT
     while True:
         if os.path.exists(os.path.join(d, ".git")):
             return True

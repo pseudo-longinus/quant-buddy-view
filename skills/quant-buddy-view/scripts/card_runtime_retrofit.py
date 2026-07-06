@@ -174,7 +174,7 @@ def _post_json_stream(url, body, timeout=90):
     req = urllib.request.Request(
         url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        headers=C.headers(accept="text/event-stream"),  # 带上 x-skill-version / x-skill-name
         method="POST",
     )
     try:

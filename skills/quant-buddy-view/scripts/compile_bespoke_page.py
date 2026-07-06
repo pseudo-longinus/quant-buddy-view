@@ -137,6 +137,8 @@ def _compile(html, params):
         html,
     )
     html = re.sub(r'src=["\'][^"\']*assets/logo\.svg["\']', 'src="' + _logo_data_uri() + '"', html)
+    # 把 data-kernel 里的版本占位符替换成本次构建所用的 quant-buddy-view 版本，供实时取数上报 audit
+    html = html.replace("__QBV_SKILL_VERSION__", C.SKILL_VERSION or "")
     return html
 
 

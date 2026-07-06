@@ -21,6 +21,12 @@
 const QB = (function () {
   'use strict';
 
+  // 构建时由 compile_bespoke_page.py 注入本次生成所用的 quant-buddy-view 版本；
+  // 未经编译（仍是占位符）时不发版本头，避免上报无意义的占位串。
+  const SKILL_VERSION = '__QBV_SKILL_VERSION__';
+  const SKILL_NAME = 'quant-buddy-view';
+  const _hasSkillVer = SKILL_VERSION && SKILL_VERSION.indexOf('__QBV_') !== 0;
+
   // —— 有效数值：非 null、是有限数（NaN / Infinity 都不算）——
   const num = v => (typeof v === 'number' && isFinite(v)) ? v : null;
 
@@ -75,7 +81,10 @@ const QB = (function () {
 
     const resp = await fetch(apiUrl(endpoint, '/skill/queryFormulaPackage'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        _hasSkillVer ? { 'x-skill-version': SKILL_VERSION, 'x-skill-name': SKILL_NAME } : {}
+      ),
       body: JSON.stringify({
         package_id,
         signature,
