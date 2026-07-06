@@ -18,7 +18,10 @@ config.json 的 api_key（Bearer）认身份；query 取数无需 api_key（凭 
 import io
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 import tempfile
 import urllib.error
 import urllib.request
@@ -175,6 +178,184 @@ def http_json(method, url, hdrs, body=None, timeout=600):
 
 
 # ────────────────────────────────────────────────
+# 静默自更新：每次使用时按 GitHub tag 检查新版本，有则后台静默更新
+#   发现走 GitHub tags API；应用复用 scripts/self_update.py（--trust-tls）。
+#   全程 best-effort：任何异常都不得影响当前工具命令。
+# ────────────────────────────────────────────────
+
+SELF_UPDATE_SCRIPT = os.path.join(SCRIPT_DIR, "self_update.py")
+VERSION_CHECK_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".version_check_state.json")
+SELF_UPDATE_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".self_update_state.json")
+GITHUB_TAGS_API = "https://api.github.com/repos/pseudo-longinus/quant-buddy-view/tags"
+# 匿名 GitHub API 限流 60 次/小时/IP：默认 1 小时才检查一次
+VERSION_CHECK_TTL = int(os.environ.get("QBV_VERSION_CHECK_TTL_SECONDS", "3600") or "3600")
+VERSION_CHECK_HTTP_TIMEOUT = 4          # GitHub 请求短超时，避免拖慢当前命令
+SELF_UPDATE_DAILY_FAIL_CAP = 1          # 同版本当日失败上限，超过则当天不再下载
+
+# 进程内内存标记：本次运行是否已对某 target_version 触发过（一个进程最多一次）
+_SELF_UPDATE_TRIED_THIS_RUN = set()
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _today_str() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _cmp_version(target: str, current: str) -> bool:
+    """target 是否比 current 新（语义化按点分数字比较，容忍前缀 v）。"""
+    def parse(v):
+        if not v:
+            return None
+        t = str(v).strip().lstrip("vV")
+        parts = t.split(".")
+        nums = []
+        for p in parts:
+            if not re.fullmatch(r"\d+", p):
+                return None
+            nums.append(int(p))
+        return tuple(nums)
+
+    a, b = parse(target), parse(current)
+    if a is None or b is None:
+        return str(target or "").lstrip("vV") != str(current or "").lstrip("vV")
+    w = max(len(a), len(b))
+    a = a + (0,) * (w - len(a))
+    b = b + (0,) * (w - len(b))
+    return a > b
+
+
+def _read_json_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _write_json_file(path, data):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _in_dev_checkout() -> bool:
+    """SKILL_ROOT 处于 git 工作副本（上溯存在 .git）时视为源码/调试目录，跳过自更新，
+    避免把开发中的仓库副本静默覆盖（与 SKILL.md「源码 checkout 调试不要 bundle 覆盖」一致）。"""
+    d = SKILL_ROOT
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _should_run_version_check() -> bool:
+    """TTL 节流：未强制、且距上次检查不足 TTL、且版本未变 → 不检查。
+    决定检查后立刻写回时间戳，使失败也照样被节流。"""
+    if _truthy_env("QBV_FORCE_VERSION_CHECK"):
+        return True
+    st = _read_json_file(VERSION_CHECK_STATE_FILE)
+    if st.get("skill_version") != SKILL_VERSION:
+        return True
+    try:
+        age = time.time() - float(st.get("ts") or 0)
+    except Exception:
+        age = VERSION_CHECK_TTL + 1
+    return age >= VERSION_CHECK_TTL
+
+
+def _fetch_latest_tag():
+    """拉 GitHub tags，返回 (version_without_v, zipball_url) 里语义最大的一个；失败返回 (None, None)。"""
+    req = urllib.request.Request(
+        GITHUB_TAGS_API,
+        headers={"User-Agent": "quant-buddy-view-self-update", "Accept": "application/vnd.github+json"},
+    )
+    with _NO_PROXY_OPENER.open(req, timeout=VERSION_CHECK_HTTP_TIMEOUT) as resp:
+        tags = json.loads(resp.read().decode("utf-8"))
+    best_name, best_url = None, None
+    for t in tags if isinstance(tags, list) else []:
+        name = (t or {}).get("name") or ""
+        url = (t or {}).get("zipball_url") or ""
+        if not name or not url:
+            continue
+        if best_name is None or _cmp_version(name, best_name):
+            best_name, best_url = name, url
+    if not best_name:
+        return None, None
+    return best_name.lstrip("vV"), best_url
+
+
+def _self_update_gate(target_version: str) -> bool:
+    """去重 + 当日失败上限：本进程已试过、或同日同版本失败已达上限 → 不触发。"""
+    if not target_version:
+        return False
+    if target_version in _SELF_UPDATE_TRIED_THIS_RUN:
+        return False
+    st = _read_json_file(SELF_UPDATE_STATE_FILE)
+    if st.get("date") == _today_str() and st.get("target_version") == target_version:
+        if st.get("status") == "failed" and int(st.get("attempts") or 0) >= SELF_UPDATE_DAILY_FAIL_CAP:
+            return False
+    return True
+
+
+def _spawn_self_update(target_version: str, zip_url: str) -> None:
+    """后台、静默、不阻塞地触发 self_update.py（--trust-tls）。子进程会自行写 .self_update_state.json。"""
+    if not os.path.exists(SELF_UPDATE_SCRIPT):
+        return
+    cmd = [
+        sys.executable, SELF_UPDATE_SCRIPT,
+        "--url", zip_url,
+        "--version", target_version,
+        "--trust-tls",
+        "--skill-root", SKILL_ROOT,
+    ]
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
+    if os.name == "nt":
+        # DETACHED_PROCESS | CREATE_NO_WINDOW：脱离当前控制台、无窗口
+        kwargs["creationflags"] = 0x00000008 | 0x08000000
+        kwargs["close_fds"] = True
+    else:
+        kwargs["start_new_session"] = True
+        kwargs["close_fds"] = True
+    subprocess.Popen(cmd, **kwargs)
+    _SELF_UPDATE_TRIED_THIS_RUN.add(target_version)
+
+
+def maybe_check_update() -> None:
+    """每次工具运行的入口钩子：静默检查 GitHub 新 tag，有则后台自更新。任何异常都吞掉。"""
+    try:
+        if _truthy_env("QBV_DISABLE_SELF_UPDATE"):
+            return
+        if not SKILL_VERSION:
+            return
+        if _in_dev_checkout():
+            return
+        if not _should_run_version_check():
+            return
+        # 记录本次检查时间戳（无论后续成败），保证 TTL 节流
+        _write_json_file(VERSION_CHECK_STATE_FILE, {"skill_version": SKILL_VERSION, "ts": int(time.time())})
+        latest, zip_url = _fetch_latest_tag()
+        if not latest or not zip_url:
+            return
+        if not _cmp_version(latest, SKILL_VERSION):
+            return
+        if not _self_update_gate(latest):
+            return
+        _spawn_self_update(latest, zip_url)
+    except Exception:
+        # 自更新永不影响当前工具命令
+        pass
+
+
+# ────────────────────────────────────────────────
 # 入参 / 输出
 # ────────────────────────────────────────────────
 
@@ -228,6 +409,7 @@ def read_params(argv, env_var="VIEW_PARAMS"):
     与 quant-buddy-skill 同款，规避 PowerShell GBK 命令行截断中文：优先用环境变量或 @file。
     命令行优先按 JSON 字符串解析；解析失败时兜底支持 `--key value` / `--key=value` 写法。
     """
+    maybe_check_update()  # 每次工具运行时静默检查/触发自更新（best-effort，永不阻塞或报错）
     from_argv = False
     raw = os.environ.get(env_var, "").strip()
     if not raw and len(argv) >= 1:
