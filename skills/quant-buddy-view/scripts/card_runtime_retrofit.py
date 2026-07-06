@@ -13,7 +13,7 @@ import common as C
 
 
 CARD_RUNTIME_KIND = "embedded-card-v1"
-CARD_RUNTIME_VERSION = "1.0.0"
+CARD_RUNTIME_VERSION = "1.0.1"
 START = "<!-- QB_CARD_RUNTIME_ARTIFACTS_START -->"
 END = "<!-- QB_CARD_RUNTIME_ARTIFACTS_END -->"
 
@@ -396,19 +396,19 @@ def _build_page_card(page_id, title, keys):
             "LUCNT", "XD_PX", "XD_RET", "N1TOT", "PROMO1", "WINRATE1", "AVGRET1", "AVG5D1",
             "N2TOT", "PROMO2", "WINRATE2", "AVGRET2", "AVG5D2", "N3TOT", "PROMO3", "WINRATE3", "AVGRET3", "AVG5D3",
         ] if k in keys_set]
-        core = """    <div class="qb-hero-split">
-      <div class="qb-signal-mark">1→2</div>
-      <div>
-        <strong data-qb-value data-output="PROMO1" data-format="pct">0%</strong>
-        <span>历史同梯队次日晋级率</span>
+        core = """    <div class="qb-ladder-card">
+      <div class="qb-ladder-thesis">
+        <small>晋级关口 1→2</small>
+        <b data-qb-value data-output="PROMO1" data-format="pct">0%</b>
+        <span>次日晋级率</span>
       </div>
-    </div>
-    <div class="qb-tier-grid">
-      <div><span>1连样本</span><b data-qb-value data-output="N1TOT" data-format="int">0</b><i data-qb-value data-output="AVGRET1" data-format="signed-pct">0%</i></div>
-      <div><span>2连晋级</span><b data-qb-value data-output="PROMO2" data-format="pct">0%</b><i data-qb-value data-output="WINRATE2" data-format="pct">0%</i></div>
-      <div><span>3连强度</span><b data-qb-value data-output="AVG5D3" data-format="signed-pct">0%</b><i data-qb-value data-output="PROMO3" data-format="pct">0%</i></div>
+      <div class="qb-ladder-track" aria-label="连板晋级阶梯">
+        <div class="qb-ladder-step is-first"><span>1连样本</span><b data-qb-value data-output="N1TOT" data-format="int">0</b><i data-qb-value data-output="AVGRET1" data-format="signed-pct">0%</i></div>
+        <div class="qb-ladder-step is-second"><span>2连晋级</span><b data-qb-value data-output="PROMO2" data-format="pct">0%</b><i data-qb-value data-output="WINRATE2" data-format="pct">0%</i></div>
+        <div class="qb-ladder-step is-third"><span>3连强度</span><b data-qb-value data-output="AVG5D3" data-format="signed-pct">0%</b><i data-qb-value data-output="PROMO3" data-format="pct">0%</i></div>
+      </div>
     </div>"""
-        return required, _card(page_id, "连板梯队体检", "主板1-3连板样本实时回测，先看晋级与收益。", core, "red")
+        return required, _card(page_id, "连板梯队体检", "主板1-3连板样本实时回测，沿阶梯看晋级与收益。", core, "red")
 
     if page_id == "page_429673b28e6229e9d315fbd5":
         groups = {
@@ -447,35 +447,39 @@ def _build_page_card(page_id, title, keys):
 
     if page_id == "page_950ff15cb39053c439dff1d8":
         required = [k for k in ["st_count", "st_absret", "st_turn", "st_hit5", "st_hit10", "mb_absret", "mb_turn", "mb_hit10"] if k in keys_set]
-        core = """    <div class="qb-hero-split">
-      <div class="qb-signal-mark">5→10</div>
-      <div>
-        <strong data-qb-value data-output="st_hit10" data-format="pct-smart">0%</strong>
-        <span>ST池10cm命中观察</span>
+        core = """    <div class="qb-event-card">
+      <div class="qb-event-window">
+        <span>涨跌幅口径</span>
+        <b>5→10</b>
+        <i>ST新规</i>
       </div>
-    </div>
-""" + "\n".join([
-            _bar("ST池波动", "st_absret", "pct-smart"),
-            _bar("主板对照", "mb_hit10", "pct-smart"),
-            _metric("样本数量", "st_count", "int"),
-        ])
+      <div class="qb-st-lanes">
+        <div class="qb-st-lane is-hot"><span>ST池波动</span><b data-qb-value data-output="st_absret" data-format="pct-smart">0%</b><i><em data-qb-bar data-output="st_absret" data-format="pct-smart"></em></i></div>
+        <div class="qb-st-lane"><span>主板对照</span><b data-qb-value data-output="mb_hit10" data-format="pct-smart">0%</b><i><em data-qb-bar data-output="mb_hit10" data-format="pct-smart"></em></i></div>
+      </div>
+      <div class="qb-event-chips">
+        <div><span>10cm命中</span><b data-qb-value data-output="st_hit10" data-format="pct-smart">0%</b></div>
+        <div><span>换手温度</span><b data-qb-value data-output="st_turn" data-format="pct-smart">0%</b></div>
+        <div><span>样本数</span><b data-qb-value data-output="st_count" data-format="int">0</b></div>
+      </div>
+    </div>"""
         return required, _card(page_id, "ST新规波动追踪", "主板ST池与非ST对照组同口径追踪，打开即取最新。", core, "red")
 
     if page_id == "page_47685d2af5441d6c1d77a26e":
         stocks = [k for k in keys if k.endswith("_px") and k != "HS300_px"]
         required = stocks + (["HS300_px"] if "HS300_px" in keys_set else [])
-        core = """    <div class="qb-hero-split">
-      <div class="qb-signal-mark" data-qb-dispersion data-outputs="{stocks}">0%</div>
-      <div>
-        <strong data-qb-best data-outputs="{stocks}">0%</strong>
-        <span>组合内最强相对表现</span>
+        core = """    <div class="qb-risk-map">
+      <div class="qb-risk-field">
+        <i></i><i></i><i></i>
+        <div class="qb-risk-radius"><span>分化半径</span><b data-qb-dispersion data-outputs="{stocks}">0%</b></div>
+        <small>组合风险场</small>
       </div>
-    </div>
-    <div class="qb-card-bars">
-      <div class="qb-card-bar-row"><span>八股分化</span><b data-qb-dispersion data-outputs="{stocks}">0%</b><i><em data-qb-dispersion-bar data-outputs="{stocks}"></em></i></div>
-      <div class="qb-card-bar-row"><span>沪深300</span><b data-qb-return data-output="HS300_px">0%</b><i><em data-qb-return-bar data-output="HS300_px"></em></i></div>
-    </div>
-    <div class="qb-card-tags"><span>相关性</span><span>风险贡献</span><span>回撤观察</span></div>""".format(stocks=_e(" ".join(stocks)))
+      <div class="qb-risk-summary">
+        <div><span>最强暴露</span><b data-qb-best data-outputs="{stocks}">0%</b></div>
+        <div><span>八股分化</span><b data-qb-dispersion data-outputs="{stocks}">0%</b></div>
+        <div><span>基准锚</span><b data-qb-return data-output="HS300_px">0%</b></div>
+      </div>
+    </div>""".format(stocks=_e(" ".join(stocks)))
         return required, _card(page_id, "风险不按持仓等分", "八股组合实时重算：相关性、风险贡献与回撤一眼看清。", core, "orange")
 
     if page_id == "page_5e22e113941261d15ab1caaa":
@@ -731,6 +735,53 @@ STYLE = r"""
 .qb-tier-grid span,.qb-mini-metric span{display:block;color:var(--muted);font-size:clamp(10px,2.1cqw,12px);font-weight:800}
 .qb-tier-grid b,.qb-mini-metric b{display:block;margin-top:4px;font-size:clamp(17px,4.3cqw,25px);line-height:1;font-weight:950}
 .qb-tier-grid i{display:block;margin-top:3px;color:var(--accent);font-size:clamp(10px,2.1cqw,12px);font-style:normal;font-weight:850}
+.qb-ladder-card{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:clamp(7px,2cqw,11px);align-items:stretch}
+.qb-ladder-thesis{min-width:0;display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:clamp(6px,1.8cqw,10px);align-items:center;border:1px solid rgba(215,25,32,.22);border-radius:8px;background:linear-gradient(90deg,#fff7ef,#ffe6da);padding:clamp(6px,1.6cqw,10px)}
+.qb-ladder-thesis small{min-width:0;border-radius:999px;background:var(--accent);color:white;padding:clamp(4px,1cqw,6px) clamp(7px,2cqw,12px);font-size:clamp(9px,2.2cqw,12px);font-weight:950;white-space:nowrap}
+.qb-ladder-thesis b{font-size:clamp(22px,6.6cqw,38px);line-height:1;font-weight:950;color:var(--accent)}
+.qb-ladder-thesis span{min-width:0;color:var(--muted);font-size:clamp(9px,2.1cqw,12px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-ladder-track{min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(5px,1.5cqw,8px);align-items:end;position:relative}
+.qb-ladder-track:before{content:"";position:absolute;left:9%;right:9%;bottom:20%;height:46%;border-left:2px solid rgba(215,25,32,.15);border-top:2px solid rgba(215,25,32,.15);transform:skewX(-18deg);pointer-events:none}
+.qb-ladder-step{position:relative;min-width:0;display:grid;align-content:end;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.84);padding:clamp(6px,1.7cqw,10px);box-shadow:0 8px 18px rgba(120,66,24,.08)}
+.qb-ladder-step.is-first{height:62%}
+.qb-ladder-step.is-second{height:80%}
+.qb-ladder-step.is-third{height:100%}
+.qb-ladder-step span{min-width:0;color:var(--muted);font-size:clamp(9px,2.05cqw,12px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-ladder-step b{display:block;margin-top:5px;font-size:clamp(15px,4cqw,23px);line-height:1;font-weight:950;color:var(--ink)}
+.qb-ladder-step i{display:block;margin-top:4px;color:var(--accent);font-size:clamp(9px,2cqw,12px);font-style:normal;font-weight:900}
+.qb-event-card{min-height:0;display:grid;grid-template-columns:minmax(78px,.72fr) minmax(0,1.28fr);grid-template-rows:minmax(0,1fr) auto;gap:clamp(6px,1.7cqw,10px);align-items:stretch}
+.qb-event-window{grid-row:1/3;min-width:0;display:grid;align-content:center;justify-items:center;text-align:center;border:1px solid rgba(215,25,32,.24);border-radius:8px;background:linear-gradient(180deg,#fff6ed,#ffe3d4);padding:clamp(7px,2cqw,12px)}
+.qb-event-window span,.qb-event-window i{color:var(--muted);font-size:clamp(9px,2.1cqw,12px);font-style:normal;font-weight:850}
+.qb-event-window b{font-size:clamp(28px,8.5cqw,52px);line-height:.98;font-weight:950;color:var(--accent)}
+.qb-st-lanes{min-height:0;display:grid;gap:clamp(5px,1.5cqw,8px)}
+.qb-st-lane{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 8px;align-items:center;border-bottom:1px solid rgba(234,216,198,.82);padding-bottom:clamp(5px,1.3cqw,8px)}
+.qb-st-lane span{min-width:0;color:var(--ink);font-size:clamp(10px,2.25cqw,13px);font-weight:900;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qb-st-lane b{font-size:clamp(11px,2.7cqw,15px);font-weight:950;color:var(--accent);text-align:right}
+.qb-st-lane i{grid-column:1/3;display:block;height:clamp(8px,2.1cqw,12px);border-radius:999px;background:#f1e5d8;overflow:hidden}
+.qb-st-lane em{display:block;width:8%;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),#ff8c3a)}
+.qb-st-lane.is-hot i{background:#f7d8d3}
+.qb-event-chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(4px,1.3cqw,7px)}
+.qb-event-chips div{min-width:0;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.78);padding:clamp(5px,1.5cqw,8px)}
+.qb-event-chips span{display:block;color:var(--muted);font-size:clamp(8px,1.95cqw,11px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-event-chips b{display:block;margin-top:4px;color:var(--ink);font-size:clamp(13px,3.4cqw,20px);line-height:1;font-weight:950}
+.qb-risk-map{min-height:0;display:grid;grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr);gap:clamp(7px,2cqw,12px);align-items:stretch}
+.qb-risk-field{position:relative;min-width:0;min-height:0;display:grid;place-items:center;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,#fffaf3,#ffe7d0)}
+.qb-risk-field>i{position:absolute;display:block;border:1px solid rgba(239,122,26,.24);border-radius:50%;aspect-ratio:1}
+.qb-risk-field>i:nth-child(1){width:86%}
+.qb-risk-field>i:nth-child(2){width:62%}
+.qb-risk-field>i:nth-child(3){width:38%;background:rgba(255,255,255,.42)}
+.qb-risk-field:before,.qb-risk-field:after{content:"";position:absolute;background:rgba(239,122,26,.16)}
+.qb-risk-field:before{width:1px;height:84%}
+.qb-risk-field:after{height:1px;width:84%}
+.qb-risk-radius{position:relative;z-index:1;display:grid;justify-items:center;text-align:center}
+.qb-risk-radius span{color:var(--muted);font-size:clamp(9px,2.1cqw,12px);font-weight:850}
+.qb-risk-radius b{margin-top:4px;color:var(--accent);font-size:clamp(23px,7cqw,40px);line-height:1;font-weight:950}
+.qb-risk-field small{position:absolute;left:8px;bottom:7px;color:var(--muted);font-size:clamp(8px,1.9cqw,11px);font-weight:850}
+.qb-risk-summary{min-height:0;display:grid;gap:clamp(5px,1.5cqw,8px)}
+.qb-risk-summary div{min-width:0;display:grid;align-content:center;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.78);padding:clamp(6px,1.7cqw,10px)}
+.qb-risk-summary span{color:var(--muted);font-size:clamp(9px,2.05cqw,12px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-risk-summary b{min-width:0;margin-top:4px;color:var(--ink);font-size:clamp(12px,3.15cqw,19px);line-height:1.05;font-weight:950;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qb-risk-summary div:nth-child(2) b{color:var(--accent)}
 .qb-card-bar-row{display:grid;grid-template-columns:76px 54px 1fr;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(234,216,198,.8)}
 .qb-card-bar-row span{font-size:clamp(10px,2.25cqw,13px);font-weight:850;color:var(--ink)}
 .qb-card-bar-row b{font-size:clamp(11px,2.4cqw,14px);font-weight:950;color:var(--accent);text-align:right}
