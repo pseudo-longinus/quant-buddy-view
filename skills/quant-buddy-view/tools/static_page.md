@@ -15,6 +15,7 @@
 | 撤销 | `POST /skill/revokeStaticPage` |
 | 缩略图 | `POST /skill/setPageThumbnail` （multipart：`file`=PNG/JPG + `page_id`） |
 | 标签列表 | `GET /skill/listPageTags?tag_type=`（`scene` / `paradigm`；不传返回两类） |
+| 自动打标 | `POST /skill/autoTagStaticPage`（LLM 识别场景/范式标签并落库；`dry_run` 只读预览、`force` 忽略缓存重打） |
 | 发布到社区 | `POST /skill/publishStaticPageToCommunity` |
 | 取消社区发布 | `POST /skill/unpublishStaticPageFromCommunity` |
 | 模板列表 | `GET /skill/listTemplates?category=&status=&scene_tag_id=&paradigm_tag_id=&recommend_tag_id=&page=&page_size=` |
@@ -52,6 +53,11 @@ python scripts/static_page.py thumbnail '{"page_id":"page_xxx","image_file":"out
 # 如需打标签，可查询当前可用标签（场景/范式）
 python scripts/static_page.py tags '{}'
 python scripts/static_page.py tags '{"tag_type":"scene"}'
+
+# LLM 自动打标（上传后给页面识别场景/范式标签并落库）
+python scripts/static_page.py autotag '{"page_id":"page_xxx"}'
+python scripts/static_page.py autotag '{"page_id":"page_xxx","dry_run":true}'   # 只读预览，不写库
+python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  # 上传前预打标（自动 dry_run）
 
 # 发布到社区 / 取消社区发布（仅 owner 可操作自己的 active 普通页）
 python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'
@@ -114,6 +120,30 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 ```
 
 返回会包含每张卡的 `artifact_text`、`required_outputs`、`problems`，并把逐项 HTML/JSON 和 `summary.json` 保存到 `output/card-runtime-verify/<timestamp>/`。长任务中途失败时，已完成项仍会留在该目录。
+
+## 自动打标（`autotag`）
+
+上传/更新后，用 LLM 识别页面涉及的**场景标签**（从后台维护的固定场景里选，选不中留空）和**范式标签**（命中已有或按需新增），写入页面。独立旁路命令，**与上传本身互不影响**。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `page_id` | string | 二选一 | 给已上传页打标（服务端读回该页 HTML） |
+| `html` / `html_file` | string | 二选一 | 上传前预打标（自动 `dry_run`，只返回建议、不落库；`html_file` 相对路径基于 skill 根） |
+| `dry_run` | bool | ❌ | 只读预览：只返回建议标签、不写库（安全看效果） |
+| `force` | bool | ❌ | 忽略内容缓存强制重打（默认内容未变直接返回上次结果） |
+
+- 正式打标返回 `scene_tags` / `paradigm_tags`；`dry_run` 返回 `suggested_scene_tags` / `suggested_paradigms`。
+- 均附带 `primitives`（原语证据）、`confidence`、`new_paradigm_candidates`、`reasoning`。
+- 场景标签是后台维护的固定集，模型只能选不能新建；范式标签可命中已有或由模型新增。
+
+```bash
+python scripts/static_page.py autotag '{"page_id":"page_xxx"}'                  # 正式打标
+python scripts/static_page.py autotag '{"page_id":"page_xxx","dry_run":true}'   # 只读预览
+python scripts/static_page.py autotag '{"page_id":"page_xxx","force":true}'     # 忽略缓存重打
+python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  # 上传前预打标
+```
+
+> 范式库需先由后台一次性初始化（`POST /skill/seedParadigmTags`）；该初始化为一次性运维动作，不在本 skill 暴露。
 
 ## 下载 / 取回 HTML 再编辑（`download`）
 
@@ -289,6 +319,10 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `thumbnail_file` | string | ❌ | 无 | HTML 上传成功后再设置封面图；失败只返回 warning，不影响 upload 成功 |
 | `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 场景标签，**只能选已有**；任一项查无即整体报 `SCENE_TAG_NOT_FOUND`。详见下「标签」 |
 | `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 范式标签，可选已有、也可现写新名（自动以 `source=user` 进共享池）。详见下「标签」 |
+| `user_query` | string | ❌ | 无 | 用户原始问题，用于 LLM 打标或显式标签来源溯源 |
+| `tagging_method` | string | ❌ | `manual` | 标签决策方式：`manual` / `llm` / `migration` / `unknown`；不要传 `agent`。LLM 自动识别统一使用 `autotag` |
+| `tagging_source` | string | ❌ | `unknown` | 标签来源系统：`quant-buddy-view` / `growthX` / `skill_server` / `script` / `unknown` |
+| `tagging_meta` | object | ❌ | 无 | 高级来源审计；可传 `method/source/note`，服务端会写入 `static_pages.tagging_meta` |
 | `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为发布 URL + `?cover=1` |
 | `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
 | `verify_cover_card` | bool | ❌ | false | 发布前本地验收默认页和 `?cover=1 --cover-card`；失败不上传 |
@@ -312,6 +346,10 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `thumbnail_file` | string | ❌ | 无 | HTML 替换成功后再替换封面图；失败只返回 warning，不影响 update 成功 |
 | `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留原标签；只能选已有，查无报 `SCENE_TAG_NOT_FOUND` |
 | `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留；可选已有或现写新名自动入池 |
+| `user_query` | string | ❌ | 无 | 用户原始问题，用于 LLM 打标或显式标签来源溯源 |
+| `tagging_method` | string | ❌ | `manual` | 仅在传入标签时写来源审计；不要传 `agent`，LLM 自动识别统一使用 `autotag` |
+| `tagging_source` | string | ❌ | `unknown` | 标签来源系统 |
+| `tagging_meta` | object | ❌ | 无 | 高级来源审计；可传 `method/source/note` |
 | `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为原页面 URL + `?cover=1` |
 | `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
 | `verify_cover_card` | bool | ❌ | false | 替换前本地验收默认页和 `?cover=1 --cover-card`；失败不覆盖 |
@@ -334,6 +372,7 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
   "notice": "实时取数页面：已关联 2 个公式任务包，平台数据更新时页面自动刷新。",
   "scene_tags": [{ "tag_id": "tag_...", "name": "盘前", "source": "system" }],
   "paradigm_tags": [{ "tag_id": "tag_...", "name": "量价背离", "source": "user" }],
+  "tagging_meta": { "method": "manual", "trigger": "upload", "source": "quant-buddy-view", "tagged_at": "2026-..." },
   "expires_at": "2027-..." }
 ```
 
@@ -358,7 +397,7 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 
 ## 标签（场景 / 范式 / 推荐）
 
-与「公共模板分类」并存的新聚合维度，**普通页和模板都能打**。三类标签都多选，落库存 tag_id、读时回查名字。
+页面标签维度独立于旧模板/官方精选发现口径。三类标签都多选，落库存 tag_id、读时回查名字。
 
 上传/替换前先查当前可用标签：
 

@@ -13,6 +13,7 @@ r"""
     revoke     撤销页面（删对象 + 标记失效，链接立即 404）
     thumbnail  给页面设置 / 替换缩略图（纯展示封面，直传 PNG/JPG，独立于 HTML 上传）
     tags       查询 upload/update 可用标签（scene 场景 / paradigm 范式；recommend 仅后台维护）
+    autotag    LLM 自动识别页面的场景/范式标签并落库（dry_run 只读预览；force 忽略缓存重打）
     publish_community    将自己的 active 普通页发布到社区（内部受控打 recommend:社区 标签）
     unpublish_community  取消社区发布（移除固定 recommend:社区 标签）
     templates  列出官方精选页面（后台 recommend:官方精选 标签口径）
@@ -44,6 +45,10 @@ upload 参数：
       "thumbnail_file": "可选，本地 PNG/JPG；HTML 上传成功后再设封面，失败只返回 warning",
       "scene_tags":    "可选，场景标签（数组/逗号串/单值）；只能选已有，查无报 SCENE_TAG_NOT_FOUND",
       "paradigm_tags": "可选，范式标签（数组/逗号串/单值）；可选已有或现写新名自动入池(source=user)",
+      "user_query": "可选，用户原始问题；用于 LLM 打标或显式标签来源溯源",
+      "tagging_method": "可选，标签决策方式：manual / llm / migration / unknown；不要传 agent，LLM 自动识别请用 autotag",
+      "tagging_source": "可选，标签来源系统：quant-buddy-view / growthX / skill_server / script / unknown",
+      "tagging_meta": "可选，对象；高级标签来源审计，method/source/note 会透传服务端",
       "verify_cover_card": "可选 true；上传前验收默认页和 ?cover=1 宽宝活卡，失败不上传",
       "verify_card_runtime": "可选 true；上传前只验收 card runtime artifact，失败不上传",
       "cover_card_url": "可选，模板库 live iframe URL",
@@ -52,6 +57,7 @@ upload 参数：
     标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
     先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
 update 参数：page_id 必填；title / description / ttl_days / scene_tags / paradigm_tags /
+    user_query / tagging_method / tagging_source / tagging_meta /
     cover_card_url / has_cover_card / verify_cover_card / verify_card_runtime 仅在传了才改
     （description 传空串=清空，不传保留原值；标签字段传 [] 清空、不传保留原标签）。
     可同样传 thumbnail_file，HTML 更新成功后再替换封面；缩略图失败不回滚 HTML。
@@ -119,6 +125,7 @@ _PATH = {
     "revoke":    "/skill/revokeStaticPage",
     "thumbnail": "/skill/setPageThumbnail",
     "tags":      "/skill/listPageTags",
+    "autotag":   "/skill/autoTagStaticPage",
     "publish_community":   "/skill/publishStaticPageToCommunity",
     "unpublish_community": "/skill/unpublishStaticPageFromCommunity",
     "templates": "/skill/listTemplates",
@@ -814,7 +821,7 @@ def cmd_upload(params):
         }
 
     body = {"html": html}
-    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "cover_card_url", "has_cover_card"):
         if params.get(k) is not None:
             body[k] = params[k]
     if cover_verification and body.get("has_cover_card") is None:
@@ -871,7 +878,7 @@ def cmd_update(params):
         }
 
     body = {"page_id": params["page_id"], "html": html}
-    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "cover_card_url", "has_cover_card"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "cover_card_url", "has_cover_card"):
         if params.get(k) is not None:
             body[k] = params[k]
     if cover_verification and body.get("has_cover_card") is None:
@@ -1063,6 +1070,36 @@ def cmd_tags(params):
     if qs_pairs:
         url += "?" + _up.urlencode(qs_pairs)
     return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+
+
+def cmd_autotag(params):
+    """LLM 自动打标：page_id → 给已上传页打标；html/html_file → 上传前预打标（自动 dry_run）。"""
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    page_id = params.get("page_id")
+    html = params.get("html")
+    html_file = params.get("html_file")
+    if not page_id and not html and not html_file:
+        return {"code": 1, "message": "autotag 需要 page_id（给已上传页打标），或 html/html_file（上传前预打标，自动 dry_run）"}
+    body = {}
+    if page_id:
+        body["page_id"] = page_id
+    else:
+        if html_file:
+            path = html_file if os.path.isabs(html_file) else os.path.join(C.SKILL_ROOT, html_file)
+            if not os.path.exists(path):
+                return {"code": 1, "message": f"html_file 不存在: {path}"}
+            with open(path, "r", encoding="utf-8") as f:
+                html = f.read()
+        body["html"] = html
+        body["dry_run"] = True  # 无 page 只能预打标（服务端也会强制）
+    # 显式传的 dry_run / force 透传（服务端兼容 bool / "true"）
+    for k in ("dry_run", "force"):
+        if params.get(k) is not None:
+            body[k] = params[k]
+    # LLM 调用可能较慢，用上传超时（120s）
+    return C.http_json("POST", C.api_url(endpoint, _PATH["autotag"]),
+                       C.headers(api_key), body, timeout=_UPLOAD_TIMEOUT)
 
 
 def _cmd_community(params, path_key, label):
@@ -1546,6 +1583,7 @@ _COMMANDS = {
     "revoke": cmd_revoke,
     "thumbnail": cmd_thumbnail,
     "tags": cmd_tags,
+    "autotag": cmd_autotag,
     "publish_community": cmd_publish_community,
     "unpublish_community": cmd_unpublish_community,
     "templates": cmd_templates,
