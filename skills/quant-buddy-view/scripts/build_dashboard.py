@@ -24,7 +24,8 @@ r"""
       "panels": [
         {
           "title":  "面板标题",
-          "output": "对应公式包 reads 的产出名（= query 返回 outputs 的 key）",
+          "output": "对应公式包 reads 的产出名（= query 返回 outputs 的 key）；数据授权面板改填 grant_id",
+          "grant_id": "数据授权面板：dg_... （与 output 互斥，构建期自动补 signature、运行时走 queryDataGrant），可与公式包面板同页混用",
           "type":   "line | bar | table | number | text | raw（默认 table）",
           "x":      "line/bar 横轴字段名（数据为对象数组时）",
           "y":      ["line/bar 纵轴字段名，可多条"],
@@ -65,6 +66,7 @@ from urllib.parse import quote
 
 import common as C
 import formula_package as FP
+import data_grant as DG
 import live_card as LC
 
 PAGES_DIR = os.path.join(C.SKILL_ROOT, "output", "pages")
@@ -106,6 +108,34 @@ def _resolve_credential(params):
             except Exception:
                 pass
     return None, None, {"code": 1, "message": "未能确定 package_id：请在 spec 里指定，或先 register 落一份本地凭证"}
+
+
+def _resolve_grant_panels(panels):
+    """扫描 panels 找 grant_id 引用（与公式包 output 面板并存）：signature 缺省用本地凭证补全，
+    并把 panel.output 归一成 grant_id、打 _source 标记，使下游校验/渲染管线无需区分来源。
+    返回 (grants:[{grant_id,signature}] 去重, err|None)。"""
+    seen = {}
+    grants = []
+    for p in panels:
+        if not isinstance(p, dict):
+            continue
+        gid = p.get("grant_id")
+        if not gid:
+            continue
+        p["_source"] = "grant"
+        if not p.get("output"):
+            p["output"] = gid
+        if gid in seen:
+            continue
+        sig = p.get("signature")
+        if not sig:
+            cred = DG.load_credential(gid)
+            sig = cred.get("signature") if cred else None
+        if not sig:
+            return None, {"code": 1, "message": f"grant_id={gid} 缺 signature（可在 panel 里指定，或先 register/query 落一份本地凭证 output/data_grants/{gid}.json）"}
+        seen[gid] = sig
+        grants.append({"grant_id": gid, "signature": sig})
+    return grants, None
 
 
 def _as_bool(value, default=True):
@@ -214,12 +244,14 @@ def _shared_shell_js():
     ])
 
 
-def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signature, generated_at):
-    """组装 HTML。骨架自包含（样式/内核内联），数据走运行时实时取数：页面内联 endpoint+凭证 + 取数 JS。"""
+def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signature, generated_at, grants=None):
+    """组装 HTML。骨架自包含（样式/内核内联），数据走运行时实时取数：页面内联 endpoint+凭证 + 取数 JS。
+    grants：panel 里引用 grant_id 的数据授权列表 [{grant_id,signature}]，与公式包 panel 同页并存。"""
     share = _share_config(spec)
     boot = {
         "mode": "live",
         "panels": panels,
+        "grants": grants or [],
         "generatedAt": generated_at,
         "share": {
             "enabled": share["show_qr"],
@@ -338,6 +370,45 @@ function normalize(data) {
     return {columns: ['key', 'value'], rows: keys.map(k => [k, data[k]])};
   }
   return {columns: ['value'], rows: [[data]]};
+}
+
+// 数据授权三类 kind 的 data 归一为「对象数组」，再交给 normalize 出规整表。
+// 必须与 Python 侧 _normalize_grant_data 同款口径。无法识别时原样返回。
+function normalizeGrantData(kind, data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  var k = (kind || '').toLowerCase();
+  if (k === 'fast_query') {
+    var results = data.results || [];
+    var multi = results.length > 1, rows = [];
+    results.forEach(function (r) {
+      var name = r.asset_name || r.ticker || r.asset_intent;
+      (r.fields || []).forEach(function (f) {
+        var row = multi ? {'标的': name} : {};
+        row['指标'] = f.intent; row['值'] = f.value; row['单位'] = f.unit; row['日期'] = f.date;
+        rows.push(row);
+      });
+    });
+    return rows.length ? rows : data;
+  }
+  if (k === 'composition_select') {
+    var rs = data.results || [];
+    var out = rs.map(function (r) {
+      return {'排名': r.rank, '名称': r.name, '代码': r.code, '行业': r.industry, '得分': r.score};
+    });
+    return out.length ? out : data;
+  }
+  if (k === 'stock_profile') {
+    var dims = data.dimensions || {}, drows = [];
+    Object.keys(dims).forEach(function (dname) {
+      var inds = (dims[dname] && dims[dname].indicators) || {};
+      Object.keys(inds).forEach(function (ik) {
+        var iv = inds[ik] || {};
+        drows.push({'维度': dname, '指标': iv.name || ik, '最新值': iv.latest_value, '单位': iv.unit});
+      });
+    });
+    return drows.length ? drows : data;
+  }
+  return data;
 }
 
 function colIdx(tab, name) {
@@ -539,10 +610,18 @@ function parseSSE(text) {
   return outputs;
 }
 
-async function fetchLive() {
-  const setMsg = m => { document.getElementById('grid').innerHTML = '<p class="empty">' + m + '</p>'; };
-  buildSkeletons();          // 先把面板骨架铺出来，产出到一个就渲染一个
-  LAST_OUTPUTS = {};
+// 只标错公式包来源的面板（type=grant 的面板走自己的 fetchGrantsLive，互不牵连）
+function markPackagePanelsError(msg) {
+  PANEL_REG.forEach(reg => {
+    if (reg.panel._source === 'grant') return;
+    if ((reg.panel.type || 'table') === 'text') return;
+    renderPanelBody(reg.body, reg.panel, reg.span, {error: msg});
+    reg.filled = true;
+  });
+}
+
+// 公式包取数：SSE 流，边收边渲染（钉死 output → panel，重算会走 stale/recomputed）
+async function fetchPackageLive() {
   let resp;
   try {
     resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
@@ -554,16 +633,20 @@ async function fetchLive() {
       body: JSON.stringify({package_id: BOOT.packageId, signature: BOOT.signature}),
     });
   } catch (e) {
-    setMsg('取数失败（可能是跨域/网络）：' + e);
+    markPackagePanelsError('取数失败（可能是跨域/网络）：' + e);
     return;
   }
-  if (!resp.ok) { setMsg('取数失败：HTTP ' + resp.status); return; }
+  if (!resp.ok) { markPackagePanelsError('取数失败：HTTP ' + resp.status); return; }
 
   // 老环境不支持可读流：回退到一次性取整段再渲染
   if (!resp.body || typeof resp.body.getReader !== 'function') {
-    const text = await resp.text();
-    renderAll(parseSSE(text));
-    return LAST_OUTPUTS;
+    const outputs = parseSSE(await resp.text());
+    Object.keys(outputs).forEach(name => {
+      LAST_OUTPUTS[name] = outputs[name];
+      applyOutput(name, outputs[name]);
+    });
+    syncLiveCard(LAST_OUTPUTS);
+    return;
   }
 
   const reader = resp.body.getReader();
@@ -590,6 +673,46 @@ async function fetchLive() {
   } catch (e) {
     // 流中途断开：已渲染的保留，未到的面板维持「加载中」
   }
+}
+
+// 数据授权取数：普通 JSON（非 SSE，不重算），各 grant 并发独立请求、互不阻塞
+async function fetchGrantsLive() {
+  const grants = BOOT.grants || [];
+  await Promise.all(grants.map(async (g) => {
+    let out;
+    try {
+      const resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryDataGrant'), {
+        method: 'POST',
+        headers: Object.assign(
+          {'Content-Type': 'application/json'},
+          BOOT.skillVersion ? {'x-skill-version': BOOT.skillVersion, 'x-skill-name': BOOT.skillName || 'quant-buddy-view'} : {}
+        ),
+        body: JSON.stringify({grant_id: g.grant_id, signature: g.signature}),
+      });
+      let body = null;
+      try { body = await resp.json(); } catch (e) {}
+      if (!resp.ok || !body || body.code !== 0) {
+        const err = (body && body.error) || {};
+        out = {data: null, error: (err.code || ('HTTP ' + resp.status)) + (err.message ? (': ' + err.message) : '')};
+      } else {
+        out = {data: normalizeGrantData(body.kind, body.data), error: null};
+      }
+    } catch (e) {
+      out = {data: null, error: '取数失败（可能是跨域/网络）：' + e};
+    }
+    LAST_OUTPUTS[g.grant_id] = out;
+    applyOutput(g.grant_id, out);
+    syncLiveCard(LAST_OUTPUTS);
+  }));
+}
+
+async function fetchLive() {
+  buildSkeletons();          // 先把面板骨架铺出来，产出到一个就渲染一个
+  LAST_OUTPUTS = {};
+  const tasks = [];
+  if (BOOT.packageId) tasks.push(fetchPackageLive());
+  if (BOOT.grants && BOOT.grants.length) tasks.push(fetchGrantsLive());
+  if (tasks.length) await Promise.all(tasks);
   // 收尾：始终没等到产出的非 text 面板，标注无产出
   PANEL_REG.forEach(reg => {
     if (!reg.filled && (reg.panel.type || 'table') !== 'text') {
@@ -868,6 +991,42 @@ document.addEventListener('DOMContentLoaded', () => {
 </html>
 """
     return html
+
+
+def _normalize_grant_data(kind, data):
+    """把数据授权三类 kind 的 data 归一成「对象数组」，供渲染 normalize 与体检统一消费。
+    必须与前端 normalizeGrantData 同款口径。无法识别时原样返回 data（走通用兜底）。"""
+    if not isinstance(data, dict):
+        return data
+    k = (kind or "").lower()
+    if k == "fast_query":
+        results = data.get("results") or []
+        rows = []
+        multi = len(results) > 1
+        for r in results:
+            name = r.get("asset_name") or r.get("ticker") or r.get("asset_intent")
+            for f in (r.get("fields") or []):
+                row = {"标的": name} if multi else {}
+                row.update({"指标": f.get("intent"), "值": f.get("value"),
+                            "单位": f.get("unit"), "日期": f.get("date")})
+                rows.append(row)
+        return rows or data
+    if k == "composition_select":
+        results = data.get("results") or []
+        rows = [{"排名": r.get("rank"), "名称": r.get("name"), "代码": r.get("code"),
+                 "行业": r.get("industry"), "得分": r.get("score")} for r in results]
+        return rows or data
+    if k == "stock_profile":
+        dims = data.get("dimensions") or {}
+        rows = []
+        for dname, dobj in dims.items():
+            inds = ((dobj or {}).get("indicators")) or {}
+            for ik, iv in inds.items():
+                iv = iv or {}
+                rows.append({"维度": dname, "指标": iv.get("name") or ik,
+                             "最新值": iv.get("latest_value"), "单位": iv.get("unit")})
+        return rows or data
+    return data
 
 
 def _inspect_output_data(data):
@@ -1601,20 +1760,43 @@ def cmd_build(params):
     # 页面实时取数；spec 不需要 mode 字段，旧 spec 里残留的 mode 兼容忽略。
     legacy_mode = (params.get("mode") or "").lower()
 
-    pkg, sig, err = _resolve_credential(params)
-    if err:
-        return err
-    if not pkg or not sig:
-        return {"code": 1, "message": "需要 package_id + signature 才能在页面内实时取数（signature 可由本地凭证补全）"}
+    # panel 支持两种取数来源、可同页并存：output→公式包（钉死+可重算）；grant_id→数据授权（钉死+不重算）。
+    grants, grant_err = _resolve_grant_panels(panels)
+    if grant_err:
+        return grant_err
+
+    needs_formula = any(
+        isinstance(p, dict) and p.get("output") and p.get("_source") != "grant"
+        for p in panels
+    )
+
+    pkg = sig = None
+    if needs_formula or params.get("package_id"):
+        pkg, sig, err = _resolve_credential(params)
+        if err:
+            return err
+        if not pkg or not sig:
+            return {"code": 1, "message": "需要 package_id + signature 才能在页面内实时取数（signature 可由本地凭证补全）"}
+
+    if not pkg and not grants:
+        return {"code": 1, "message": "spec.panels 未引用任何 output（公式包）或 grant_id（数据授权），无法确定取数来源"}
 
     endpoint = C.endpoint_of(C.load_config())  # query 无需 api_key，仅取 endpoint
 
     # 构建期取一次数：只用于质量体检 + 单标的文案一致性校验，不内联进 HTML（页面仍走运行时实时取数）。
-    res = FP.query_package(endpoint, pkg, sig)
-    if res.get("code") != 0:
-        return {"code": 1, "message": "构建期取数失败，无法校验看板（公式 / 读取模式 / 凭证 / 端点 任一异常）",
-                "failures": res.get("failures"), "query_result": res}
-    verify_outputs = res.get("outputs") or {}
+    verify_outputs = {}
+    if pkg:
+        res = FP.query_package(endpoint, pkg, sig)
+        if res.get("code") != 0:
+            return {"code": 1, "message": "构建期取数失败，无法校验看板（公式 / 读取模式 / 凭证 / 端点 任一异常）",
+                    "failures": res.get("failures"), "query_result": res}
+        verify_outputs.update(res.get("outputs") or {})
+    for g in grants:
+        gr = DG.query_grant(endpoint, g["grant_id"], g["signature"])
+        if gr.get("code") != 0:
+            return {"code": 1, "message": f"构建期取数失败（数据授权 grant_id={g['grant_id']}），拒绝生成看板",
+                    "grant_id": g["grant_id"], "query_result": gr}
+        verify_outputs[g["grant_id"]] = {"data": _normalize_grant_data(gr.get("kind"), gr.get("data")), "error": None}
     # P0-1 数据体检：取数即便 code:0，也逐 panel 校验产出结构，杜绝「假成功看板」
     problems = _inspect_outputs(panels, verify_outputs)
     if problems:
@@ -1629,7 +1811,7 @@ def cmd_build(params):
     live_card_enabled = params.get("live_card") is not None and params.get("live_card") is not False
     html = _render_html(params, title=title, subtitle=params.get("subtitle"),
                         panels=panels, endpoint=endpoint, package_id=pkg, signature=sig,
-                        generated_at=generated_at)
+                        generated_at=generated_at, grants=grants)
 
     out_file = params.get("out_file")
     if out_file:
@@ -1653,15 +1835,25 @@ def cmd_build(params):
         "thumbnail_url": None,
         "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
         "endpoint": endpoint,
-        "formula_packages": {
+        "formula_packages": ({
             "DEFAULT": {
                 "package_id": pkg,
                 "outputs": [
                     p.get("output") for p in panels
-                    if isinstance(p, dict) and p.get("output")
+                    if isinstance(p, dict) and p.get("output") and p.get("_source") != "grant"
                 ],
             }
-        },
+        } if pkg else {}),
+        "data_grants": [
+            {
+                "grant_id": g["grant_id"],
+                "outputs": [
+                    p.get("output") for p in panels
+                    if isinstance(p, dict) and p.get("grant_id") == g["grant_id"]
+                ],
+            }
+            for g in grants
+        ],
         "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "verification": {
             "build_time_query": "ok",
@@ -1683,6 +1875,7 @@ def cmd_build(params):
         "out_file": out_file,
         "mode": "live",
         "package_id": pkg,
+        "grants": [g["grant_id"] for g in grants],
         "panels": len(panels),
         "size": len(html.encode("utf-8")),
         "manifest": manifest_path,

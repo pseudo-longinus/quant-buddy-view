@@ -12,6 +12,11 @@
      const top = QB.topValues(out, 'GAIN');                  // 榜单
      const d   = QB.fmtDate(QB.lastDate(out, 'IDXRET'));     // 日期 → 'YYYY-MM-DD'
 
+     // 数据授权（免 key，凭 grant_id + signature；普通 JSON，不重算）：
+     // 返回值同样是 out 直查表，key 用 grant_id，上面这些取值器直接复用。
+     const gOut = await QB.queryGrant({ endpoint, grant_id, signature });
+     const last = QB.lastValue(gOut, grant_id);
+
    设计取舍：
      · endpoint 由调用方传入、不写死 —— 测试环境填测试地址、正式环境填正式地址，保持灵活。
      · 清洗只统一“数据层”：缺口(null/NaN)永远扔；价格的假 0 按需扔；涨跌幅的 0 是合法平盘值不扔。
@@ -132,6 +137,42 @@ const QB = (function () {
       progress: out.__progress || [],
     };
     if (status) Object.assign(status, out.__status, { loading: false });
+    return out;
+  }
+
+  /* 数据授权取数：免 key，凭 grant_id + signature；普通 JSON POST（不重算，永远反映当下数据）。
+     成功/失败都走同一份 throw-on-error 约定；成功时返回的 out 直查表与 query() 同形状，
+     key 用 grant_id，series/lastValue/topValues/perAsset 等取值器直接复用。 */
+  async function queryGrant(cfg) {
+    const { endpoint, grant_id, signature } = cfg || {};
+    if (!endpoint || !grant_id || !signature)
+      throw new Error('取数内核：endpoint / grant_id / signature 三者必填');
+
+    if (typeof location !== 'undefined' &&
+        location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
+      console.warn('[取数内核] 页面是 https，endpoint 却是 http：' + endpoint +
+        '\n  本地双击打开能用，但发布到 https 网站会被浏览器拦截（mixed-content）。' +
+        '\n  发布前请把 endpoint 换成 https 地址。');
+    }
+
+    const resp = await fetch(apiUrl(endpoint, '/skill/queryDataGrant'), {
+      method: 'POST',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        _hasSkillVer ? { 'x-skill-version': SKILL_VERSION, 'x-skill-name': SKILL_NAME } : {}
+      ),
+      body: JSON.stringify({ grant_id, signature }),
+    });
+    let body = null;
+    try { body = await resp.json(); } catch (e) { /* 非 JSON 响应，body 留 null，下面统一按失败处理 */ }
+    if (!resp.ok || !body || body.code !== 0) {
+      const err = (body && body.error) || {};
+      throw new Error((err.code || ('HTTP ' + resp.status)) + (err.message ? (': ' + err.message) : ''));
+    }
+
+    const out = {};
+    out[grant_id] = { output: grant_id, data: body.data, error: null, kind: body.kind };
+    out.__status = { grant_id, kind: body.kind, ok: true, error: null };
     return out;
   }
 
@@ -272,7 +313,7 @@ const QB = (function () {
   }
 
   return {
-    query, queryMany, apiUrl,
+    query, queryMany, queryGrant, apiUrl,
     num, outputStatus,
     lastValue, lastDate, series, values, topValues, statDate,
     perAsset, perAssetMap,

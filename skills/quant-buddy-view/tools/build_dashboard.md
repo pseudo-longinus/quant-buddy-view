@@ -71,7 +71,8 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `output` | ✅ | 对应公式包 `reads` 的产出名（= query 返回 outputs 的 key）；`text` 面板不需要 |
+| `output` | ✅* | 对应公式包 `reads` 的产出名（= query 返回 outputs 的 key）。`text` 面板不需要；数据授权面板改填 `grant_id`，二者其一 |
+| `grant_id` | ✅* | 数据授权面板：填 `dg_...`，构建期自动补 signature、运行时走 `queryDataGrant`（普通 JSON）。与 `output` 互斥，可与公式包面板同页混用 |
 | `title` | ❌ | 面板标题，缺省用 `output` |
 | `type` | ❌ | `line` / `bar` / `table`（默认） / `number` / `text` / `raw` |
 | `x` | ❌ | line/bar 横轴字段（缺省取首列；range_data 自动取 dates） |
@@ -152,6 +153,8 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间、验证结果，以及
 `thumbnail_file`、`thumbnail_url`、`thumbnail_generation_status`。不会记录 API key 或 signature。
+
+> **产物目录约定（本 skill 所有脚本共用）**：一切生成物——看板 HTML、manifest、缩略图、公式包/数据授权凭证、临时预览与 demo——**只落在 `output/` 下**（`output/pages/`、`output/thumbnails/`、`output/formula_packages/`、`output/data_grants/`；随手的试验/demo 放 `output/_demo/`）。`output/` 已在 `.gitignore` 里，属会话级 scratch。**不要在 skill 根目录另建 `_demo`、`tmp`、`preview` 等顶层文件夹**——顶层只保留 `SKILL.md / scripts / tools / guides / workflows / templates / tests / assets / config.json` 这套固定骨架。本地预览也从 `output/` 起服务（如 `python -m http.server 8899 --bind 127.0.0.1`，cwd 指向 `output/_demo/`）。
 
 ### 缩略图生成与上传
 
