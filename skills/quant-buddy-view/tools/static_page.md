@@ -2,12 +2,15 @@
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
+> **首链进度页**：新会话可先用 `new_page` 上传一个带 QuantBuddy 页头页尾、iframe 友好的活页进度页并返回链接，后续用 `update_progress` 更新同一个 `page_id` 的 HTML；最终正式发布用 `publish_final`。进度页本身不自动刷新，承接页面负责定时刷新 iframe URL。
 > 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定，本技能无会话 / task_id 概念）；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
 
 | 操作 | 方法 + 路径 |
 |------|-------------|
+| 首链进度页 | 脚本包装：`new_page` 调 `uploadStaticPage`，`update_progress` 调 `updateStaticPage` |
+| 首链最终发布 | 脚本包装：`publish_final` 先调 `update_progress` 进入 `final_publish`，再调 `updateStaticPage` 写正式活页；失败时回写失败进度页 |
 | 上传 | `POST /skill/uploadStaticPage` |
 | 替换 | `POST /skill/updateStaticPage` |
 | 下载 | `GET /skill/getStaticPage?page_id=&url=` （返回公开链接 + 元信息，不含字节） |
@@ -25,6 +28,15 @@
 ## 调用方式
 
 ```bash
+# 首次会话先拿活页进度链接（返回 page_id + url + steps）
+python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
+
+# 阶段推进时只更新同一个 page_id 的进度 HTML；脚本会按 current_step 自动推导步骤状态
+python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
+
+# 首链流程的最终正式发布：仍是同一个 page_id / URL，失败时会回写失败进度页
+python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析"}'
+
 # 上传（推荐用 build_dashboard 产物文件）
 python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
 
@@ -72,6 +84,50 @@ python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file"
 
 # 批量快速验收范式卡 card runtime artifact，不跑整页多视口
 python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"require_browser":true}'
+```
+
+## 首链进度页（new_page / update_progress / publish_final）
+
+`new_page` / `update_progress` / `publish_final` 是脚本侧的轻封装，不需要新增后端接口：`new_page` 上传一份“活页生成中”的 HTML，`update_progress` 用同一个 `page_id` 调 `update` 更新进度内容，`publish_final` 用同一个 `page_id` 完成最终正式活页发布。它适合被承接页面放进 iframe：承接页面定时刷新 iframe URL，进度页本身只负责展示当前进度。
+
+进度页约束：
+
+- 不包含 `setTimeout` / `setInterval` / `location.replace` / `meta refresh` / `postMessage`；
+- 默认接入 QuantBuddy 公共页头页尾，并套浅色 share shell theme；如内部调试确实不要页头页尾，可显式传 `ensure_share_shell:false`；
+- 首链流程的最终正式活页默认走 `publish_final`，保留普通 `update` 的 share shell 门禁。
+- `publish_final` 会先把进度推进到 `final_publish`；若正式 HTML 更新失败，它会把同一个 `page_id` 回写成 `failed` 进度页，避免用户刷新后长期停在上一阶段。
+- `update_progress` 优先只传 `current_step + message`，脚本会自动把前序阶段标为 `done`、当前阶段标为 `running`、后序阶段标为 `pending`；不要在每次更新里复制一份可能过期的完整 `steps`。
+- `message` 会直接展示给用户，应使用“活页内容 / 准备实时数据 / 检查展示效果”这类产品文案，避免 `HTML`、`公式包`、`本地浏览器验收`、`page_id`、`URL` 等工程词。
+
+参数：
+
+| 字段 | 命令 | 必填 | 说明 |
+|---|---|---|---|
+| `page_id` | `update_progress` | ✅ | 要覆盖的进度页 ID |
+| `title` | `new_page` / `update_progress` | ❌ | 页面标题，默认 `活页生成中` |
+| `message` | `new_page` / `update_progress` | ❌ | 当前状态文案 |
+| `current_step` | `new_page` / `update_progress` | ❌ | 当前阶段 ID，默认 `plan` |
+| `page_status` | `new_page` / `update_progress` | ❌ | `running` / `done` / `failed`，默认 `running` |
+| `steps` | `new_page` / `update_progress` | ❌ | 步骤数组；每项含 `id`、`title`、`status`、可选 `message`。默认不必传，脚本会按 `current_step` 自动推导状态 |
+
+`publish_final` 接收普通 `update` 的参数，并额外支持：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `progress_message` / `final_publish_message` / `publish_message` | ❌ | 进入 `final_publish` 时的用户可见文案，默认 `正在完成活页生成` |
+| `failure_message` / `progress_failure_message` | ❌ | 正式发布失败时回写到进度页的用户可见文案，默认 `活页生成遇到问题，请稍后重试。` |
+
+默认步骤固定为：
+
+`init` → `plan` → `template` → `formula_validation` → `package_register` → `html_build` → `verify` → `final_publish`。
+
+典型流程：
+
+```bash
+python scripts/static_page.py new_page '{"title":"中证500异动监控","message":"正在选择活页方案"}'
+python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"template","message":"已选择中证500异动监控活页"}'
+python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"verify","message":"活页内容已生成，正在检查展示效果"}'
+python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"中证500异动监控"}'
 ```
 
 ## 公共页头页尾门禁

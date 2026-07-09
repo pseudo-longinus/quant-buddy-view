@@ -6,8 +6,11 @@ r"""
 工具说明文档：tools/static_page.md
 
 静态页子命令（除直连 URL 验收外需 API Key）：
+    new_page   首次会话先上传 iframe 友好的活页进度页，返回 page_id + 公开 url
+    update_progress  更新同一个 page_id 的进度页 HTML；刷新由承接页面负责
     upload     上传 HTML，返回 page_id + 公开 url
     update     替换已有页面内容（URL / page_id 不变，已分享链接照常可用）
+    publish_final  首链进度页最终发布封装：先进入 final_publish，失败时回写失败态
     download   取回已发布页面的 HTML（再编辑用）：服务端鉴权返回 url，脚本直连 OSS 下载
     list       列出我的页面
     revoke     撤销页面（删对象 + 标记失效，链接立即 404）
@@ -56,6 +59,14 @@ upload 参数：
     }
     标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
     先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
+new_page 参数：title / message / current_step / page_status / steps 可选；默认接入公共 share shell，
+    上传一个不自刷新的 iframe 活页进度页，并返回 page_id / url / progress。
+update_progress 参数：page_id 必填；title / message / current_step / page_status / steps 可选；
+    只 update 同一个 URL 的 HTML 内容；仅传 current_step 时会自动推导前序完成、当前进行中、后序待开始。
+    message 是用户可见文案，避免 HTML / 公式包 / 本地浏览器验收 / page_id 等工程词。
+    不在页面里写自动刷新、跳转或 parent 通信。
+publish_final 参数：同 update；推荐用于首链进度页的最终正式发布。
+    会先把进度页推进到 final_publish；若正式 update 失败，会自动把同一 page_id 更新为 failed 进度页。
 update 参数：page_id 必填；title / description / ttl_days / scene_tags / paradigm_tags /
     user_query / tagging_method / tagging_source / tagging_meta /
     cover_card_url / has_cover_card / verify_cover_card / verify_card_runtime 仅在传了才改
@@ -82,6 +93,9 @@ template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选
 verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, "timeout_sec":180 }
 
 用法示例：
+    python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
+    python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
+    python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析"}'
     python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
     python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html"}'
     python scripts/static_page.py download '{"page_id":"page_xxx","save":"output/pages/back.html"}'
@@ -116,6 +130,7 @@ from datetime import datetime
 import compile_bespoke_page as CB
 import card_runtime_retrofit as CRT
 import common as C
+import progress_page as PP
 
 _PATH = {
     "upload":    "/skill/uploadStaticPage",
@@ -142,6 +157,16 @@ _MAX_HTML_BYTES = 2 * 1024 * 1024
 _MAX_THUMB_BYTES = 2 * 1024 * 1024
 _SHARE_POSTER_VERSION = "snapshot-tall-v1"
 _SHARE_SHELL_VERSION = "copy-link-v1"
+_PROGRESS_SHELL_THEME = {
+    "chrome_bg": "#ffffff",
+    "header_bg": "#ffffff",
+    "footer_bg": "#ffffff",
+    "accent": "#fe9c3c",
+    "accent_strong": "#8f4e00",
+    "line": "#d9e0ea",
+    "ink": "#111c2d",
+    "muted": "#45474c",
+}
 _PACKAGE_ISSUE_RE = re.compile(
     r"formula[_ -]?package|package_id|signature|公式包|签名|查无|失效|无效|not[_ -]?found|invalid",
     re.I,
@@ -902,6 +927,144 @@ def cmd_update(params):
         out = _attach_thumbnail_if_requested(out, params)
     return out
 
+
+def _progress_state_and_html(params):
+    state = PP.build_state(params)
+    render_params = dict(params or {})
+    render_params["updated_at"] = state["updated_at"]
+    return state, PP.render_progress_html(render_params)
+
+
+def _progress_publish_payload(params, html, *, require_page_id=False):
+    payload = {"html": html}
+    if require_page_id:
+        payload["page_id"] = params.get("page_id")
+    payload["ensure_share_shell"] = params.get("ensure_share_shell", True)
+    payload["theme"] = params.get("theme") if isinstance(params.get("theme"), dict) else dict(_PROGRESS_SHELL_THEME)
+
+    for k in (
+        "ttl_days",
+        "scene_tags",
+        "paradigm_tags",
+        "user_query",
+        "tagging_method",
+        "tagging_source",
+        "tagging_meta",
+    ):
+        if params.get(k) is not None:
+            payload[k] = params[k]
+    if params.get("title") is not None:
+        payload["title"] = params["title"]
+    elif not require_page_id:
+        payload["title"] = "活页生成中"
+    if params.get("description") is not None:
+        payload["description"] = params["description"]
+    elif not require_page_id:
+        payload["description"] = "活页生成进度，最终内容会在同一个链接显示。"
+    return payload
+
+
+def _attach_progress_result(out, state):
+    if isinstance(out, dict):
+        out["progress"] = state
+        out["steps"] = state.get("steps") or []
+        out["progress_page"] = {
+            "mode": "progress_snapshot",
+            "refresh_owner": "host_page",
+            "auto_refresh": False,
+        }
+    return out
+
+
+def cmd_new_page(params):
+    state, html = _progress_state_and_html(params)
+    payload = _progress_publish_payload(params, html, require_page_id=False)
+    out = cmd_upload(payload)
+    return _attach_progress_result(out, state)
+
+
+def cmd_update_progress(params):
+    if not params.get("page_id"):
+        return {"code": 1, "message": "update_progress 需要 page_id（要更新哪个进度页）"}
+    state, html = _progress_state_and_html(params)
+    payload = _progress_publish_payload(params, html, require_page_id=True)
+    out = cmd_update(payload)
+    return _attach_progress_result(out, state)
+
+
+def _publish_final_progress_params(params, *, page_status, message):
+    progress_params = {
+        "page_id": params.get("page_id"),
+        "current_step": "final_publish",
+        "page_status": page_status,
+        "message": message,
+    }
+    for key in ("title", "theme", "steps", "ensure_share_shell"):
+        if params.get(key) is not None:
+            progress_params[key] = params[key]
+    return progress_params
+
+
+def cmd_publish_final(params):
+    if not params.get("page_id"):
+        return {"code": 1, "message": "publish_final 需要 page_id（要发布到哪个活页链接）"}
+
+    running_message = (
+        params.get("progress_message")
+        or params.get("final_publish_message")
+        or params.get("publish_message")
+        or "正在完成活页生成"
+    )
+    progress_update = cmd_update_progress(_publish_final_progress_params(
+        params,
+        page_status="running",
+        message=running_message,
+    ))
+
+    update_out = cmd_update(params)
+    if isinstance(update_out, dict) and update_out.get("code") == 0:
+        update_out["progress_update"] = progress_update
+        update_out["publish_final"] = {
+            "progress_step": "final_publish",
+            "final_html_published": True,
+        }
+        if not (isinstance(progress_update, dict) and progress_update.get("code") == 0):
+            _append_warning(update_out, {
+                "type": "progress_update_failed",
+                "message": _result_message(progress_update),
+            })
+        return update_out
+
+    failure_message = (
+        params.get("failure_message")
+        or params.get("progress_failure_message")
+        or "活页生成遇到问题，请稍后重试。"
+    )
+    failed_update = cmd_update_progress(_publish_final_progress_params(
+        params,
+        page_status="failed",
+        message=failure_message,
+    ))
+    message = "正式活页发布失败"
+    if isinstance(failed_update, dict) and failed_update.get("code") == 0:
+        message += "，已回写失败进度页"
+    else:
+        message += "，且失败进度页回写未成功"
+
+    return {
+        "code": 1,
+        "message": message,
+        "page_id": params.get("page_id"),
+        "update": update_out,
+        "progress_update": progress_update,
+        "progress_failed_update": failed_update,
+        "publish_final": {
+            "progress_step": "final_publish",
+            "final_html_published": False,
+        },
+    }
+
+
 def _fetch_oss(url):
     """直连 OSS 拉取页面 HTML（public-read，无需鉴权），返回 (text, err)。"""
     req = urllib.request.Request(url, method="GET")
@@ -1576,6 +1739,9 @@ def cmd_retrofit_card_runtime(params):
 
 
 _COMMANDS = {
+    "new_page": cmd_new_page,
+    "update_progress": cmd_update_progress,
+    "publish_final": cmd_publish_final,
     "upload": cmd_upload,
     "update": cmd_update,
     "download": cmd_download,

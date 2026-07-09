@@ -2,16 +2,17 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.4.9
+version: 0.4.15
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, thumbnails, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
   配合 quant-buddy-skill 使用：固定页面请求先用 static_page.py templates/template 选择带 recommend:官方精选 标签的在线精选页；实时取数页必须先在 quant-buddy-skill 验证公式并确认其 api_key 可用，再用本技能注册自有公式包、替换凭证/文案、浏览器验收，并通过 static_page.py upload/update 发布或更新 pages.quantbuddy.cn 链接。默认不从本地历史样板目录或低质 HTML 骨架起步。
+  用户显式唤起 /quant-buddy-view、/qbv、qbv 或 QBV，且请求不是纯咨询/代码维护/文档解释时，默认视为可分享活页任务：读完本技能约束后先 new_page 返回首链，再澄清细节或继续推进。
   Do not use this skill for one-off 行情查询、普通股票涨跌幅/估值问答、选股/回测探索；those belong to quant-buddy-skill unless the user explicitly wants a reusable/shareable page.
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.4.9
+  version: 0.4.15
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -60,7 +61,7 @@ runtimeRequirements:
 3. 用 `scripts/formula_package.py register` 注册当前用户自己的公式包。
 4. 替换模板/HTML 里的标的、文案、`package_id`、`signature`。
 5. 发布前跑 `scripts/verify_page.mjs <html_or_url> --require-browser` 做浏览器验收；`static-only` 不能算完整验收。
-6. 用 `scripts/static_page.py upload` 创建新链接，或用 `update` 覆盖原 `page_id` 且保持 URL 不变。
+6. 新会话读完本技能约束后，若用户明确请求生成/复用/发布/更新可分享活页，或显式使用 `/quant-buddy-view`、`/qbv`、`qbv`、`QBV` 且不是纯咨询/代码维护/文档解释，先用 `scripts/static_page.py new_page` 创建一个 iframe 友好的活页进度链接并发给用户；即使具体标的/样式还没确认，也先用通用标题和 message 返回首链，再澄清细节。后续阶段用 `update_progress` 更新同一个 `page_id` 的进度 HTML，最终用 `publish_final` 把同一链接更新为正式活页。
 
 ## 何时用本技能 vs quant-buddy-skill
 
@@ -74,6 +75,7 @@ runtimeRequirements:
 - **没有合适在线模板**：再走 `workflows/dashboard-end-to-end.md`，用 `build_dashboard` 生成声明式实时看板。
 - **声明式看板也不够**：才走 `guides/bespoke-page.md` 写 bespoke 主体 HTML，并用公共 shell 编译成自包含页面。
 - **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL。
+- **新会话首链进度页**：读完本 `SKILL.md` 后，只要用户明确要可分享活页，或显式唤起 `/quant-buddy-view`、`/qbv`、`qbv`、`QBV` 且当前请求不是纯咨询/代码维护/文档解释，就先 `static_page.py new_page` 上传一个带 QuantBuddy 页头页尾的活页进度页，拿到 `page_id + url` 后立刻把 URL 发给用户/承接方；不要等到模板查完、公式验证完、长文档读完、记忆深挖完或需求细节全澄清完才给首链。标题和 message 可以先用通用文案，例如 `活页生成中` / `正在确认活页方案`，后续再更新。每完成一个主要阶段用 `update_progress` 更新同一个链接内容。进度页本身不自动刷新、不跳转、不 `postMessage`，iframe 刷新由承接页面负责。
 - 本 skill 不再内置本地页面样板，不能从本地历史样板目录或低质 HTML 骨架起步。
 
 ## 前置依赖：公式必须先验证
@@ -141,6 +143,9 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
    - 产物默认写到 `output/pages/<slug>.html`；传 `"upload": true` 可一步生成并发布。
 
 3. **发布 / 管理**（`scripts/static_page.py`）
+   - `new_page`：首次会话先上传“活页生成中”的 iframe 进度页，默认接入 QuantBuddy 公共页头页尾并返回 `page_id + url + steps`；Agent 拿到 URL 后先发给用户或承接方。
+   - `update_progress`：输入 `page_id + current_step + message + page_status` 即可，脚本会自动把前序阶段标为完成、当前阶段标为进行中、后序阶段标为待开始；只有需要展示细分说明时才传完整 `steps`。`message` 是用户可见文案，写“活页内容 / 准备实时数据 / 检查展示效果”等产品语言，不写 `HTML`、`公式包`、`本地浏览器验收`、`page_id` 等工程词。进度页不含自动刷新逻辑，承接页面定时刷新 iframe URL 后看到最新快照。
+   - `publish_final`：首链进度页的最终正式发布命令。它会先把进度推进到 `final_publish`，再调用普通 `update` 写入正式活页；若正式活页写入失败，会自动把同一个 `page_id` 回写成失败进度页。首链流程的最后一步默认用它，不要直接裸调 `update`，除非是在维护一个没有进度页上下文的旧链接。
    - `upload`：上传 HTML → 返回 `page_id` + 公开 `url`；可带 `title`（缺省取 `<title>`）和 `description`（页面说明，≤1000 字，列表/详情展示用）。宽宝活卡页面可传 `verify_cover_card:true`，本地通过默认页与 `?cover=1 --cover-card` 后再上传，并返回 / 透传 `cover_card_url`、`has_cover_card`；范式卡 artifact 可传 `verify_card_runtime:true`，只跑快速 card runtime artifact 门禁。
    - `update`：替换已发布页面的内容，**URL / page_id 不变**（页面已分享后想补充/调整时用，访问者刷新即见新内容，不占新配额）。也可只改 `title` / `description`（`description` 传空串 `""` 清空，不传保留原值）。同样支持 `verify_cover_card`、`verify_card_runtime`、`cover_card_url`、`has_cover_card`。
    - `download`：取回已发布页面的 HTML 再编辑（鉴权拿 url → 直连 OSS 下载，不占服务端带宽），改完 `update` 覆盖。
@@ -183,7 +188,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `scripts/build_dashboard.py` | （单命令） | spec → live 实时取数看板 HTML | [tools/build_dashboard.md](tools/build_dashboard.md) |
 | `scripts/compile_bespoke_page.py` | （单命令） | **【shell 处理脚本】** bespoke 主体 HTML → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
 | `scripts/retrofit_share_shell.py` | （单命令） | **【shell 处理脚本】** 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell（`assets/share-shell/`），可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
-| `scripts/static_page.py` | `upload` / `update` / `download` / `list` / `revoke` / `thumbnail` / `tags` / `autotag` / `publish_community` / `unpublish_community` / `templates` / `template` / `update_template` / `retrofit_card_runtime` / `verify_card_runtime` | 发布/替换/下载/管理静态页，得到公开链接（`update` 替换内容不换链接；宽宝活卡可加 `verify_cover_card`；范式卡 artifact 可加 `verify_card_runtime` 或批量跑 `verify_card_runtime`；`tags` 查标签，`autotag` 做 LLM 打标；`thumbnail` 设展示封面；`templates`/`template` 浏览复用官方精选；`update_template` 安全改写需要保留原链接的官方精选/旧模板；is_test 可跨用户） | [tools/static_page.md](tools/static_page.md) |
+| `scripts/static_page.py` | `new_page` / `update_progress` / `publish_final` / `upload` / `update` / `download` / `list` / `revoke` / `thumbnail` / `tags` / `autotag` / `publish_community` / `unpublish_community` / `templates` / `template` / `update_template` / `retrofit_card_runtime` / `verify_card_runtime` | 首链活页进度页、最终正式发布封装、发布/替换/下载/管理静态页，得到公开链接（`update` 替换内容不换链接；首链最后一步用 `publish_final`；进度页不自刷，由承接页面刷新；宽宝活卡可加 `verify_cover_card`；范式卡 artifact 可加 `verify_card_runtime` 或批量跑 `verify_card_runtime`；`tags` 查标签，`autotag` 做 LLM 打标；`thumbnail` 设展示封面；`templates`/`template` 浏览复用官方精选；`update_template` 安全改写需要保留原链接的官方精选/旧模板；is_test 可跨用户） | [tools/static_page.md](tools/static_page.md) |
 | `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误；发布前可加 `--require-browser` 强制浏览器验收；宽宝活卡加 `--cover-card` 检查 4:3 视口填满、浅色主题、统一骨架、DOM 标记、无滚动条、无长期占位态；范式卡 artifact 可加 `--card-runtime-only` 跳过整页视口，只验收 artifact/manifest/required_outputs/独立 hydrate | — |
 | `scripts/render_cover.py` | （被 `build_dashboard` 调用） | 封面栅格化与合成兜底：`capture_page_cover` 用系统 Edge/Chrome 无头截"封面模式页"为整页 PNG；合成封面（全幅裸图/品牌海报）走 浏览器 → 纯 Python(cairosvg/svglib) → SVG 三层兜底。跨平台、零强依赖，不影响 HTML 发布 | — |
 | `scripts/render_existing_page_thumbnail.py` | （单命令） | 给已发布/官方精选 HTML 补封面：下载或读取 HTML → 解析内嵌公式包凭证 → 先取真实 outputs 并临时替换 `QB.query` → 再用系统 Edge/Chrome 截 1200×675 PNG；可带 `upload:true` 直接设置 `thumbnail_url` | [tools/static_page.md](tools/static_page.md) |
