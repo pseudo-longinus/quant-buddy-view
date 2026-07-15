@@ -47,8 +47,9 @@ r"""
     register / query 成功时，包凭证额外落盘到 output/formula_packages/<package_id>.json，
     方便后续取数与 build_dashboard 引用（signature 服务端不可再取出，本地不存丢失即不可恢复）。
 
-认证：register/list/revoke/refresh 凭 config.json 的 api_key（Bearer）认身份；query 无需 api_key，
-凭 package_id + signature。本 skill 不再有会话 / task_id 概念。
+认证：register/list/revoke/refresh 凭 config.json 的 api_key（Bearer）认身份；query 以 package_id + signature
+为能力凭证，CLI 本地有 api_key 时会可选附带用于审计归因，浏览器无 Key 取数仍兼容。活页任务通过参数复用 trace_context.py begin 返回的 task_id，
+公共 headers() 会自动透传 x-task-id 供后端聚合调用链。
 """
 
 import json
@@ -225,11 +226,14 @@ def cmd_register(params):
     return reg
 
 
-def query_package(endpoint, package_id, signature):
+def query_package(endpoint, package_id, signature, outputs=None, api_key=""):
     """取数核心：逐条 SSE → 组装为 {code, outputs, progress, done}。供 build_dashboard 复用。"""
-    body = json.dumps({"package_id": package_id, "signature": signature}).encode("utf-8")
+    request_body = {"package_id": package_id, "signature": signature}
+    if isinstance(outputs, list) and outputs:
+        request_body["outputs"] = outputs
+    body = json.dumps(request_body).encode("utf-8")
     req = urllib.request.Request(C.api_url(endpoint, _PATH["query"]), data=body,
-                                 headers=C.headers(accept="text/event-stream"),
+                                 headers=C.headers(api_key, accept="text/event-stream"),
                                  method="POST")
     outputs = {}
     progress = []
@@ -302,9 +306,143 @@ def query_package(endpoint, package_id, signature):
     return ret
 
 
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _unwrap_read_data(data):
+    current = data
+    while isinstance(current, dict):
+        nested = None
+        for key in ("range_data", "last_value", "last_day_stats", "last_valid_per_asset"):
+            if isinstance(current.get(key), (dict, list)):
+                nested = current[key]
+                break
+        if nested is None:
+            break
+        current = nested
+    return current
+
+
+def _series_summary(values, dates=None, name=None):
+    dates = dates if isinstance(dates, list) else []
+    valid = [(idx, float(value)) for idx, value in enumerate(values or []) if _is_number(value)]
+    if not valid:
+        return {"name": name, "first_value": None, "latest_value": None, "first_date": None,
+                "latest_date": None, "change_rate_pct": None, "valid_sample_count": 0}
+    first_idx, first_value = valid[0]
+    last_idx, latest_value = valid[-1]
+    change = None if first_value == 0 else (latest_value / first_value - 1) * 100
+    return {
+        "name": name,
+        "first_value": first_value,
+        "latest_value": latest_value,
+        "first_date": dates[first_idx] if first_idx < len(dates) else None,
+        "latest_date": dates[last_idx] if last_idx < len(dates) else None,
+        "change_rate_pct": change,
+        "valid_sample_count": len(valid),
+    }
+
+
+def summarize_output_data(data):
+    """把公式包输出压成无原始时间数组的首尾/变化/样本摘要。"""
+    data = _unwrap_read_data(data)
+    if isinstance(data, dict):
+        dates = data.get("dates") if isinstance(data.get("dates"), list) else []
+        values = data.get("values")
+        if isinstance(values, list):
+            if values and all(_is_number(item) or item is None for item in values):
+                return _series_summary(values, dates)
+            if values and all(isinstance(item, list) for item in values):
+                names = data.get("series_names") or data.get("names") or []
+                return {
+                    "series": [
+                        _series_summary(series, dates, names[idx] if idx < len(names) else f"series_{idx + 1}")
+                        for idx, series in enumerate(values)
+                    ]
+                }
+        if _is_number(data.get("value")):
+            value = float(data["value"])
+            date = data.get("date") or data.get("trade_date") or data.get("computed_at")
+            return {
+                "first_value": value,
+                "latest_value": value,
+                "first_date": date,
+                "latest_date": date,
+                "change_rate_pct": 0.0,
+                "valid_sample_count": 1,
+            }
+        for collection_key in ("records", "items", "top_values"):
+            records = data.get(collection_key)
+            if isinstance(records, list):
+                summarized = summarize_output_data(records)
+                if summarized:
+                    return summarized
+        numeric_fields = {key: float(value) for key, value in data.items() if _is_number(value)}
+        return {
+            "latest_date": data.get("date") or data.get("trade_date") or data.get("computed_at"),
+            "latest_values": numeric_fields,
+            "valid_sample_count": len(numeric_fields),
+        }
+    if isinstance(data, list):
+        series = {}
+        dates = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            dates.append(item.get("date") or item.get("trade_date") or item.get("computed_at"))
+            row_index = len(dates) - 1
+            for values in series.values():
+                values.append(None)
+            for key, value in item.items():
+                if _is_number(value):
+                    if key not in series:
+                        series[key] = [None] * row_index + [value]
+                    else:
+                        series[key][-1] = value
+        if series:
+            summaries = [_series_summary(values, dates, name) for name, values in series.items()]
+            return summaries[0] if len(summaries) == 1 else {"series": summaries}
+        return {"latest_value": None, "latest_date": None, "valid_sample_count": 0}
+    if _is_number(data):
+        value = float(data)
+        return {"first_value": value, "latest_value": value, "first_date": None,
+                "latest_date": None, "change_rate_pct": 0.0, "valid_sample_count": 1}
+    return {"latest_value": None, "latest_date": None, "valid_sample_count": 0}
+
+
+def _compact_query_result(result, result_mode):
+    if result_mode == "full" or not isinstance(result, dict):
+        return result
+    compact = {key: value for key, value in result.items() if key not in ("outputs", "progress")}
+    compact["result_mode"] = result_mode
+    compact["progress_count"] = len(result.get("progress") or [])
+    compact_outputs = {}
+    for name, item in (result.get("outputs") or {}).items():
+        summary = summarize_output_data(item.get("data"))
+        if result_mode == "last_values":
+            if isinstance(summary.get("series"), list):
+                summary = {
+                    "series": [
+                        {"name": row.get("name"), "latest_value": row.get("latest_value"), "latest_date": row.get("latest_date")}
+                        for row in summary["series"]
+                    ]
+                }
+            else:
+                summary = {key: summary.get(key) for key in ("latest_value", "latest_date", "latest_values") if key in summary}
+        compact_outputs[name] = {
+            "read_mode": item.get("read_mode"),
+            "data_id": item.get("data_id"),
+            "summary": summary,
+            "error": item.get("error"),
+        }
+    compact["outputs"] = compact_outputs
+    return compact
+
+
 def cmd_query(params):
     """取数：无需 api_key，凭 package_id + signature（signature 可由本地凭证补全）。"""
-    endpoint, _ = _config(require_key=False)
+    endpoint, api_key = _config(require_key=False)
     pkg = params.get("package_id")
     sig = params.get("signature")
     if pkg and not sig:
@@ -313,7 +451,13 @@ def cmd_query(params):
             sig = cred.get("signature")
     if not pkg or not sig:
         return {"code": 1, "message": "query 需要 package_id + signature（signature 可由本地凭证补全）"}
-    return query_package(endpoint, pkg, sig)
+    outputs = params.get("outputs")
+    if outputs is not None and (not isinstance(outputs, list) or not all(isinstance(item, str) and item.strip() for item in outputs)):
+        return {"code": 1, "message": "outputs 必须是非空字符串数组"}
+    result_mode = str(params.get("result_mode") or ("summary" if params.get("direct") else "full")).strip().lower()
+    if result_mode not in ("full", "summary", "last_values"):
+        return {"code": 1, "message": "result_mode 只允许 full / summary / last_values"}
+    return _compact_query_result(query_package(endpoint, pkg, sig, outputs=outputs, api_key=api_key), result_mode)
 
 
 def _resolve_import_dir(params):
@@ -415,9 +559,11 @@ def cmd_refresh(params):
     body = {"package_id": params["package_id"],
             "rotate_signature": bool(params.get("rotate_signature", False))}
     res = C.http_json("POST", C.api_url(endpoint, _PATH["refresh"]), C.headers(api_key), body)
+    rotated = bool(params.get("rotate_signature", False))
     if res.get("code") == 0 and res.get("signature"):
         cred = os.path.join(SKILL_ROOT, "output", "formula_packages",
                             f"{params['package_id']}.json")
+        cred_updated = False
         if os.path.exists(cred):
             try:
                 with open(cred, "r", encoding="utf-8") as f:
@@ -426,8 +572,19 @@ def cmd_refresh(params):
                 with open(cred, "w", encoding="utf-8") as f:
                     json.dump(rec, f, ensure_ascii=False, indent=2)
                 res["_credential_updated"] = cred
+                cred_updated = True
             except Exception:
                 pass
+        # 轮换成功后打醒目善后提醒：新签名已生效，所有内嵌旧签名的已发布页面此刻已失效，
+        # 必须重建 + static_page update 每一个页面把新签名同步进去，否则它们取数会报 SIGNATURE_INVALID。
+        if rotated:
+            warn = ("⚠️ 签名已轮换，旧签名此刻已失效：所有内嵌该包旧签名的已发布页面现在取数会报 "
+                    "SIGNATURE_INVALID。必须立即用新签名重建 HTML 并 static_page update 覆盖每一个页面（同 "
+                    "page_id、链接不变）。新签名只此一次明文返回、服务端不可再取出，务必落库/记录。")
+            if not cred_updated:
+                warn += ("｜本地无该包凭证 output/formula_packages/{}.json，脚本未能回写新签名——"
+                         "请手动保存上面的 signature，否则 build_dashboard 无法重建。").format(params["package_id"])
+            res["_rotate_warning"] = warn
     return res
 
 

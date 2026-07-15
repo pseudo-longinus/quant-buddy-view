@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for QuantBuddy live cover cards."""
+"""Shared helpers for QuantBuddy card runtime artifacts (embedded-card-v1)."""
 
 import datetime
 from html import escape as html_escape
@@ -7,15 +7,8 @@ import json
 import re
 
 
-LIVE_CARD_MARKER = "data-qb-live-card"
-CSS_TOKEN = "<!-- QB_LIVE_CARD_CSS -->"
-JS_TOKEN = "<!-- QB_LIVE_CARD_JS -->"
 CARD_RUNTIME_KIND = "embedded-card-v1"
 CARD_RUNTIME_VERSION = "1.0.0"
-
-
-def has_live_card(html):
-    return bool(re.search(r"\bdata-qb-live-card(?:\s|=|>)", html or "", flags=re.I))
 
 
 def _clean_text(value, fallback=""):
@@ -288,144 +281,6 @@ def card_runtime_script():
   };
 })();
 </script>"""
-
-
-def binding_script(config=None, *, fallback_title="", fallback_description=""):
-    cfg = normalize_config(config, fallback_title=fallback_title, fallback_description=fallback_description)
-    data = json.dumps(cfg, ensure_ascii=False).replace("</", "<\\/")
-    return """<script id="qb-live-card-binding">
-(function(){
-  var cfg = __CFG__;
-  function isObj(v){ return v && typeof v === "object" && !Array.isArray(v); }
-  function unwrap(data){
-    if (data && data.data != null && (data.read_mode || data.data_id || data.error == null)) data = data.data;
-    if (isObj(data)) {
-      var keys = ["last_value", "last_day_stats", "last_valid_per_asset", "range_data"];
-      for (var i = 0; i < keys.length; i++) if (data[keys[i]] != null) return unwrap(data[keys[i]]);
-    }
-    return data;
-  }
-  function fmt(v, unit){
-    if (v == null || v === "") return "待更新";
-    if (typeof v === "number" && isFinite(v)) {
-      var abs = Math.abs(v);
-      v = abs >= 100 ? v.toFixed(0) : abs >= 10 ? v.toFixed(1) : v.toFixed(2);
-    }
-    return String(v) + (unit ? " " + unit : "");
-  }
-  function firstUseful(data, field){
-    data = unwrap(data);
-    if (Array.isArray(data)) {
-      for (var i = data.length - 1; i >= 0; i--) {
-        var item = data[i];
-        if (Array.isArray(item)) {
-          for (var j = item.length - 1; j >= 0; j--) if (item[j] != null && item[j] !== "") return item[j];
-        } else if (isObj(item)) {
-          if (field && item[field] != null) return item[field];
-          var vals = Object.keys(item).map(function(k){ return item[k]; }).filter(function(v){ return v != null && v !== ""; });
-          if (vals.length) return vals[vals.length - 1];
-        } else if (item != null && item !== "") {
-          return item;
-        }
-      }
-    }
-    if (isObj(data)) {
-      if (field && data[field] != null) return data[field];
-      if (Array.isArray(data.values)) {
-        for (var k = data.values.length - 1; k >= 0; k--) if (data.values[k] != null) return data.values[k];
-      }
-      var dateKeys = ["trade_date", "date", "asof", "as_of"];
-      for (var d = 0; d < dateKeys.length; d++) if (data[dateKeys[d]] != null && field === dateKeys[d]) return data[dateKeys[d]];
-      var keys = Object.keys(data).filter(function(k){ return data[k] != null && data[k] !== ""; });
-      if (keys.length) return data[keys[keys.length - 1]];
-    }
-    return data;
-  }
-  function outputValue(outputs, spec){
-    if (!spec || !spec.output || !outputs) return null;
-    return firstUseful(outputs[spec.output], spec.field);
-  }
-  function findDate(outputs){
-    var spec = { output: cfg.date_output, field: "date" };
-    var value = outputValue(outputs, spec);
-    if (value) return value;
-    if (!outputs) return cfg.date;
-    var keys = Object.keys(outputs);
-    for (var i = 0; i < keys.length; i++) {
-      var out = unwrap(outputs[keys[i]]);
-      var date = firstUseful(out, "trade_date") || firstUseful(out, "date");
-      if (date) return date;
-    }
-    return cfg.date;
-  }
-  function hydrate(outputs){
-    outputs = outputs || window.LAST_OUTPUTS || window.__QB_COVER_OUTPUTS__ || {};
-    if (!window.QBLiveCard) return;
-    QBLiveCard.applyVisibility();
-    QBLiveCard.setDate(document, findDate(outputs), cfg.date);
-    QBLiveCard.setText(document, "[data-qb-live-card-title]", cfg.title);
-    QBLiveCard.setText(document, "[data-qb-live-card-description]", cfg.description);
-    var primary = document.querySelector("[data-qb-live-card-primary]");
-    if (primary) {
-      var pv = outputValue(outputs, cfg.primary);
-      primary.textContent = fmt(pv != null ? pv : cfg.primary.value, cfg.primary.unit);
-    }
-    (cfg.metrics || []).forEach(function(metric, index){
-      var value = outputValue(outputs, metric);
-      QBLiveCard.setMetric(document, index, metric.label, fmt(value != null ? value : metric.value, metric.unit));
-    });
-  }
-  window.QBLiveCardHydrate = hydrate;
-  document.addEventListener("DOMContentLoaded", function(){ hydrate(); });
-  window.addEventListener("qb:outputs", function(ev){ hydrate(ev.detail && ev.detail.outputs || ev.detail || {}); });
-})();
-</script>""".replace("__CFG__", data)
-
-
-def _insert_before(pattern, fragment, html):
-    match = re.search(pattern, html, flags=re.I)
-    if not match:
-        return html, 0
-    return html[:match.start()] + fragment + "\n" + html[match.start():], 1
-
-
-def _inject_after_main(html, fragment):
-    match = re.search(r"<main\b[^>]*>", html or "", flags=re.I)
-    if match:
-        return html[:match.end()] + "\n    " + fragment + "\n" + html[match.end():], "inserted_after_main"
-    match = re.search(r"<body\b[^>]*>", html or "", flags=re.I)
-    if match:
-        return html[:match.end()] + "\n  <main>\n    " + fragment + "\n  </main>\n" + html[match.end():], "inserted_after_body"
-    return fragment + "\n" + html, "prepended"
-
-
-def ensure_assets(html):
-    actions = []
-    if "live-card.css" not in html and CSS_TOKEN not in html and ".essence-card[data-qb-live-card]" not in html:
-        html, count = _insert_before(r"</head>", CSS_TOKEN, html)
-        if count:
-            actions.append("inserted_live_card_css")
-    if "live-card.js" not in html and JS_TOKEN not in html and "window.QBLiveCard" not in html:
-        html, count = _insert_before(r"</body>", JS_TOKEN, html)
-        if count:
-            actions.append("inserted_live_card_js")
-    return html, actions
-
-
-def inject(html, config=None, *, fallback_title="", fallback_description=""):
-    actions = []
-    if not has_live_card(html):
-        fragment = card_html(config, fallback_title=fallback_title, fallback_description=fallback_description)
-        html, action = _inject_after_main(html, fragment)
-        actions.append(action)
-    html, asset_actions = ensure_assets(html)
-    actions.extend(asset_actions)
-    if "qb-live-card-binding" not in html:
-        script = binding_script(config, fallback_title=fallback_title, fallback_description=fallback_description)
-        html, count = _insert_before(r"</body>", script, html)
-        if count:
-            actions.append("inserted_live_card_binding")
-    return html, actions
 
 
 def dashboard_config(spec, panels):

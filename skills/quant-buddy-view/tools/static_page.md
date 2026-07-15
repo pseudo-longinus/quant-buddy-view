@@ -2,8 +2,8 @@
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
-> **首链进度页**：新会话可先用 `new_page` 上传一个带 QuantBuddy 页头页尾、iframe 友好的活页进度页并返回链接，后续用 `update_progress` 更新同一个 `page_id` 的 HTML；最终正式发布用 `publish_final`。进度页本身不自动刷新，承接页面负责定时刷新 iframe URL。
-> 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定，本技能无会话 / task_id 概念）；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
+> **首链进度页**：新会话先查官方精选+社区范式卡；direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize。fork/unmatched 才用 `new_page`、`update_progress`、`publish_final` 维护同一首链。
+> 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`，后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
 
@@ -23,6 +23,8 @@
 | 取消社区发布 | `POST /skill/unpublishStaticPageFromCommunity` |
 | 模板列表 | `GET /skill/listTemplates?category=&status=&scene_tag_id=&paradigm_tag_id=&recommend_tag_id=&page=&page_size=` |
 | 模板详情 | `GET /skill/getTemplate?template_id=`（或 `page_id=`） |
+| direct 确定性交付 | 脚本包装：`direct_deliver` 调一次模板详情、下载公开 HTML、每数据源查询一次，再调 `finalizeDirectPage` |
+| direct 终态 | `POST /skill/finalizeDirectPage`（API Key；校验 task、模板 revision 与同 task 实时查询证据） |
 | 模板改写 | `POST /skill/updateTemplate`（is_test/admin；脚本命令 `update_template` 带并发复查） |
 
 ## 调用方式
@@ -34,8 +36,20 @@ python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析
 # 阶段推进时只更新同一个 page_id 的进度 HTML；脚本会按 current_step 自动推导步骤状态
 python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
 
-# 首链流程的最终正式发布：仍是同一个 page_id / URL，失败时会回写失败进度页
-python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析"}'
+# 必须等待用户决定时，把同一首链切为可恢复等待状态
+python scripts/static_page.py update_progress '{"task_id":"task_xxx","page_id":"page_xxx","current_step":"formula_validation","page_status":"waiting_input","message":"等待确认市场口径","required_input":{"id":"market_scope","prompt":"请选择本页市场口径","options":[{"value":"a_share","label":"A股"},{"value":"hk","label":"港股"}],"resume_step":"formula_validation"}}'
+
+# 用户回复后复用同一 task_id/page_id，从原步骤恢复
+python scripts/static_page.py update_progress '{"task_id":"task_xxx","page_id":"page_xxx","current_step":"formula_validation","page_status":"running","message":"已确认市场口径，继续验证实时数据"}'
+
+# fork 来源准备：下载来源 HTML 并生成 fork_manifest_v1
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
+
+# 编辑 working_html_file 后、浏览器验收前先复用发布门禁（不发布）
+python scripts/static_page.py fork_validate '{"task_id":"task_xxx","html_file":"output/forks/page_template_xxx/page_template_xxx.fork.html"}'
+
+# fork 首链最终发布：仍是同一个 page_id / URL，失败时会回写失败进度页
+python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json"}'
 
 # 上传（推荐用 build_dashboard 产物文件）
 python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
@@ -75,12 +89,18 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'
 python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 
-# 浏览官方精选 / 看某个精选页面详情（拿下载链接克隆复用）
-python scripts/static_page.py templates '{"page":1,"page_size":20}'
+# 浏览官方精选+社区命中池 / 看某个范式详情
+python scripts/static_page.py templates '{"recommend":"all","page":1,"page_size":20}'
 python scripts/static_page.py template  '{"template_id":"tpl_xxx"}'
 
+# direct：先把 templates 返回的 URL 发给用户，再只调用一次本命令
+python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
+
+# 兼容底层入口：仅在已经单独完成全部实时查询证据时使用
+python scripts/static_page.py direct_finalize '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
+
 # 已转 published template 的页面：保持原 page_id/public_url 安全改写
-python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file":"output/pages/x.html","verify_cover_card":true,"expected_metadata":{"download_url":"https://..."}}'
+python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file":"output/pages/x.html","verify_card_runtime":true,"expected_metadata":{"download_url":"https://..."}}'
 
 # 批量快速验收范式卡 card runtime artifact，不跑整页多视口
 python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"require_browser":true}'
@@ -96,7 +116,13 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 - 默认接入 QuantBuddy 公共页头页尾，并套浅色 share shell theme；如内部调试确实不要页头页尾，可显式传 `ensure_share_shell:false`；
 - 首链流程的最终正式活页默认走 `publish_final`，保留普通 `update` 的 share shell 门禁。
 - `publish_final` 会先把进度推进到 `final_publish`；若正式 HTML 更新失败，它会把同一个 `page_id` 回写成 `failed` 进度页，避免用户刷新后长期停在上一阶段。
+- 复用在线模板时，用同一 `task_id` 调 `fork_prepare` 生成 `fork_manifest_v1` 和任务级 `fork_task_binding_v1`，`publish_final` 仍应同时传 `source_template_id + fork_manifest_file`。若 Agent 漏传，脚本会按 task 自动恢复；若显式值与绑定冲突则 fail-closed。脚本继承来源模板的 `agent_reply_template`，但不会复制来源 `page_context`；manifest 负责校验来源 HTML SHA、来源凭证残留、核心栏目、必需输出与 Card Runtime。
+- 个股估值、宏观事件、行业主题、多资产比较、资金量化、基金产品、海外资产会按高置信 metadata 匹配专业骨架；无法匹配的新活页使用 `generic_live_page_delivery_v1`，不再退化成一句发布摘要。
+- `reply_template_v2 + hybrid` 必须同时具备当前活页 `page_context` 和 `hybrid_composition`，缺一项正式发布直接失败；旧 v1 hybrid 兼容。
 - `update_progress` 优先只传 `current_step + message`，脚本会自动把前序阶段标为 `done`、当前阶段标为 `running`、后序阶段标为 `pending`；不要在每次更新里复制一份可能过期的完整 `steps`。
+- 带 `task_id` 推进到 `package_register` 或更后阶段时，必须传 quant-buddy-skill 成功返回的 `validation_receipt_files`；`failed/deferred` 收据不能作为完成证据。无需实时验证的静态页必须传非空 `validation_not_required_reason`。
+- 必须由用户决定口径时传 `page_status=waiting_input` 和 `required_input`；当前步骤标为 `waiting`，返回 `agent_reply_hint.interaction_required=true`。用户回复后必须复用原 `task_id/page_id`，以 `page_status=running` 恢复 `resume_step`。
+- 进度快照默认显式上传空 `scene_tags/paradigm_tags`，防止临时文案触发自动打标；正式 `publish_final` 不继承该抑制策略。
 - `message` 会直接展示给用户，应使用“活页内容 / 准备实时数据 / 检查展示效果”这类产品文案，避免 `HTML`、`公式包`、`本地浏览器验收`、`page_id`、`URL` 等工程词。
 
 参数：
@@ -107,7 +133,8 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 | `title` | `new_page` / `update_progress` | ❌ | 页面标题，默认 `活页生成中` |
 | `message` | `new_page` / `update_progress` | ❌ | 当前状态文案 |
 | `current_step` | `new_page` / `update_progress` | ❌ | 当前阶段 ID，默认 `plan` |
-| `page_status` | `new_page` / `update_progress` | ❌ | `running` / `done` / `failed`，默认 `running` |
+| `page_status` | `new_page` / `update_progress` | ❌ | `running` / `waiting_input` / `done` / `failed`，默认 `running` |
+| `required_input` | `new_page` / `update_progress` | `waiting_input` 时必填 | `{id,prompt,options?,resume_step}`；`options` 为可选 `{value,label}` 数组 |
 | `steps` | `new_page` / `update_progress` | ❌ | 步骤数组；每项含 `id`、`title`、`status`、可选 `message`。默认不必传，脚本会按 `current_step` 自动推导状态 |
 
 `publish_final` 接收普通 `update` 的参数，并额外支持：
@@ -116,6 +143,9 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 |---|---|---|
 | `progress_message` / `final_publish_message` / `publish_message` | ❌ | 进入 `final_publish` 时的用户可见文案，默认 `正在完成活页生成` |
 | `failure_message` / `progress_failure_message` | ❌ | 正式发布失败时回写到进度页的用户可见文案，默认 `活页生成遇到问题，请稍后重试。` |
+| `source_template_id` | ❌ | 本页复用的在线模板 `template_id/page_id`；继承回复骨架，不复制来源 `page_context` |
+| `fork_manifest_file` / `fork_manifest` | `source_template_id` 存在时必填 | `fork_prepare` 生成的 `fork_manifest_v1` 文件或内联对象；发布前 fail-closed 校验来源 HTML、package/grant/signature、栏目、输出和 Card Runtime |
+| `require_agent_reply_template` | ❌ | `true` 时启用 fail-closed 门禁；无法解析 Agent 回复模板则不发布正式页 |
 
 默认步骤固定为：
 
@@ -127,7 +157,8 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 python scripts/static_page.py new_page '{"title":"中证500异动监控","message":"正在选择活页方案"}'
 python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"template","message":"已选择中证500异动监控活页"}'
 python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"verify","message":"活页内容已生成，正在检查展示效果"}'
-python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"中证500异动监控"}'
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","source_markers":["贵州茅台","SH600519"],"target_asset":"SZ300209"}'
+python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"目标标的估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
 ```
 
 ## 公共页头页尾门禁
@@ -145,15 +176,6 @@ python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"
 
 返回 JSON 会带 `share_shell` 字段，说明是否检查以及自动补了哪些内容。默认必须开启；仅内部调试可传 `"ensure_share_shell": false` 跳过。
 
-## 宽宝活卡发布门禁
-
-`upload` / `update` 可传 `verify_cover_card:true`。脚本会先把最终 HTML 写入临时文件并执行两次浏览器验收：
-
-- 默认页：`verify_page.mjs <html> --require-browser`
-- 活卡页：`verify_page.mjs <html>?cover=1 --require-browser --cover-card`
-
-任一失败都会返回 `code:1`，不会上传或覆盖线上页面。通过后，脚本会在请求体中带上 `has_cover_card:true`；如果服务端响应没有 `cover_card_url`，脚本会在返回 JSON 中补出建议值 `<url>?cover=1`。
-
 ## 范式卡 artifact 快速门禁
 
 `upload` / `update` / `update_template` 可传 `verify_card_runtime:true`。脚本会把最终 HTML 写入临时文件，执行：
@@ -162,7 +184,7 @@ python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"
 node scripts/verify_page.mjs <html> --card-runtime-only --require-browser
 ```
 
-这条路径只验收嵌入的 card artifact，不跑默认页 / `?cover=1` 的整页多视口，因此适合模板库批量回归。检查项包括：
+这条路径只验收嵌入的 card artifact，不跑整页多视口，因此适合模板库批量回归。检查项包括：
 
 - `template[data-qb-card-template]`、`style[data-qb-card-style]`、`script[data-qb-card-manifest]`、`script[data-qb-card-runtime]` 齐全；
 - runtime 不主动 `fetch` / `XMLHttpRequest` / `EventSource`，不依赖完整页面 DOM；
@@ -213,8 +235,22 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 | `page_id` | string | 二选一 | 要下载的页面（来自上次 upload / list） |
 | `url` | string | 二选一 | 页面公开链接（会自动从中解析 page_id） |
 | `save` | string | ❌ | 落盘路径（相对则相对 skill 根）；不传则把 `html` 放进返回 JSON |
+| `final_response` | boolean | ❌ | 默认 `false`。仅保留给普通自有页面只读兼容；published template direct 禁止使用 |
 
-返回（save 时）：`{ code:0, page_id, owner, title, description, url, cover_card_url, has_cover_card, size, sha256, sha256_match, saved_to }`
+返回（save 时）：`{ code:0, page_id, owner, title, description, url, agent_reply_template, size, sha256, sha256_match, saved_to }`
+
+默认返回 `agent_reply_hint`（`terminal:false`、`resource_role:existing_page`），即使页面带有 `agent_reply_template` 也不能据此最终收口。普通自有页面显式传 `final_response:true` 时仍可返回兼容只读终态；published template direct 必须走 `direct_deliver`（兼容底层入口为 `direct_finalize`）。
+
+## Agent 回复协议：hint 与 terminal contract
+
+- `templates` / `template`：只返回 `agent_reply_hint`，`resource_role=source_template`。direct 精确命中时，列表 URL 必须在下一次工具调用前先发给用户；fork 的 `download_url` 只是来源输入。
+- direct 命中：运行一次 `direct_deliver`，由脚本读取一次模板、按当前 package/grant 各 query 一次并调用一次 `direct_finalize`；成功返回 `agent_reply_contract.terminal=true` 和 `delivery_trace_id`，且不改模板生成 Trace 字段。
+- `fork_prepare`：返回来源 HTML 与 `fork_manifest_v1` 文件路径，同时保持 `agent_reply_hint.terminal=false`；它是 fork 输入，不是完成证据。
+- `list` / 默认 `download`：只返回 `agent_reply_hint`，`resource_role=existing_page`。
+- `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。`waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`，只授权一次澄清停顿，不是业务完成证据。
+- 成功的 `upload` / `update` / `publish_final` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url`。
+- 只有终态 contract 可以触发最终回复；其中 `required=true` 时才要求读取 Markdown 回复骨架。任何 hint、来源模板 metadata 或 `terminal:false` 都表示必须继续工作。
+- `publish_final` 会 fail-closed 校验同一首链 `page_id` / URL、排除来源模板 URL；fork 还要求有效 manifest、禁止任一来源 package/grant 残留，并检查核心栏目、必需输出、Card Runtime 和用户自己的实时凭证。
 
 ## 权限 / 权责（is_test 内部互通）
 
@@ -301,20 +337,26 @@ python scripts/render_existing_page_thumbnail.py "{\"url\":\"https://pages.quant
 官方精选 = 后台打了推荐标签 `recommend:官方精选` 的优质页面。接口沿用 `templates` / `template` 的历史命名，但发现口径已经是纯标签：不再要求 `is_template:true` 或 `template_status:published`。
 本 skill 侧的用法是「照着现成精选页做一份自己的页」。
 
-**1) 浏览**：`templates` 列出官方精选页面
+**1) 浏览**：`templates` 列出范式卡活页（官方精选，可选并入社区）
 
 ```bash
 python scripts/static_page.py templates '{"page":1,"page_size":20}'
 python scripts/static_page.py templates '{"category":"个股画像"}'
 # 也可按标签筛选（id 来自后台标签表 / 详情回显）
 python scripts/static_page.py templates '{"scene_tag_id":"tag_xxx"}'
+# 范式卡命中池：合并官方精选 + 社区（按 page_id 去重）
+python scripts/static_page.py templates '{"recommend":"all"}'
+python scripts/static_page.py templates '{"include_community":true}'
+# 只看社区
+python scripts/static_page.py templates '{"recommend":"社区"}'
 ```
 
 返回 items 每条含：`template_id`（兼容字段，等同 `page_id`）/ `page_id` / `title` / `description` / `thumbnail_url` / `category` /
-`cover_card_url` / `has_cover_card` / `is_template` / `template_status` / `download_url` /
+`is_template` / `template_status` / `download_url` /
 `scene_tags` / `paradigm_tags` / `recommend_tags` 等（具体以服务端为准）。
-默认已经限定 `recommend:官方精选`；可传 `scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 作为叠加标签过滤。若服务端只返回
-`has_cover_card:true`，脚本会用 `download_url/public_url/url + ?cover=1` 补出 `cover_card_url`。
+不传 `recommend`/`include_community` 时仍限定 `recommend:官方精选`；`recommend:"all"` 或 `include_community:true` 合并官方精选 + 社区，
+`recommend:"社区"` 只看社区。`scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 仍作叠加标签过滤。
+> 说明：社区命中池依赖服务端接受 `recommend=社区` 的列表口径；若后台尚未放开，该项会退回官方精选并被去重，不影响官方精选命中。
 
 **2) 看详情 / 拿下载链接**：`template`
 
@@ -323,25 +365,30 @@ python scripts/static_page.py template '{"template_id":"tpl_xxx"}'
 ```
 
 返回：`{ code:0, template_id, page_id, title, description, thumbnail_url, category, is_template, template_status,
-download_url, cover_card_url, has_cover_card, is_live, package_ids, packages,
+download_url, is_live, package_ids, packages,
 scene_tags, paradigm_tags, recommend_tags }`。其中：
 
 - `download_url` 是模板 HTML 的**公开下载链接**（OSS public-read），直接 GET 即得整页 HTML。
 - `is_live` / `package_ids` / `packages` 说明该模板是否实时取数页、关联了哪些公式包（克隆后通常要
   换成你自己注册的公式包 signature 才能取你关心的标的数据）。
 
-**3) 复用成自己的页**：取回模板 HTML → 改资产/文案/公式包 → `upload` 发布
+**3) direct 命中**：范围一致时先发现成链接 → 一次性查询原页凭证并校验交付证据
 
 ```bash
-# download_url 是 public-read，直接拉回本地（与 download 命令的「直连 OSS」同理）
-curl -s "<download_url>" -o output/pages/from_tpl.html
-# 改完（换公式包 signature、标的、解读文案）后，发布成自己的新页面
-python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html","title":"我的看板"}'
+python scripts/formula_package.py query '{"task_id":"task_xxx","package_id":"pkg_xxx","signature":"sig_xxx","result_mode":"summary"}'
+python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
 ```
 
-> 复用要点：模板里内嵌的是**原作者**的公式包 `signature`。若你要展示自己关心的标的，应在
-> quant-buddy-skill 验证公式后用 `formula_package register` 注册**你自己的**包，把页面里的
-> package_id + signature 换掉再 `upload`；否则页面取的还是模板原本那套数据。
+**4) fork 成自己的页**：`fork_prepare` → 改资产/文案/凭证 → `publish_final`
+
+```bash
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
+python scripts/static_page.py publish_final '{"page_id":"page_first","html_file":"output/pages/final.html","source_template_id":"page_xxx","fork_manifest_file":"output/forks/page_xxx/page_xxx.fork-manifest.json"}'
+```
+
+> fork 要点：模板里内嵌的是原作者凭证。必须用 quant-buddy-skill 验证目标公式/输出，注册自己的 package/grant 并替换；`publish_final` 会拒绝来源 package/grant/signature 残留、manifest 声明的核心栏目/必需输出缺失或 Card Runtime 丢失。
+
+`fork_prepare` 会写两份 HTML：`*.source.html` 是只读来源基线，用 SHA256 锁定；`*.fork.html` 是工作副本。传入 `task_id` 时，还会在 `output/fork_task_bindings/` 写入按 task 哈希命名的原子绑定文件；`build_dashboard` 读取到 prepared binding 会立即返回 `FORK_TASK_BOUND`，`publish_final` 则自动补齐来源与 manifest。`asset_replacements` 会自动扩展常见交易所代码写法（如 `SH600000`、`600000.SH`），并记录实际替换计数；公式包和数据授权凭证仍必须在验证/注册后由调用方替换。编辑完成后先用 `fork_validate` 复用完整 manifest 门禁，成功后再进入浏览器验收。manifest 默认要求目标页的 package/grant 数量不少于来源页；只有确实把多个来源凭证整合成更少目标凭证时，才可下调 `minimum_target_package_count` / `minimum_target_grant_count`，并必须同时填写非空 `credential_count_reduction_reason` 供审计。确需放弃已绑定范式时，新建 Trace Context 后重新判定路由，不要复用原 task。
 
 ### 公共模板：安全改写（`update_template`）
 
@@ -351,13 +398,13 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 
 1. 先调用 `template` 读取当前 metadata。
 2. 如传入 `expected_metadata`，脚本比较 `download_url/title/description/category/size/sha256/updated_at` 等字段；发现变化就停止。
-3. 编译公共 share shell；如传 `verify_cover_card:true`，先跑默认页和 `?cover=1` 浏览器验收；如传 `verify_card_runtime:true`，先跑 artifact 快速门禁。
+3. 编译公共 share shell；如传 `verify_card_runtime:true`，先跑 card artifact 快速门禁。
 4. 调 `POST /skill/updateTemplate` 写回同一个 `template_id/page_id`。
 5. 写后再次 `template` 回查，并把 `preflight_template/postflight_template` 放进返回 JSON。
 
-常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`cover_card_url`、`has_cover_card`、`verify_cover_card`、`verify_card_runtime`、`expected_metadata`。
+常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`verify_card_runtime`、`expected_metadata`。
 
-写回后必须以 `template` / `templates` 回查为准。若服务端暂未持久化 `cover_card_url` / `has_cover_card`，脚本返回里可能会根据本次参数补出建议值，但模板列表仍可能显示 `has_cover_card:false`。这种情况下 HTML 与 `?cover=1` 已经可用，前端可临时由 `download_url + "?cover=1"` 派生 iframe；metadata 持久化要作为后端阻塞项单独交接。
+写回后必须以 `template` / `templates` 回查为准。
 
 ## 配置
 
@@ -379,9 +426,9 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `tagging_method` | string | ❌ | `manual` | 标签决策方式：`manual` / `llm` / `migration` / `unknown`；不要传 `agent`。LLM 自动识别统一使用 `autotag` |
 | `tagging_source` | string | ❌ | `unknown` | 标签来源系统：`quant-buddy-view` / `growthX` / `skill_server` / `script` / `unknown` |
 | `tagging_meta` | object | ❌ | 无 | 高级来源审计；可传 `method/source/note`，服务端会写入 `static_pages.tagging_meta` |
-| `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为发布 URL + `?cover=1` |
-| `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
-| `verify_cover_card` | bool | ❌ | false | 发布前本地验收默认页和 `?cover=1 --cover-card`；失败不上传 |
+| `page_context` | object | ❌ | 自动生成 | 当前活页稳定语义：`version/summary/core_sections/primary_outputs/reply_focus/limitations`；不得含实时值、凭证或本地路径 |
+| `agent_reply_template` | object | ❌ | 专业匹配或通用兜底 | v1/v2 回复协议；`template_ref` 指向 `reply-templates/` 下稳定 id |
+| `reply_contract_binding` | object | ❌ | 无 | 官方/运营维护标记：`version/profile_ref/revision/managed_by`；普通用户活页通常不传 |
 | `verify_card_runtime` | bool | ❌ | false | 发布前只验收 card runtime artifact；失败不上传 |
 | `verify_card_runtime_timeout_sec` | number | ❌ | 180 | 单次 artifact 门禁超时时间 |
 | `ensure_share_shell` | bool | ❌ | true | 发布前强制检查/自动补公共页头页尾；生产路径不要关闭 |
@@ -406,9 +453,9 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
 | `tagging_method` | string | ❌ | `manual` | 仅在传入标签时写来源审计；不要传 `agent`，LLM 自动识别统一使用 `autotag` |
 | `tagging_source` | string | ❌ | `unknown` | 标签来源系统 |
 | `tagging_meta` | object | ❌ | 无 | 高级来源审计；可传 `method/source/note` |
-| `cover_card_url` | string | ❌ | 无 | 宽宝活卡 iframe URL；通常为原页面 URL + `?cover=1` |
-| `has_cover_card` | bool | ❌ | false | 模板库是否可展示 live card |
-| `verify_cover_card` | bool | ❌ | false | 替换前本地验收默认页和 `?cover=1 --cover-card`；失败不覆盖 |
+| `page_context` | object | ❌ | 沿用原值 | 仅显式传入时更新；`null`/空对象清空。若最终模板是 v2 hybrid，清空会被拒绝 |
+| `agent_reply_template` | object | ❌ | 沿用原值 | Agent 回复格式 metadata；传 `null` / 空对象表示清空（服务端支持时生效） |
+| `reply_contract_binding` | object | ❌ | 沿用原值 | 人工维护分组和 revision；传 `null`/空对象清空，省略则保留 |
 | `verify_card_runtime` | bool | ❌ | false | 替换前只验收 card runtime artifact；失败不覆盖 |
 | `verify_card_runtime_timeout_sec` | number | ❌ | 180 | 单次 artifact 门禁超时时间 |
 | `ensure_share_shell` | bool | ❌ | true | 替换前强制检查/自动补公共页头页尾；生产路径不要关闭 |
@@ -429,12 +476,38 @@ python scripts/static_page.py upload '{"html_file":"output/pages/from_tpl.html",
   "scene_tags": [{ "tag_id": "tag_...", "name": "盘前", "source": "system" }],
   "paradigm_tags": [{ "tag_id": "tag_...", "name": "量价背离", "source": "user" }],
   "tagging_meta": { "method": "manual", "trigger": "upload", "source": "quant-buddy-view", "tagged_at": "2026-..." },
+  "page_context": {
+    "version": "page_context_v1",
+    "summary": "用于观察单只股票的估值水位与财务质量。",
+    "core_sections": ["估值水位", "盈利质量", "现金流质量"],
+    "primary_outputs": ["PE/PB 历史分位", "ROE", "经营现金流"],
+    "reply_focus": "先判断估值，再判断盈利和现金流是否支撑。",
+    "limitations": "不提供目标价或明日涨跌预测。"
+  },
+  "agent_reply_template": {
+    "version": "reply_template_v2",
+    "template_ref": "single_stock_valuation_quality_v1",
+    "reply_scope": "full_answer",
+    "output_format": "markdown"
+  },
+  "agent_reply_contract": {
+    "terminal": true,
+    "operation": "upload",
+    "page_id": "page_...",
+    "required": true,
+    "template_ref": "single_stock_valuation_quality_v1",
+    "template_file": "<skill_root>/reply-templates/single_stock_valuation_quality_v1.md",
+    "template_exists": true,
+    "public_url": "https://pages.quantbuddy.cn/pages/<user>/page_....html",
+    "final_response_required": "read_template_file_and_reply_in_template_format_plus_links"
+  },
   "expires_at": "2027-..." }
 ```
 
 `url` 即对外分享链接，浏览器直接可开（自定义域名内联渲染，不触发下载）。
 
-> `scene_tags` / `paradigm_tags` 回显解析后的 `{tag_id,name,source}`；范式里现写的新名 `source=user`。`update` 响应同结构。读接口（`getStaticPage` / `list` / `templates` / `template`）也透出 `scene_tags` / `paradigm_tags`，并附后台维护的 `recommend_tags`（**只读**）。
+> `scene_tags` / `paradigm_tags` 回显解析后的 `{tag_id,name,source}`；范式里现写的新名 `source=user`。`update` 响应同结构。读接口（`getStaticPage` / `list` / `templates` / `template`）也透出 `page_context`、完整 v1/v2 `agent_reply_template` 与后台维护的只读 `recommend_tags`。Agent/skill 侧按 `template_ref` 读取本地回复骨架。
+> `agent_reply_contract.terminal=true` 是完成门禁；只有它允许最终收口。若同时 `required=true`，最终答复前必须读取 `agent_reply_template_file`，按模板 Markdown 骨架输出，并包含 `public_url`。`agent_reply_hint` 永远不能作为完成证据。
 
 > 尺寸字段：`uploaded_size` = 你上传的原始 HTML 字节数；`served_size` = 服务端注入访问统计脚本后实际托管的字节数（即 `sha256` 对应的内容）；`tracker_injected=true` 表示已注入统计脚本。`size` 为兼容旧字段，等于 `served_size`。`update` 响应同此结构。
 

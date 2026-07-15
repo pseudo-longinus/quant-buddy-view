@@ -75,6 +75,39 @@ def _extract_js_string(block, key):
     return match.group(2).strip() if match else ""
 
 
+def _resolve_js_var(html, name):
+    """Resolve `const NAME = "..."` / `NAME = "..."` string declarations."""
+    if not name:
+        return ""
+    m = re.search(r"(?:const|let|var)\s+%s\s*=\s*(['\"])(.*?)\1" % re.escape(name), html or "", re.S)
+    if not m:
+        m = re.search(r"\b%s\s*=\s*(['\"])(.*?)\1" % re.escape(name), html or "", re.S)
+    return m.group(2).strip() if m else ""
+
+
+def _normalize_endpoint(endpoint):
+    endpoint = (endpoint or "").strip().rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/skill/queryFormulaPackage"):
+        return endpoint[: -len("/queryFormulaPackage")]
+    if endpoint.endswith("/queryFormulaPackage"):
+        return endpoint[: -len("/queryFormulaPackage")].rstrip("/") + "/skill"
+    return endpoint
+
+
+def _endpoint_from_block(html, block):
+    """Endpoint value in a package block: quoted string, or a JS variable
+    reference like `endpoint: ENDPOINT` resolved against its declaration."""
+    literal = _extract_js_string(block, "endpoint")
+    if literal:
+        return _normalize_endpoint(literal)
+    ident = re.search(r"\bendpoint\s*:\s*([A-Za-z_$][\w$]*)", block or "")
+    if ident:
+        return _normalize_endpoint(_resolve_js_var(html, ident.group(1)))
+    return ""
+
+
 def _parse_legacy_packages(html):
     packages = []
     seen = set()
@@ -82,7 +115,7 @@ def _parse_legacy_packages(html):
     pattern = re.compile(r"([A-Za-z_$][\w$-]*)\s*:\s*\{([^{}]*?\b%s\b[^{}]*?\bsignature\b[^{}]*?)\}" % package_key, re.S)
     for match in pattern.finditer(html or ""):
         role, block = match.group(1), match.group(2)
-        endpoint = _extract_js_string(block, "endpoint")
+        endpoint = _endpoint_from_block(html, block)
         package_id = _extract_js_string(block, "package_id")
         signature = _extract_js_string(block, "signature")
         key = (endpoint, package_id, signature)
@@ -100,7 +133,7 @@ def _parse_legacy_packages(html):
 
     for match in re.finditer(r"\{([^{}]*?\b%s\b[^{}]*?\bsignature\b[^{}]*?)\}" % package_key, html or "", re.S):
         block = match.group(1)
-        endpoint = _extract_js_string(block, "endpoint")
+        endpoint = _endpoint_from_block(html, block)
         package_id = _extract_js_string(block, "package_id")
         signature = _extract_js_string(block, "signature")
         key = (endpoint, package_id, signature)
@@ -116,13 +149,13 @@ def _parse_legacy_packages(html):
     if packages:
         return packages
 
-    endpoint = _extract_js_string(html, "endpoint")
+    endpoint = _normalize_endpoint(_resolve_js_var(html, "ENDPOINT") or _extract_js_string(html, "endpoint"))
     package_pattern = re.compile(r"(?:['\"])?%s(?:['\"])?\s*:\s*(['\"])(.*?)\1" % package_key, re.S)
     for match in package_pattern.finditer(html or ""):
         package_id = match.group(2).strip()
         window = html[match.end(): min(len(html), match.end() + 1600)]
         signature = _extract_js_string(window, "signature")
-        local_endpoint = _extract_js_string(window, "endpoint") or endpoint
+        local_endpoint = _endpoint_from_block(html, window) or endpoint
         key = (local_endpoint, package_id, signature)
         if not local_endpoint or not package_id or not signature or key in seen:
             continue
@@ -141,7 +174,7 @@ def _manifest_packages(manifest):
     for index, item in enumerate(manifest.get("packages") or [], start=1):
         if not isinstance(item, dict):
             continue
-        endpoint = item.get("endpoint") or manifest.get("endpoint")
+        endpoint = _normalize_endpoint(item.get("endpoint") or manifest.get("endpoint"))
         package_id = item.get("package_id") or item.get("packageId")
         signature = item.get("signature")
         if endpoint and package_id and signature:
@@ -155,10 +188,11 @@ def _manifest_packages(manifest):
     if packages:
         return packages
     package_id = manifest.get("package_id") or manifest.get("packageId")
-    if manifest.get("endpoint") and package_id and manifest.get("signature"):
+    endpoint = _normalize_endpoint(manifest.get("endpoint"))
+    if endpoint and package_id and manifest.get("signature"):
         return [{
             "role": "default",
-            "endpoint": manifest["endpoint"],
+            "endpoint": endpoint,
             "package_id": package_id,
             "signature": manifest["signature"],
             "outputs": list(manifest.get("required_outputs") or []),
@@ -167,7 +201,7 @@ def _manifest_packages(manifest):
 
 
 def _api_url(endpoint, path):
-    return C.api_url(endpoint, path)
+    return C.api_url(_normalize_endpoint(endpoint), path)
 
 
 def _post_json_stream(url, body, timeout=90):
@@ -302,409 +336,7 @@ def _metric(label, output, fmt="number", klass=""):
     </div>""".format(label=_e(label), output=_e(output), fmt=_e(fmt), klass=_e(klass))
 
 
-def _bar(label, output, fmt="pct"):
-    return """    <div class="qb-card-bar-row">
-      <span>{label}</span>
-      <b data-qb-value data-output="{output}" data-format="{fmt}">0%</b>
-      <i><em data-qb-bar data-output="{output}" data-format="{fmt}"></em></i>
-    </div>""".format(label=_e(label), output=_e(output), fmt=_e(fmt))
-
-
-def _group(label, outputs):
-    return """    <div class="qb-card-bar-row" data-qb-group="{outputs}">
-      <span>{label}</span>
-      <b data-qb-group-score>0%</b>
-      <i><em data-qb-group-bar></em></i>
-    </div>""".format(label=_e(label), outputs=_e(" ".join(outputs)))
-
-
-def _return_row(label, output, base=""):
-    return """      <div class="qb-race-row">
-        <span>{label}</span>
-        <b data-qb-relative-return data-output="{output}" data-base="{base}">0%</b>
-        <i><em data-qb-relative-return-bar data-output="{output}" data-base="{base}"></em></i>
-      </div>""".format(label=_e(label), output=_e(output), base=_e(base))
-
-
-def _value_row(label, output, fmt="number1"):
-    return """      <div class="qb-race-row">
-        <span>{label}</span>
-        <b data-qb-value data-output="{output}" data-format="{fmt}">0</b>
-        <i><em data-qb-bar data-output="{output}" data-format="{fmt}"></em></i>
-      </div>""".format(label=_e(label), output=_e(output), fmt=_e(fmt))
-
-
-def _spread_row(label, fut, spot):
-    return """      <div class="qb-race-row">
-        <span>{label}</span>
-        <b data-qb-spread data-a="{fut}" data-b="{spot}">0</b>
-        <i><em data-qb-spread-bar data-a="{fut}" data-b="{spot}"></em></i>
-      </div>""".format(label=_e(label), fut=_e(fut), spot=_e(spot))
-
-
-def _top_list(title, output, fmt="signed-pct", limit=4):
-    return """    <div class="qb-top-list" data-qb-top-list data-output="{output}" data-format="{fmt}" data-limit="{limit}">
-      <strong>{title}</strong>
-      <div class="qb-top-list-body">
-        <div><span>--</span><b>0</b></div>
-        <div><span>--</span><b>0</b></div>
-        <div><span>--</span><b>0</b></div>
-      </div>
-    </div>""".format(title=_e(title), output=_e(output), fmt=_e(fmt), limit=int(limit))
-
-
-def _top_metric(label, output, fmt="signed-pct"):
-    return """<div><span>{label}</span><b data-qb-top-value data-output="{output}" data-format="{fmt}">--</b></div>""".format(
-        label=_e(label),
-        output=_e(output),
-        fmt=_e(fmt),
-    )
-
-
-def _industry_top_list(title, output, mask_keys, fmt="signed-pct", limit=4):
-    return """    <div class="qb-top-list" data-qb-industry-top-list data-output="{output}" data-masks="{masks}" data-format="{fmt}" data-limit="{limit}">
-      <strong>{title}</strong>
-      <div class="qb-top-list-body">
-        <div><span>--</span><b>0</b></div>
-        <div><span>--</span><b>0</b></div>
-        <div><span>--</span><b>0</b></div>
-      </div>
-    </div>""".format(title=_e(title), output=_e(output), masks=_e(" ".join(mask_keys)), fmt=_e(fmt), limit=int(limit))
-
-
-def _industry_top_metric(label, output, mask_keys, fmt="signed-pct"):
-    return """<div><span>{label}</span><b data-qb-industry-top-value data-output="{output}" data-masks="{masks}" data-format="{fmt}">--</b></div>""".format(
-        label=_e(label),
-        output=_e(output),
-        masks=_e(" ".join(mask_keys)),
-        fmt=_e(fmt),
-    )
-
-
-def _multi_spark(outputs, labels="", klass=""):
-    return """    <svg class="qb-spark qb-multi-spark {klass}" data-qb-multi-spark data-outputs="{outputs}" data-labels="{labels}" viewBox="0 0 300 96" role="img" aria-label="走势对比"></svg>""".format(
-        outputs=_e(" ".join(outputs)),
-        labels=_e(labels),
-        klass=_e(klass),
-    )
-
-
 def _build_page_card(page_id, title, keys):
-    keys_set = set(keys)
-    if page_id == "page_eebb0dac7e1f1a348f404ace":
-        required = [k for k in [
-            "LUCNT", "XD_PX", "XD_RET", "N1TOT", "PROMO1", "WINRATE1", "AVGRET1", "AVG5D1",
-            "N2TOT", "PROMO2", "WINRATE2", "AVGRET2", "AVG5D2", "N3TOT", "PROMO3", "WINRATE3", "AVGRET3", "AVG5D3",
-        ] if k in keys_set]
-        core = """    <div class="qb-ladder-card">
-      <div class="qb-ladder-thesis">
-        <small>晋级关口 1→2</small>
-        <b data-qb-value data-output="PROMO1" data-format="pct">0%</b>
-        <span>次日晋级率</span>
-      </div>
-      <div class="qb-ladder-track" aria-label="连板晋级阶梯">
-        <div class="qb-ladder-step is-first"><span>1连样本</span><b data-qb-value data-output="N1TOT" data-format="int">0</b><i data-qb-value data-output="AVGRET1" data-format="signed-pct">0%</i></div>
-        <div class="qb-ladder-step is-second"><span>2连晋级</span><b data-qb-value data-output="PROMO2" data-format="pct">0%</b><i data-qb-value data-output="WINRATE2" data-format="pct">0%</i></div>
-        <div class="qb-ladder-step is-third"><span>3连强度</span><b data-qb-value data-output="AVG5D3" data-format="signed-pct">0%</b><i data-qb-value data-output="PROMO3" data-format="pct">0%</i></div>
-      </div>
-    </div>"""
-        return required, _card(page_id, "连板梯队体检", "主板1-3连板样本实时回测，沿阶梯看晋级与收益。", core, "red")
-
-    if page_id == "page_429673b28e6229e9d315fbd5":
-        groups = {
-            "CPO": [k for k in keys if k.startswith("cpo")],
-            "液冷/电力": [k for k in keys if k.startswith("vdc")],
-            "机器人": [k for k in keys if k.startswith("bot")],
-            "国产算力": [k for k in keys if k.startswith("gls") or k.startswith("bm")],
-        }
-        required = [k for vals in groups.values() for k in vals]
-        core = "\n".join([_group(label, vals) for label, vals in groups.items() if vals])
-        core += "\n    <div class=\"qb-card-tags\"><span>四线轮动</span><span>实时强弱</span><span>主题观察</span></div>"
-        return required, _card(page_id, "AI四线轮动", "四条主线同步刷新，扫一眼看相对强弱。", core, "red")
-
-    if page_id == "page_97d4c118b10e43f5581d850d":
-        required = [k for k in [
-            "REGIME", "ATKW", "T10_SCORE", "T10_ATK", "T10_DEF", "T10_RET", "T10_DIV", "T10_PE", "T10_MOM", "NAV", "NAV3Y", "IDXPX", "IDXPX3Y", "IDXRET",
-        ] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-regime-meter" data-qb-meter data-output="ATKW" data-format="pct">
-        <div><span>防御</span><b data-qb-value data-output="ATKW" data-format="pct">0%</b><span>进攻</span></div>
-        <i><em data-qb-meter-bar data-output="ATKW" data-format="pct"></em></i>
-      </div>
-      <div class="qb-window-strip">
-        {rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["NAV", "IDXPX"] if k in keys_set], "组合 基准") if {"NAV", "IDXPX"} & keys_set else "",
-            rows="\n".join([
-                '<div><span>十强评分</span><b data-qb-value data-output="T10_SCORE" data-format="number1">0</b></div>' if "T10_SCORE" in keys_set else "",
-                '<div><span>动量因子</span><b data-qb-value data-output="T10_MOM" data-format="number1">0</b></div>' if "T10_MOM" in keys_set else "",
-                '<div><span>组合收益</span><b data-qb-value data-output="T10_RET" data-format="signed-pct">0%</b></div>' if "T10_RET" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "十强组合攻守切换", "趋势滤波调节动量与防御因子，沪深300池每日重排。", core, "orange")
-
-    if page_id == "page_950ff15cb39053c439dff1d8":
-        required = [k for k in ["st_count", "st_absret", "st_turn", "st_hit5", "st_hit10", "mb_absret", "mb_turn", "mb_hit10"] if k in keys_set]
-        core = """    <div class="qb-event-card">
-      <div class="qb-event-window">
-        <span>涨跌幅口径</span>
-        <b>5→10</b>
-        <i>ST新规</i>
-      </div>
-      <div class="qb-st-lanes">
-        <div class="qb-st-lane is-hot"><span>ST池波动</span><b data-qb-value data-output="st_absret" data-format="pct-smart">0%</b><i><em data-qb-bar data-output="st_absret" data-format="pct-smart"></em></i></div>
-        <div class="qb-st-lane"><span>主板对照</span><b data-qb-value data-output="mb_hit10" data-format="pct-smart">0%</b><i><em data-qb-bar data-output="mb_hit10" data-format="pct-smart"></em></i></div>
-      </div>
-      <div class="qb-event-chips">
-        <div><span>10cm命中</span><b data-qb-value data-output="st_hit10" data-format="pct-smart">0%</b></div>
-        <div><span>换手温度</span><b data-qb-value data-output="st_turn" data-format="pct-smart">0%</b></div>
-        <div><span>样本数</span><b data-qb-value data-output="st_count" data-format="int">0</b></div>
-      </div>
-    </div>"""
-        return required, _card(page_id, "ST新规波动追踪", "主板ST池与非ST对照组同口径追踪，打开即取最新。", core, "red")
-
-    if page_id == "page_47685d2af5441d6c1d77a26e":
-        stocks = [k for k in keys if k.endswith("_px") and k != "HS300_px"]
-        required = stocks + (["HS300_px"] if "HS300_px" in keys_set else [])
-        core = """    <div class="qb-risk-map">
-      <div class="qb-risk-field">
-        <i></i><i></i><i></i>
-        <div class="qb-risk-radius"><span>分化半径</span><b data-qb-dispersion data-outputs="{stocks}">0%</b></div>
-        <small>组合风险场</small>
-      </div>
-      <div class="qb-risk-summary">
-        <div><span>最强暴露</span><b data-qb-best data-outputs="{stocks}">0%</b></div>
-        <div><span>八股分化</span><b data-qb-dispersion data-outputs="{stocks}">0%</b></div>
-        <div><span>基准锚</span><b data-qb-return data-output="HS300_px">0%</b></div>
-      </div>
-    </div>""".format(stocks=_e(" ".join(stocks)))
-        return required, _card(page_id, "风险不按持仓等分", "八股组合实时重算：相关性、风险贡献与回撤一眼看清。", core, "orange")
-
-    if page_id == "page_5e22e113941261d15ab1caaa":
-        required = [k for k in ["dash_score", "dash_ret5", "dash_spec", "dash_low"] if k in keys_set]
-        core = """    <div class="qb-card-dashboard">
-      <div class="qb-score-orbit" data-qb-score-orbit data-output="dash_score">
-        <b data-qb-value data-output="dash_score" data-format="number1">0</b>
-        <span>主题强度</span>
-      </div>
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(rows="\n".join([
-            _value_row("5日动量", "dash_ret5", "signed-pct") if "dash_ret5" in keys_set else "",
-            _value_row("投机温度", "dash_spec", "number1") if "dash_spec" in keys_set else "",
-            _value_row("低位扩散", "dash_low", "number1") if "dash_low" in keys_set else "",
-        ]))
-        return required, _card(page_id, "机器人主题热度盘", "强度、动量与扩散同步刷新，先看主题是否仍在扩散。", core, "green")
-
-    if page_id == "page_f22b9f8a3033bc0f6018bdc0":
-        required = [k for k in ["anom_score", "anom_ret", "anom_vol", "first_score", "breakout_score", "industry_score", "ind_ret1", "ind_breadth"] if k in keys_set]
-        core = """    <div class="qb-alert-board">
-      <div class="qb-alert-score"><span>异动总分</span><b data-qb-value data-output="anom_score" data-format="number1">0</b></div>
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(rows="\n".join([
-            _value_row("首板活跃", "first_score", "number1") if "first_score" in keys_set else "",
-            _value_row("突破结构", "breakout_score", "number1") if "breakout_score" in keys_set else "",
-            _value_row("异动涨幅", "anom_ret", "signed-pct") if "anom_ret" in keys_set else "",
-            _value_row("异动放量", "anom_vol", "number1") if "anom_vol" in keys_set else "",
-        ]))
-        return required, _card(page_id, "全市场异动结构盘", "把首板、突破和行业扩散压成一张实时异动地图。", core, "blue")
-
-    if page_id == "page_0a1258e91eadd8609728f249":
-        required = [k for k in ["nvda_px", "nvda_rev_q", "nvda_pe"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["nvda_rev_q", "nvda_px"] if k in keys_set], "收入 股价") if {"nvda_rev_q", "nvda_px"} & keys_set else "",
-            rows="\n".join([
-                _value_row("实时股价", "nvda_px", "number1") if "nvda_px" in keys_set else "",
-                _value_row("季度收入", "nvda_rev_q", "number1") if "nvda_rev_q" in keys_set else "",
-                _value_row("PE", "nvda_pe", "number1") if "nvda_pe" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "英伟达收入路径重算", "收入预测、估值倍数和股价同屏刷新，盯住财报后的锚。", core, "green")
-
-    if page_id == "page_fd3f58773ac4a0a0d7a6585e":
-        metric_keys = [k for k in ["ret_20", "ret_5", "ret_60"] if k in keys_set]
-        mask_keys = [k for k in keys if k.startswith("sw_")]
-        required = metric_keys + mask_keys
-        core = """    <div class="qb-card-visual-stack">
-{top}
-      <div class="qb-window-strip">
-        {m5}
-        {m20}
-        {m60}
-      </div>
-    </div>""".format(
-            top=_industry_top_list("20日强势行业", "ret_20", mask_keys, "signed-pct", 4) if "ret_20" in keys_set and mask_keys else _top_list("20日强势行业", "ret_20", "signed-pct", 4) if "ret_20" in keys_set else "",
-            m5=_industry_top_metric("5日领涨", "ret_5", mask_keys, "signed-pct") if "ret_5" in keys_set and mask_keys else _top_metric("5日最强", "ret_5", "signed-pct") if "ret_5" in keys_set else "",
-            m20=_industry_top_metric("20日领涨", "ret_20", mask_keys, "signed-pct") if "ret_20" in keys_set and mask_keys else _top_metric("20日最强", "ret_20", "signed-pct") if "ret_20" in keys_set else "",
-            m60=_industry_top_metric("60日领涨", "ret_60", mask_keys, "signed-pct") if "ret_60" in keys_set and mask_keys else _top_metric("60日最强", "ret_60", "signed-pct") if "ret_60" in keys_set else "",
-        )
-        return required, _card(page_id, "行业轮动雷达", "三窗口同步看强势与拥挤，避免只盯单日涨跌。", core, "green")
-
-    if page_id == "page_221a3ffae084d983d1b509d4":
-        required = _generic_card_keys(keys)[:3]
-        labels = ["一板家数", "二板家数", "三板以上"]
-        rows = "\n".join([_value_row(labels[i], key, "int") for i, key in enumerate(required[:3])])
-        core = """    <div class="qb-limit-structure">
-      <div class="qb-signal-mark">涨停</div>
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(rows=rows)
-        return required, _card(page_id, "涨跌停结构复盘", "一板、二板与高标梯队同步刷新，看市场接力温度。", core, "red")
-
-    if page_id == "page_4b488204774ddb45739d39cc":
-        required = [k for k in ["RET20_CAM", "RET20_HG", "RET20_KC50"] if k in keys_set]
-        core = """    <div class="qb-race-list">
-{rows}
-    </div>
-    <div class="qb-card-tags"><span>AI硬科技</span><span>相对科创50</span><span>20日强弱</span></div>""".format(rows="\n".join([
-            _value_row("寒武纪", "RET20_CAM", "signed-pct") if "RET20_CAM" in keys_set else "",
-            _value_row("海光信息", "RET20_HG", "signed-pct") if "RET20_HG" in keys_set else "",
-            _value_row("科创50", "RET20_KC50", "signed-pct") if "RET20_KC50" in keys_set else "",
-        ]))
-        return required, _card(page_id, "AI硬科技组合强弱", "组合与科创50同屏对照，先判断硬科技主线是否跑赢。", core, "blue")
-
-    if page_id == "page_1256a77743fab9aa39838ce9":
-        required = [k for k in ["IC_C0_fut_px", "IC_C1_fut_px", "IC_spot_px"] if k in keys_set]
-        core = """    <div class="qb-basis-board">
-      <div class="qb-basis-main">
-        <span>主连基差</span>
-        <b data-qb-spread data-a="IC_C0_fut_px" data-b="IC_spot_px">0</b>
-      </div>
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(rows="\n".join([
-            _spread_row("主连-现货", "IC_C0_fut_px", "IC_spot_px") if {"IC_C0_fut_px", "IC_spot_px"} <= keys_set else "",
-            _spread_row("次主连-现货", "IC_C1_fut_px", "IC_spot_px") if {"IC_C1_fut_px", "IC_spot_px"} <= keys_set else "",
-            _value_row("现货锚", "IC_spot_px", "number1") if "IC_spot_px" in keys_set else "",
-        ]))
-        return required, _card(page_id, "股指期货基差监控", "主连、次主连和现货同口径刷新，重点看贴水收敛。", core, "blue")
-
-    if page_id == "page_c0c1e05bdad501fbb40641a3":
-        required = [k for k in ["OPT_NAV", "BENCH_NAV", "PRICE", "FINAL_OPT", "RSRS_STD", "POS_OPT"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["OPT_NAV", "BENCH_NAV", "PRICE"] if k in keys_set], "RSRS 基准 价格") if {"OPT_NAV", "BENCH_NAV"} & keys_set else "",
-            rows="\n".join([
-                _value_row("优化净值", "FINAL_OPT", "number1") if "FINAL_OPT" in keys_set else "",
-                _value_row("RSRS标准分", "RSRS_STD", "number1") if "RSRS_STD" in keys_set else "",
-                _value_row("当前仓位", "POS_OPT", "pct") if "POS_OPT" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "RSRS信号复现", "策略净值、基准与价格同屏，保留择时方法的走势语法。", core, "orange")
-
-    if page_id == "page_daefbab88424b05228203555":
-        stock_keys = [k for k in ["RET1_HAN", "RET1_HAI", "RET1_LAN", "RET1_JIN", "RET1_ZHO"] if k in keys_set]
-        rel_keys = [k for k in ["RELCUM20_HAN", "RELCUM20_HAI", "RELCUM20_LAN", "RELCUM20_JIN", "RELCUM20_ZHO"] if k in keys_set]
-        required = stock_keys + rel_keys[:3]
-        labels = [("寒武纪", "RET1_HAN"), ("海光信息", "RET1_HAI"), ("澜起科技", "RET1_LAN"), ("金山办公", "RET1_JIN"), ("中芯国际", "RET1_ZHO")]
-        core = """    <div class="qb-race-list">
-{rows}
-    </div>
-    <div class="qb-card-tags"><span>五只首选</span><span>日内脉搏</span><span>相对科创50</span></div>""".format(rows="\n".join([
-            _value_row(label, key, "signed-pct") for label, key in labels if key in keys_set
-        ]))
-        return required, _card(page_id, "AI科创链持仓脉搏", "五只首选按日涨跌同步刷新，方便持仓后复核主线。", core, "green")
-
-    if page_id == "page_d4ca42720380d1b5bc3207c0":
-        required = [k for k in ["pe_pctile", "pb_pctile", "pcf_pctile"] if k in keys_set]
-        core = """    <div class="qb-valuation-waterline">
-      <div class="qb-waterline" data-qb-meter data-output="pe_pctile" data-format="pct-smart">
-        <span>PE水位</span><b data-qb-value data-output="pe_pctile" data-format="pct-smart">0%</b><i><em data-qb-meter-bar data-output="pe_pctile" data-format="pct-smart"></em></i>
-      </div>
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(rows="\n".join([
-            _value_row("PB水位", "pb_pctile", "pct-smart") if "pb_pctile" in keys_set else "",
-            _value_row("PCF水位", "pcf_pctile", "pct-smart") if "pcf_pctile" in keys_set else "",
-            _value_row("PE水位", "pe_pctile", "pct-smart") if "pe_pctile" in keys_set else "",
-        ]))
-        return required, _card(page_id, "茅台估值水位体检", "PE、PB、PCF历史分位同屏，先看贵不贵。", core, "green")
-
-    if page_id == "page_f455566c55945624ca734142":
-        required = [k for k in ["px_csi300", "px_hsi", "fx_hkdcny"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["px_csi300", "px_hsi"] if k in keys_set], "A股 港股") if {"px_csi300", "px_hsi"} & keys_set else "",
-            rows="\n".join([
-                _return_row("沪深300", "px_csi300") if "px_csi300" in keys_set else "",
-                _return_row("恒生指数", "px_hsi") if "px_hsi" in keys_set else "",
-                _value_row("港币兑人民币", "fx_hkdcny", "number1") if "fx_hkdcny" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "A/H溢价结构观察", "A股、港股与汇率三条线同屏，判断溢价抬升来自哪里。", core, "blue")
-
-    if page_id == "page_c0d9672a5bc7ee78160e17e9":
-        required = [k for k in ["ret_3m", "ret_6m", "ret_12m"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{top}
-      <div class="qb-window-strip">
-        {m3}
-        {m6}
-        {m12}
-      </div>
-    </div>""".format(
-            top=_top_list("低估高质银行", "ret_12m", "signed-pct", 4) if "ret_12m" in keys_set else "",
-            m3=_top_metric("3月最强", "ret_3m", "signed-pct") if "ret_3m" in keys_set else "",
-            m6=_top_metric("6月最强", "ret_6m", "signed-pct") if "ret_6m" in keys_set else "",
-            m12=_top_metric("12月最强", "ret_12m", "signed-pct") if "ret_12m" in keys_set else "",
-        )
-        return required, _card(page_id, "银行低估高质排序", "三周期收益窗口压缩成一张排行，观察估值修复持续性。", core, "green")
-
-    if page_id == "page_9083914f7f1af31ebbf13a33":
-        required = [k for k in ["px_bank_index", "px_ccb", "px_cib"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["px_cib", "px_ccb", "px_bank_index"] if k in keys_set], "招行/同业 行业") if {"px_cib", "px_ccb", "px_bank_index"} & keys_set else "",
-            rows="\n".join([
-                _return_row("招商银行", "px_cib", "px_bank_index") if {"px_cib", "px_bank_index"} <= keys_set else "",
-                _return_row("建设银行", "px_ccb", "px_bank_index") if {"px_ccb", "px_bank_index"} <= keys_set else "",
-                _return_row("银行指数", "px_bank_index") if "px_bank_index" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "招行同业相对表现", "银行指数作锚，比较招行与同业是否跑出相对优势。", core, "blue")
-
-    if page_id == "page_e8595ec9da843c88021859c4":
-        required = [k for k in ["px_gx", "px_tf", "px_xys"] if k in keys_set]
-        core = """    <div class="qb-card-visual-stack">
-{spark}
-      <div class="qb-race-list compact">
-{rows}
-      </div>
-    </div>""".format(
-            spark=_multi_spark([k for k in ["px_gx", "px_tf", "px_xys"] if k in keys_set], "光迅 天孚 新易盛") if {"px_gx", "px_tf", "px_xys"} & keys_set else "",
-            rows="\n".join([
-                _return_row("光迅科技", "px_gx") if "px_gx" in keys_set else "",
-                _return_row("天孚通信", "px_tf") if "px_tf" in keys_set else "",
-                _return_row("新易盛", "px_xys") if "px_xys" in keys_set else "",
-            ]),
-        )
-        return required, _card(page_id, "光模块龙头竞速", "三只龙头同屏比相对走势，先看谁在贡献风险收益。", core, "orange")
-
     required = _generic_card_keys(keys)[:3]
     core = "\n".join([_metric(k, k, "number1") for k in required])
     return required, _card(page_id, title or "实时活卡", "核心输出实时刷新，打开即取最新。", core, "orange")
@@ -824,6 +456,20 @@ STYLE = r"""
 .qb-score-orbit span,.qb-alert-score span,.qb-basis-main span{color:var(--muted);font-size:clamp(10px,2.3cqw,12px);font-weight:850}
 .qb-alert-board,.qb-basis-board{grid-template-columns:.9fr 1.2fr;align-items:stretch}
 .qb-limit-structure{grid-template-columns:.7fr 1.3fr;align-items:stretch}
+@container (max-width: 340px){
+  .qb-card-artifact[data-qb-live-card]{gap:3px;padding:8px;border-top-width:4px}
+  .qb-card-meta{min-height:12px;font-size:9px}
+  .qb-card-artifact h1{font-size:15px;line-height:1.02}
+  .qb-card-artifact p{font-size:9px;line-height:1.1;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+  .qb-card-core{gap:4px}
+  .qb-tier-grid{gap:4px}
+  .qb-tier-grid>div,.qb-mini-metric{padding:5px;border-radius:6px}
+  .qb-tier-grid span,.qb-mini-metric span{font-size:8px}
+  .qb-tier-grid b,.qb-mini-metric b{margin-top:2px;font-size:14px}
+  .qb-tier-grid i{margin-top:2px;font-size:8px}
+  .qb-hero-split{gap:6px;grid-template-columns:minmax(54px,.64fr) 1fr}
+  .qb-signal-mark{min-height:48px;font-size:25px}
+}
 """
 
 

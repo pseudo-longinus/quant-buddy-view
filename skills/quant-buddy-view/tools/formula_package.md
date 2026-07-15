@@ -10,7 +10,7 @@
 | 操作 | 方法 + 路径 | 认证 |
 |------|-------------|------|
 | 注册 | `POST /skill/registerFormulaPackage` | `Authorization: Bearer <api_key>` |
-| 取数 | `POST /skill/queryFormulaPackage` | **无需**，凭 `package_id`+`signature`（SSE 流式） |
+| 取数 | `POST /skill/queryFormulaPackage` | `package_id`+`signature` 必需；API Key 可选（CLI 有 Key 时附带用于审计归因） |
 | 列表 | `GET /skill/listFormulaPackages?page=&page_size=` | Bearer |
 | 撤销 | `POST /skill/revokeFormulaPackage` | Bearer |
 | 刷新 | `POST /skill/refreshFormulaPackage` | Bearer |
@@ -26,11 +26,22 @@ python scripts/formula_package.py register @params.json
 # 2. 取数（只需 package_id，signature 可由本地凭证自动补全）
 FP_PARAMS='{"package_id":"pkg_xxx"}' python scripts/formula_package.py query
 
+# direct：只请求所需输出并返回紧凑统计，不打印原始时间数组
+FP_PARAMS='{"task_id":"task_xxx","package_id":"pkg_xxx","outputs":["bubble"],"result_mode":"summary"}' python scripts/formula_package.py query
+
 # 管理
 python scripts/formula_package.py list   '{"page":1,"page_size":20}'
 python scripts/formula_package.py revoke '{"package_id":"pkg_xxx"}'
-python scripts/formula_package.py refresh '{"package_id":"pkg_xxx","rotate_signature":true}'
+# 刷新：默认不动签名（rotate_signature 省略即 false）。绝大多数情况根本不需要 refresh——
+# 页面是 live 实时取数、底层数据更新后 query 会自动重算，见下方 ⚠️。
+python scripts/formula_package.py refresh '{"package_id":"pkg_xxx"}'
 ```
+
+> ⚠️ **`rotate_signature:true` 是破坏性操作，默认不要用。**
+> - 轮换会**立刻作废所有已发布、内嵌该包旧签名的页面**（页面取数报 `SIGNATURE_INVALID`）。新签名只在本次响应里**明文返回一次**、服务端只存哈希，**丢了不可恢复**。
+> - 如果确实要轮换（仅当需要主动换令牌、吊销已泄露的旧签名时），必须**紧接着**对每一个内嵌该包的页面重建 HTML + `static_page update` 覆盖，把新签名同步进去——这是一步不能漏的善后，不是可选项。
+> - **只有在本地存在该包凭证 `output/formula_packages/<package_id>.json` 时**，脚本才会把新签名回写本地供 `build_dashboard` 重建使用；换会话 / 换机器、凭证不在本地时轮换，新明文签名会丢失、页面无法补救。此类情况**不要轮换**。
+> - 「数据想更新」不需要 refresh，更不需要轮换：页面 live 取数自动拿最新值。refresh 仅在极少数需要强制重算 data_id 时用，且应 `rotate_signature:false`。
 
 ### 从旧 quant-buddy-skill 迁移凭证（升级到 view 后一次性）
 
@@ -93,7 +104,14 @@ QBS_IMPORT_CRED_DIR='D:/.../quant-buddy-skill/output/formula_packages' \
 
 ## 取数（SSE）
 
-`scripts/formula_package.py query` 已封装 SSE 解析，返回 `{code, outputs:{<output>:{read_mode,data_id,data,error}}, progress, done, failures?}`。生成的 live 看板在浏览器里调用同一个 `queryFormulaPackage` 端点实时取数；`build_dashboard` 构建期也调这套封装取一次数做质量体检。
+`scripts/formula_package.py query` 已封装 SSE 解析，并支持：
+
+- `outputs: string[]`：只请求需要的产出；
+- `result_mode=full`：完整原始结果；
+- `result_mode=summary`：每个序列只返回最新值/日期、首值/日期、变化率、有效样本数；
+- `result_mode=last_values`：只保留最新值与最新日期。
+
+direct 流程必须显式使用 `summary`，避免在日志和回复上下文中打印完整时间数组。生成的 live 看板和 `build_dashboard` 内部仍调用完整模式做渲染与质量体检。
 
 > **`code` 现在反映成败**：服务端 `done.code≠0`（部分产出失败）或任一产出带 `error` 时，封装返回 `code:1` 并附 `failures:[{output,error}]`；某产出失败时其 `outputs[output].error` 有值、`data` 为 null。**消费方应判 `code` 与逐产出 `error`，不要只看流是否正常结束。**（旧版本无论成败都返回 `code:0`，已修正。）
 

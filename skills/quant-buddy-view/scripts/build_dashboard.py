@@ -289,10 +289,7 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     shared_css = _shared_shell_css()
     shared_runtime_js = _shared_shell_js()
     live_card_config = LC.dashboard_config(spec, panels)
-    live_card_html = LC.card_html(live_card_config) if live_card_config else ""
     live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
-    live_card_js = _read_text(os.path.join(ASSETS_DIR, "live-card.js")) if live_card_config else ""
-    live_card_binding = LC.binding_script(live_card_config) if live_card_config else ""
     card_runtime_artifacts = LC.card_runtime_artifacts(
         live_card_config,
         endpoint=endpoint,
@@ -571,7 +568,6 @@ function syncLiveCard(outputs) {
   try {
     const payload = outputs || LAST_OUTPUTS || {};
     window.dispatchEvent(new CustomEvent('qb:outputs', {detail: {outputs: payload}}));
-    if (window.QBLiveCardHydrate) window.QBLiveCardHydrate(payload);
   } catch (e) {}
 }
 
@@ -957,13 +953,11 @@ document.addEventListener('DOMContentLoaded', () => {
   .std-hero .meta-pill {{ background:#eef3f8; color:#4b5b70; }}
   .std-hero .meta-pill-strong {{ background:rgba(216,165,75,.16); color:#87611d; border:1px solid rgba(216,165,75,.34); }}
 {shared_css}
-{live_card_css}
 </style>
 </head>
 <body>
 {shared_header}
 <main>
-  {live_card_html}
   {card_runtime_artifacts}
   <section class="std-hero">
     <div class="eyebrow">{mode_note}</div>
@@ -982,11 +976,9 @@ document.addEventListener('DOMContentLoaded', () => {
 <script src="{_ECHARTS_CDN}"></script>
 <script>
 {shared_runtime_js}
-{live_card_js}
 {render_js}
 </script>
 {card_runtime_js}
-{live_card_binding}
 </body>
 </html>
 """
@@ -1748,6 +1740,23 @@ def _prepare_thumbnail(params, panels, out_file, outputs=None):
 
 
 def cmd_build(params):
+    task_id = str((params or {}).get("task_id") or C.current_trace_context().get("task_id") or "").strip()
+    if task_id:
+        import static_page as SP
+        binding, _, binding_error = SP._read_fork_task_binding(task_id)
+        if binding_error:
+            return binding_error
+        if isinstance(binding, dict) and binding.get("status") == "prepared":
+            return {
+                "code": 1,
+                "error": "FORK_TASK_BOUND",
+                "message": "当前 task 已进入 fork 分支，禁止 build_dashboard；请继续编辑 working_html_file 并调用 fork_validate",
+                "task_id": task_id,
+                "source_template_id": binding.get("source_template_id") or "",
+                "working_html_file": binding.get("working_html_file") or "",
+                "fork_manifest_file": binding.get("fork_manifest_file") or "",
+                "next_command": "static_page.py fork_validate",
+            }
     title = params.get("title")
     if not title:
         return {"code": 1, "message": "spec 缺少 title"}
@@ -1860,10 +1869,8 @@ def cmd_build(params):
             "output_health": "ok",
             "publish_runtime_check": "not_run",
         },
-        "live_card": {
+        "card_runtime": {
             "enabled": live_card_enabled,
-            "cover_card_url": None,
-            "has_cover_card": False,
         },
     }
     if thumbnail_info.get("generation"):
@@ -1899,6 +1906,26 @@ def cmd_build(params):
         # 页面说明（列表/详情展示用）：仅显式传 spec.description 时透传；不传则不动（update 保留原值）
         page_desc = params.get("description")
         thumbnail_file = thumbnail_info.get("file")
+        reply_params, reply_resolution, reply_error = SP._resolve_publish_agent_reply_template(
+            {
+                **params,
+                "title": title,
+                "description": page_desc,
+                "primary_outputs": [
+                    p.get("output") or p.get("title")
+                    for p in panels
+                    if isinstance(p, dict) and (p.get("output") or p.get("title"))
+                ],
+            },
+            html=html,
+        )
+        if reply_error:
+            return reply_error
+        reply_metadata = {
+            "page_context": reply_params.get("page_context"),
+            "agent_reply_template": reply_params.get("agent_reply_template"),
+        }
+        result["agent_reply_template_resolution"] = reply_resolution
         if update_page_id:
             # 替换已发布页面：URL / page_id 不变，已分享链接照常可用
             up = SP.cmd_update({
@@ -1908,10 +1935,9 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
-                "verify_cover_card": params.get("verify_cover_card", live_card_enabled),
-                "cover_card_url": params.get("cover_card_url"),
-                "has_cover_card": params.get("has_cover_card", live_card_enabled if live_card_enabled else None),
+                "verify_card_runtime": params.get("verify_card_runtime"),
                 "thumbnail_file": thumbnail_file,
+                **reply_metadata,
             })
             result["update"] = up
             verb = "替换"
@@ -1922,10 +1948,9 @@ def cmd_build(params):
                 "description": page_desc,
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
-                "verify_cover_card": params.get("verify_cover_card", live_card_enabled),
-                "cover_card_url": params.get("cover_card_url"),
-                "has_cover_card": params.get("has_cover_card", live_card_enabled if live_card_enabled else None),
+                "verify_card_runtime": params.get("verify_card_runtime"),
                 "thumbnail_file": thumbnail_file,
+                **reply_metadata,
             })
             result["upload"] = up
             verb = "上传"
@@ -1933,17 +1958,11 @@ def cmd_build(params):
             result["url"] = up["url"]
             if up.get("thumbnail_url"):
                 result["thumbnail_url"] = up.get("thumbnail_url")
-            if up.get("cover_card_url"):
-                result["cover_card_url"] = up.get("cover_card_url")
-            if up.get("has_cover_card") is not None:
-                result["has_cover_card"] = bool(up.get("has_cover_card"))
             manifest["page_id"] = up.get("page_id")
             manifest["url"] = up.get("url")
             manifest["thumbnail_url"] = up.get("thumbnail_url") or None
-            manifest["live_card"]["cover_card_url"] = up.get("cover_card_url") or None
-            manifest["live_card"]["has_cover_card"] = bool(up.get("has_cover_card"))
-            if up.get("cover_verification"):
-                manifest["verification"]["cover_card"] = "ok"
+            if up.get("card_runtime_verification"):
+                manifest["verification"]["card_runtime"] = "ok"
             if up.get("thumbnail_warning"):
                 manifest["thumbnail_upload_warning"] = up.get("thumbnail_warning")
             manifest["verification"]["publish_runtime_check"] = (

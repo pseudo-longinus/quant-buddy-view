@@ -15,3 +15,8 @@ config.local.json
 # 封面整页截图用的 ECharts 本地缓存（首次自动从 CDN 下载落盘，缺失会自动重下/回退 CDN，无需入库）
 assets/vendor/
 docs/
+
+# 一次性迁移运行产物（迁移脚本和基准映射本身继续入库）
+migrations/output/
+migrations/*.out.json
+migrations/*.log

@@ -19,7 +19,7 @@
 | 操作 | 方法 + 路径 | 认证 |
 |------|-------------|------|
 | 注册 | `POST /skill/registerDataGrant` | `Authorization: Bearer <api_key>` |
-| 取数 | `POST /skill/queryDataGrant` | **无需**，凭 `grant_id`+`signature`（普通 JSON，非 SSE） |
+| 取数 | `POST /skill/queryDataGrant` | `grant_id`+`signature` 必需；API Key 可选（CLI 有 Key 时附带用于审计归因，普通 JSON） |
 | 列表 | `GET /skill/listDataGrants?page=&page_size=` | Bearer |
 | 撤销 | `POST /skill/revokeDataGrant` | Bearer |
 | 刷新 | `POST /skill/refreshDataGrant` | Bearer |

@@ -7,7 +7,6 @@
  *   node scripts/verify_page.mjs https://pages.quantbuddy.cn/...
  *   node scripts/verify_page.mjs output/pages/demo.html --manifest output/pages/demo.manifest.json
  *   node scripts/verify_page.mjs output/pages/demo.html --require-browser
- *   node scripts/verify_page.mjs output/pages/demo.html?cover=1 --require-browser --cover-card
  *   node scripts/verify_page.mjs output/pages/demo.html --card-runtime-only
  */
 
@@ -22,7 +21,6 @@ import { pathToFileURL } from 'node:url';
 
 const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
-const coverCard = args.includes('--cover-card');
 const cardRuntimeOnly = args.includes('--card-runtime-only');
 const cardRuntime = args.includes('--card-runtime') || cardRuntimeOnly;
 const manifestIdx = args.indexOf('--manifest');
@@ -45,12 +43,6 @@ const VIEWPORTS = [
   { name: 'mobile390', width: 390, height: 844, mobile: true },
   { name: 'mobile320', width: 320, height: 720, mobile: true },
 ];
-const COVER_CARD_VIEWPORTS = [
-  { name: 'cover720', width: 720, height: 540, mobile: false },
-  { name: 'cover580', width: 580, height: 435, mobile: false },
-  { name: 'cover390', width: 390, height: 292, mobile: true },
-  { name: 'cover320', width: 320, height: 240, mobile: true },
-];
 const CORE_ERROR_RE = /queryFormulaPackage|CORS|mixed-content|Failed to fetch|ReferenceError|TypeError/i;
 
 function emit(obj) {
@@ -63,7 +55,7 @@ function fail(message) {
 }
 
 if (!target) {
-  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--manifest manifest.json] [--require-browser] [--cover-card] [--card-runtime] [--card-runtime-only]');
+  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only]');
 }
 
 function delay(ms) {
@@ -501,8 +493,8 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
   const browser = await launchPlaywrightBrowser(pw);
   const results = [];
   const consoleErrors = [];
-  const viewports = options.coverCard ? COVER_CARD_VIEWPORTS : VIEWPORTS;
-  const settleMs = options.coverCard ? 5000 : 1200;
+  const viewports = VIEWPORTS;
+  const settleMs = 1200;
   try {
     for (const viewport of viewports) {
       const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } });
@@ -523,7 +515,7 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
   } finally {
     await browser.close();
   }
-  return { checked: true, engine: 'playwright', cover_card: !!options.coverCard, viewports: results, consoleErrors };
+  return { checked: true, engine: 'playwright', viewports: results, consoleErrors };
 }
 
 function pageMetricsExpression() {
@@ -795,9 +787,6 @@ function viewportResult(viewport, metrics, options = {}) {
     placeholderHits: metrics.placeholderHits,
     placeholderOnly: metrics.placeholderOnly,
   };
-  if (options.coverCard) {
-    result.cover = metrics.cover;
-  }
   return result;
 }
 
@@ -1105,8 +1094,8 @@ async function cdpBrowserChecks(url, options = {}) {
     });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
-    const viewports = options.coverCard ? COVER_CARD_VIEWPORTS : VIEWPORTS;
-    const settleMs = options.coverCard ? 5000 : 1200;
+    const viewports = VIEWPORTS;
+    const settleMs = 1200;
     for (const viewport of viewports) {
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: viewport.width,
@@ -1130,7 +1119,7 @@ async function cdpBrowserChecks(url, options = {}) {
       results.push(viewportResult(viewport, evaluated.result.value, options));
     }
     ws.close();
-    return { checked: true, engine: 'system-browser', browser: browserPath, cover_card: !!options.coverCard, viewports: results, consoleErrors };
+    return { checked: true, engine: 'system-browser', browser: browserPath, viewports: results, consoleErrors };
   } catch (err) {
     return { checked: false, skipped: true, reason: err && err.message ? err.message : String(err), browser: browserPath };
   } finally {
@@ -1180,65 +1169,6 @@ function summarize(staticResult, browserResult, options) {
       if (!r.hasH1) problems.push(`${r.viewport}: 缺少可见 h1`);
       if (r.placeholderHits.length) problems.push(`${r.viewport}: 占位符残留 ${r.placeholderHits.join(', ')}`);
       if (r.placeholderOnly) problems.push(`${r.viewport}: 核心内容疑似全是占位符`);
-      if (options.coverCard) {
-        if (r.verticalOverflow) problems.push(`${r.viewport}: 宽宝活卡存在纵向滚动`);
-        const cover = r.cover;
-        if (!cover || !cover.rootFound) {
-          problems.push(`${r.viewport}: 未找到宽宝活卡根节点`);
-        } else {
-          const rect = cover.rect
-            ? `${cover.rect.width}x${cover.rect.height} @ ${cover.rect.x},${cover.rect.y}`
-            : 'no rect';
-          if (!cover.visible) problems.push(`${r.viewport}: 宽宝活卡根节点不可见 (${cover.selector})`);
-          if (!cover.fillsViewport) problems.push(`${r.viewport}: 宽宝活卡未填满 viewport (${cover.selector}; ${rect})`);
-          if (!cover.ratioOk) problems.push(`${r.viewport}: 宽宝活卡比例不是 4:3 (${cover.selector}; ratio=${cover.ratio})`);
-          if (!cover.rootHasLiveCardMarker) problems.push(`${r.viewport}: 宽宝活卡根节点缺少 data-qb-live-card`);
-          if (cover.containsLegacyVisibleName) problems.push(`${r.viewport}: 宽宝活卡仍显示旧名称「精华卡」`);
-          const bg = cover.background || {};
-          if (bg.root && bg.root.luma != null && bg.root.luma < 155) {
-            problems.push(`${r.viewport}: 宽宝活卡根背景不是官网浅色系 (${bg.root.color}; luma=${bg.root.luma})`);
-          }
-          if (bg.body && bg.body.luma != null && bg.body.luma < 155) {
-            problems.push(`${r.viewport}: 宽宝活卡页面背景不是官网浅色系 (${bg.body.color}; luma=${bg.body.luma})`);
-          }
-          if (bg.darkAreaRatio != null && bg.darkAreaRatio > 0.55) {
-            problems.push(`${r.viewport}: 宽宝活卡深色背景面积过大 (${Math.round(bg.darkAreaRatio * 100)}%)`);
-          }
-          const contract = cover.contract || {};
-          if (!contract.brand) {
-            problems.push(`${r.viewport}: 缺少 data-qb-live-card-brand 官方标签预留位`);
-          } else if (contract.brand.text === '宽宝活卡' || contract.brand.text === '精华卡') {
-            problems.push(`${r.viewport}: 左上角预留位不应显示固定文案「${contract.brand.text}」`);
-          }
-          if (!contract.date || !contract.date.text) problems.push(`${r.viewport}: 缺少 data-qb-live-card-date 更新日期`);
-          else if (!contract.dateLooksIso) problems.push(`${r.viewport}: 更新日期格式不是 YYYY-MM-DD (${contract.date.text})`);
-          if (!contract.title || !contract.title.text) problems.push(`${r.viewport}: 缺少 data-qb-live-card-title 标题`);
-          if (!contract.description || !contract.description.text) problems.push(`${r.viewport}: 缺少 data-qb-live-card-description 描述`);
-          if (!contract.coreFound) problems.push(`${r.viewport}: 缺少可见 data-qb-live-card-core 核心区`);
-          const budget = cover.contentBudget || {};
-          if (cover.textLength > 170) problems.push(`${r.viewport}: 宽宝活卡文本过多（${cover.textLength}/170）`);
-          if (budget.titleLength > 24) problems.push(`${r.viewport}: 宽宝活卡标题过长（${budget.titleLength}/24）`);
-          if (budget.descriptionLength > 56) problems.push(`${r.viewport}: 宽宝活卡描述过长（${budget.descriptionLength}/56）`);
-          if (budget.infoChipCount > 3) problems.push(`${r.viewport}: 宽宝活卡解释指标过多（${budget.infoChipCount}/3）`);
-          if (budget.tagCount > 3) problems.push(`${r.viewport}: 宽宝活卡短标签过多（${budget.tagCount}/3）`);
-          if (budget.secondaryBlockCount > 0) problems.push(`${r.viewport}: 宽宝活卡仍包含二级阅读块（${budget.secondaryBlockCount} 个）`);
-          if (budget.graphicCount > 1) problems.push(`${r.viewport}: 宽宝活卡图形表达过多（${budget.graphicCount}/1）`);
-          if (budget.largeValueCount > 0 && budget.graphicCount > 0) {
-            problems.push(`${r.viewport}: 宽宝活卡大数字与主图形同时出现，应二选一`);
-          }
-          for (const problem of [
-            fontSizeProblem('左上角标签预留位', contract.brand, 8, 15),
-            fontSizeProblem('更新日期', contract.date, 8, 15),
-            fontSizeProblem('标题', contract.title, 16, 34),
-            fontSizeProblem('描述', contract.description, 10, 17),
-          ].filter(Boolean)) {
-            problems.push(`${r.viewport}: ${problem}`);
-          }
-          if (cover.placeholderHits.length) problems.push(`${r.viewport}: 宽宝活卡仍处于占位态 ${cover.placeholderHits.join(', ')}`);
-          if (cover.dashCount >= 3) problems.push(`${r.viewport}: 宽宝活卡缺失值过多（— x${cover.dashCount}）`);
-          if (cover.textLength < 6) problems.push(`${r.viewport}: 宽宝活卡内容疑似空白或黑屏`);
-        }
-      }
     }
     if (browserResult.consoleErrors.length) problems.push('控制台存在核心接口/运行时错误');
   } else {
@@ -1294,8 +1224,8 @@ try {
     emit(result);
     process.exit(cardRuntimeResult.ok ? 0 : 1);
   }
-  const browserResult = await browserChecks(target, { coverCard });
-  const summary = summarize(staticResult, browserResult, { requireBrowser, coverCard });
+  const browserResult = await browserChecks(target, {});
+  const summary = summarize(staticResult, browserResult, { requireBrowser });
   if (cardRuntimeResult.problems.length) {
     summary.ok = false;
     summary.problems.push(...cardRuntimeResult.problems);
@@ -1305,7 +1235,6 @@ try {
     target,
     verification_level: browserResult.checked ? 'browser' : 'static-only',
     require_browser: requireBrowser,
-    cover_card: coverCard,
     card_runtime: cardRuntime,
     card_runtime_only: false,
     static: staticResult,

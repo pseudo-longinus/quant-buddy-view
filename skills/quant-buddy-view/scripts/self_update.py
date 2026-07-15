@@ -24,6 +24,7 @@ REQUIRED_PATHS = [
     "scripts/build_dashboard.py",
     "tools",
     "templates",
+    "reply-templates",
     "workflows",
     "guides",
     "assets",

@@ -39,8 +39,9 @@ r"""
     register / refresh(rotate) 成功时，凭证额外落盘到 output/data_grants/<grant_id>.json，
     方便后续取数与 build_dashboard 引用（signature 服务端不可再取出，本地不存丢失即不可恢复）。
 
-认证：register/list/revoke/refresh 凭 config.json 的 api_key（Bearer）认身份；query 无需 api_key，
-凭 grant_id + signature。本 skill 不再有会话 / task_id 概念（task_id 仅作 audit 透传，可选）。
+认证：register/list/revoke/refresh 凭 config.json 的 api_key（Bearer）认身份；query 以 grant_id + signature
+为能力凭证，CLI 本地有 api_key 时会可选附带用于审计归因，浏览器无 Key 取数仍兼容。活页任务通过参数复用 trace_context.py begin 返回的 task_id，
+公共 headers() 会自动透传 x-task-id 供后端聚合调用链。
 """
 
 import json
@@ -145,11 +146,11 @@ def cmd_register(params):
     return reg
 
 
-def query_grant(endpoint, grant_id, signature):
+def query_grant(endpoint, grant_id, signature, api_key=""):
     """取数核心：普通 JSON POST（非 SSE，不重算）。供 build_dashboard 复用。"""
     body = {"grant_id": grant_id, "signature": signature}
     res = C.http_json("POST", C.api_url(endpoint, _PATH["query"]),
-                      C.headers(), body, timeout=_DEFAULT_TIMEOUT)
+                      C.headers(api_key), body, timeout=_DEFAULT_TIMEOUT)
     # 外层统一带 grant_id；失败时服务端返回 code:1 + error:{code,message}（见 tools/data_grant.md）
     if isinstance(res, dict) and "grant_id" not in res:
         res["grant_id"] = grant_id
@@ -158,7 +159,7 @@ def query_grant(endpoint, grant_id, signature):
 
 def cmd_query(params):
     """取数：无需 api_key，凭 grant_id + signature（signature 可由本地凭证补全）。"""
-    endpoint, _ = _config(require_key=False)
+    endpoint, api_key = _config(require_key=False)
     gid = params.get("grant_id")
     sig = params.get("signature")
     if gid and not sig:
@@ -167,7 +168,7 @@ def cmd_query(params):
             sig = cred.get("signature")
     if not gid or not sig:
         return {"code": 1, "message": "query 需要 grant_id + signature（signature 可由本地凭证补全）"}
-    return query_grant(endpoint, gid, sig)
+    return query_grant(endpoint, gid, sig, api_key=api_key)
 
 
 def cmd_list(params):

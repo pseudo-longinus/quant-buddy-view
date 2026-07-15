@@ -3,6 +3,8 @@
 > 把「公式任务包 + 看板 spec」编译成一份自包含 HTML（样式内联，图表用公网 CDN ECharts）。可顺带上传发布。
 > 通过本地脚本 `scripts/build_dashboard.py` 调用（单命令，无子命令）。
 
+> 分支门禁：同一 `task_id` 已由 `fork_prepare` 绑定为 prepared fork 时，本命令返回 `FORK_TASK_BOUND`，并指向应继续编辑的 `working_html_file`；此时必须改走 `static_page.py fork_validate`，不能重建通用看板。
+
 ## 调用方式
 
 ```bash
@@ -20,6 +22,8 @@ BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_da
 | `title` | string | ✅ | 看板标题（`<title>` + 页头） |
 | `subtitle` | string | ❌ | 副标题 |
 | `description` | string | ❌ | 页面说明（≤1000 字），仅作 `static_page` 列表/详情展示；显式传才随 upload/update 透传，不传则不动 |
+| `page_context` | object | ❌ | 当前活页稳定语义；不传时根据最终标题、面板和输出重新生成，禁止复制来源模板上下文 |
+| `agent_reply_template` | object | ❌ | 显式回复骨架；不传时按页面主题匹配专业骨架，无法匹配则使用 `generic_live_page_delivery_v1` |
 | `package_id` | string | ❌ | 公式包 id；缺省取**最近一次**本地凭证 |
 | `signature` | string | ❌ | 缺省从本地凭证补全；会写入页面供实时取数，必须可得 |
 | `panels` | object[] | ✅ | 面板数组，见下 |
@@ -30,7 +34,7 @@ BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_da
 | `ttl_days` | number | ❌ | 配合 upload 透传 |
 | `thumbnail_file` | string | ❌ | 现成 PNG/JPG 缩略图；HTML upload/update 成功后自动上传封面，失败只返回 warning |
 | `thumbnail` | bool/object/string | ❌ | `true` 或对象表示自动生成 1200×675 封面；字符串表示现成文件路径。封面是自包含 SVG 海报，用系统 Edge/Chrome 无头栅格化成 PNG；无浏览器时直接产出 SVG，均不影响 HTML |
-| `live_card` | bool/object | ❌ | 生成同页 `?cover=1` 宽宝活卡；对象可传 `title`、`description`、`theme`、`metrics`、`tags`、`date_output` |
+| `live_card` | bool/object | ❌ | 在同页产出独立 card runtime artifact（`embedded-card-v1`）宽宝活卡；对象可传 `title`、`description`、`theme`、`primary`、`metrics`、`tags`、`date_output` |
 | `series` / `chart_series` | array | ❌ | 自动生成封面时可选的真实曲线数据；不传则优先从构建期公式包取数结果里的 line/bar 面板抽取 |
 | `brand` | object | ❌ | 统一分享外壳配置，见下 |
 | `official_url` | string | ❌ | 官网入口，默认 `https://www.quantbuddy.cn` |
@@ -93,9 +97,9 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 
 > ⚠️ **构建期取数失败即硬失败**：构建时会先取一次数做质量体检（只用于校验，不内联进 HTML）。若有任一产出失败或体检为空（如 range_data 全 null / 区间无数据），`build_dashboard` 返回 `code:1` 并在 `failed_outputs` 指明哪个 output、疑因，**不生成 HTML**。务必检查返回 `code`，不要把「没报错」当成功。
 
-### 宽宝活卡（`live_card`）
+### 宽宝活卡（`live_card` → card runtime artifact）
 
-传 `"live_card": true` 时，标准看板会在同一份 HTML 内生成隐藏的宽宝活卡；普通 URL 不显示，`?cover=1` 进入 4:3 card-only 模式。上传/更新时会自动把 `verify_cover_card` 默认打开，通过后返回 `cover_card_url=<url>?cover=1` 与 `has_cover_card=true`。
+传 `"live_card": true`（或对象）时，标准看板会在同一份 HTML 内产出独立 **card runtime artifact**（`embedded-card-v1`：`<template data-qb-card-template>` + `data-qb-card-style` + `data-qb-card-manifest` + `QBCardRuntimeV1` runtime），供官网卡片流 / 截图工具在空白宿主里 `QBCardRuntimeV1.mount()` 独立 hydrate 出 4:3 卡片。上传/更新可传 `verify_card_runtime:true` 做 artifact 门禁。
 
 ```json
 {
@@ -113,7 +117,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 }
 ```
 
-`metrics` 不传时会优先从 number panels 自动取 2-3 个核心指标。卡片运行时监听页面同一轮公式包 outputs，不需要另起独立 card HTML，也不要新增 `ratio/gallery` 参数。卡片左上角只保留官方标签预留位，不显示固定「宽宝活卡」文案。
+`metrics` 不传时会优先从 number panels 自动取 2-3 个核心指标。card runtime artifact 的 manifest 钉死 `package_id/signature/required_outputs`，hydrate 时实时取数、不写死数值；不要新增 `ratio/gallery` 参数。卡片左上角只保留官方标签预留位，不显示固定「宽宝活卡」文案。
 
 ### 模板契约校验
 
@@ -145,8 +149,6 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
   "manifest": "output/pages/xxx.manifest.json",
   "thumbnail_file": "output/thumbnails/xxx.png",
   "thumbnail_generation_status": "generated",
-  "cover_card_url": "https://pages.quantbuddy.cn/...html?cover=1",
-  "has_cover_card": true,
   "facts": {"px":{"value": 166.41, "date": 20260616}},
   "url": "https://pages.quantbuddy.cn/..."  // 仅 upload=true 且成功时 }
 ```
@@ -154,7 +156,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间、验证结果，以及
 `thumbnail_file`、`thumbnail_url`、`thumbnail_generation_status`。不会记录 API key 或 signature。
 
-> **产物目录约定（本 skill 所有脚本共用）**：一切生成物——看板 HTML、manifest、缩略图、公式包/数据授权凭证、临时预览与 demo——**只落在 `output/` 下**（`output/pages/`、`output/thumbnails/`、`output/formula_packages/`、`output/data_grants/`；随手的试验/demo 放 `output/_demo/`）。`output/` 已在 `.gitignore` 里，属会话级 scratch。**不要在 skill 根目录另建 `_demo`、`tmp`、`preview` 等顶层文件夹**——顶层只保留 `SKILL.md / scripts / tools / guides / workflows / templates / tests / assets / config.json` 这套固定骨架。本地预览也从 `output/` 起服务（如 `python -m http.server 8899 --bind 127.0.0.1`，cwd 指向 `output/_demo/`）。
+> **产物目录约定（本 skill 所有脚本共用）**：一切生成物——看板 HTML、manifest、缩略图、公式包/数据授权凭证、临时预览与 demo——**只落在 `output/` 下**（`output/pages/`、`output/thumbnails/`、`output/formula_packages/`、`output/data_grants/`；随手的试验/demo 放 `output/_demo/`）。`output/` 已在 `.gitignore` 里，属会话级 scratch。**不要在 skill 根目录另建 `_demo`、`tmp`、`preview` 等顶层文件夹**——顶层只保留 `SKILL.md / scripts / tools / guides / workflows / templates / reply-templates / tests / assets / config.json` 这套固定骨架。本地预览也从 `output/` 起服务（如 `python -m http.server 8899 --bind 127.0.0.1`，cwd 指向 `output/_demo/`）。
 
 ### 缩略图生成与上传
 

@@ -13,8 +13,8 @@ import json
 from datetime import datetime
 
 
-STEP_STATUSES = {"pending", "running", "done", "failed"}
-PAGE_STATUSES = {"running", "done", "failed"}
+STEP_STATUSES = {"pending", "running", "waiting", "done", "failed"}
+PAGE_STATUSES = {"running", "waiting_input", "done", "failed"}
 
 DEFAULT_STEPS = [
     {"id": "init", "title": "初始化活页链接", "status": "done"},
@@ -130,6 +130,16 @@ def _apply_linear_progression(steps, current_id, page_status):
                 step["status"] = "done"
         return steps
 
+    if page_status == "waiting_input":
+        for index, step in enumerate(steps):
+            if index < current_index:
+                step["status"] = "done"
+            elif index == current_index:
+                step["status"] = "waiting"
+            else:
+                step["status"] = "pending"
+        return steps
+
     for index, step in enumerate(steps):
         if index < current_index:
             step["status"] = "done"
@@ -193,6 +203,11 @@ def build_state(params):
         "current_step_title": current["title"] if current else current_step,
         "updated_at": updated_at,
         "steps": steps,
+        "required_input": (
+            params.get("required_input")
+            if page_status == "waiting_input" and isinstance(params.get("required_input"), dict)
+            else None
+        ),
     }
 
 
@@ -204,6 +219,29 @@ def render_progress_html(params=None):
     updated_at = html.escape(state["updated_at"])
     page_status = html.escape(state["page_status"])
     state_json = _script_json(state)
+    required_input = state.get("required_input") if isinstance(state.get("required_input"), dict) else None
+    required_input_panel = ""
+    if state["page_status"] == "waiting_input" and required_input:
+        option_items = []
+        for option in required_input.get("options") or []:
+            if not isinstance(option, dict):
+                continue
+            label = html.escape(_as_text(option.get("label") or option.get("value"), "").strip())
+            if label:
+                option_items.append('<span class="required-input-option">%s</span>' % label)
+        required_input_panel = (
+            '<section class="required-input-panel" aria-label="等待用户确认">'
+            '<strong>等待用户确认</strong>'
+            '<p>{prompt}</p>{options}'
+            '<small>请回到对话中确认；收到回复后，这个链接会从当前阶段继续更新。</small>'
+            '</section>'
+        ).format(
+            prompt=html.escape(_as_text(required_input.get("prompt"), "")),
+            options=(
+                '<div class="required-input-options">%s</div>' % "".join(option_items)
+                if option_items else ""
+            ),
+        )
 
     step_items = []
     for index, step in enumerate(state["steps"], start=1):
@@ -265,6 +303,12 @@ def render_progress_html(params=None):
     .current strong {{ color: var(--accent); font-size: 12px; line-height: 1.4; letter-spacing: .05em; text-transform: uppercase; }}
     .current .state-pill {{ color: var(--accent); font-size: 13px; font-weight: 700; white-space: nowrap; }}
     .current-title {{ display: block; color: var(--primary); font-size: 19px; line-height: 1.4; font-weight: 720; }}
+    .required-input-panel {{ margin: 14px 0 0; padding: 16px 18px; border: 1px solid rgba(143, 78, 0, .28); border-radius: 8px; background: var(--panel-soft); }}
+    .required-input-panel strong {{ color: var(--accent); font-size: 14px; }}
+    .required-input-panel p {{ margin: 6px 0 0; color: var(--primary); font-size: 16px; line-height: 1.55; font-weight: 700; }}
+    .required-input-panel small {{ display: block; margin-top: 10px; color: var(--muted); line-height: 1.55; }}
+    .required-input-options {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
+    .required-input-option {{ display: inline-flex; align-items: center; min-height: 30px; padding: 5px 12px; border: 1px solid rgba(143, 78, 0, .28); border-radius: 999px; background: #fff; color: var(--accent); font-size: 13px; font-weight: 700; }}
     .progress-shell {{ margin-top: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: clamp(18px, 4vw, 28px); box-shadow: 0 16px 40px rgba(23, 32, 51, 0.08); position: relative; overflow: hidden; }}
     .timeline {{ list-style: none; margin: 0; padding: 0; }}
     .qb-progress-step {{ min-height: 58px; display: grid; grid-template-columns: 42px 1fr; gap: 14px; align-items: start; position: relative; padding: 0 0 18px; }}
@@ -278,6 +322,9 @@ def render_progress_html(params=None):
     .step-running .step-body {{ background: var(--accent-wash); border: 1px solid rgba(143, 78, 0, .2); border-radius: 8px; padding: 10px 12px; }}
     .step-running .step-node {{ background: var(--accent); box-shadow: 0 0 0 8px rgba(254, 156, 60, .16); }}
     .step-running .step-status {{ color: var(--accent); }}
+    .step-waiting .step-body {{ background: var(--panel-soft); border: 1px solid rgba(143, 78, 0, .28); border-radius: 8px; padding: 10px 12px; }}
+    .step-waiting .step-node {{ background: var(--accent-soft); color: var(--primary); box-shadow: 0 0 0 8px rgba(254, 156, 60, .13); }}
+    .step-waiting .step-status {{ color: var(--accent); }}
     .step-done .step-node {{ background: var(--done); }}
     .step-failed .step-node {{ background: var(--failed); box-shadow: 0 0 0 8px rgba(192, 53, 43, .12); }}
     .step-failed .step-body {{ background: #fff6f5; border: 1px solid #f2b8b5; border-radius: 8px; padding: 10px 12px; }}
@@ -307,6 +354,7 @@ def render_progress_html(params=None):
         </div>
         <span class="current-title">{current_title}</span>
       </div>
+      {required_input_panel}
     </header>
     <section class="progress-shell" aria-label="活页生成步骤">
       <ol class="timeline">
@@ -324,6 +372,7 @@ def render_progress_html(params=None):
         title=title,
         message=message,
         current_title=current_title,
+        required_input_panel=required_input_panel,
         page_status_label=_page_status_label(state["page_status"]),
         updated_at=updated_at,
         page_status=page_status,
@@ -336,6 +385,7 @@ def _status_label(status):
     return {
         "pending": "待开始",
         "running": "进行中",
+        "waiting": "等待确认",
         "done": "已完成",
         "failed": "失败",
     }.get(status, status)
@@ -344,6 +394,7 @@ def _status_label(status):
 def _page_status_label(status):
     return {
         "running": "处理中",
+        "waiting_input": "等待用户确认",
         "done": "已完成",
         "failed": "处理失败",
     }.get(status, status)
@@ -354,6 +405,8 @@ def _status_marker(status, index):
         return "✓"
     if status == "running":
         return "↻"
+    if status == "waiting":
+        return "?"
     if status == "failed":
         return "!"
     return str(index)

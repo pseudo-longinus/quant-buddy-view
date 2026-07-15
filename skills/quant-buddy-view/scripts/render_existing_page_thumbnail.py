@@ -30,7 +30,6 @@ import urllib.request
 
 import common as C
 import formula_package as FP
-import live_card as LC
 import render_cover as RC
 
 WIDTH = 1200
@@ -276,12 +275,6 @@ def _capture_exact(cover_html, out_png, *, width=WIDTH, height=HEIGHT, wait_ms=4
     return None, {"status": "failed", "reason": "capture_failed", "browser": browser, "last": last}
 
 
-def _inject_live_card_capture_html(html, outputs):
-    if outputs:
-        html = _insert_patch(html, _offline_patch_js(outputs))
-    return html
-
-
 def _upload_if_requested(params, out_file):
     if not params.get("upload"):
         return None
@@ -300,42 +293,6 @@ def render_existing_page_thumbnail(params):
     cover_html = params.get("cover_html_file")
     cover_html = _abs(cover_html) if cover_html else base + ".cover-existing.html"
     os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
-
-    live_card_capture = None
-    prefer_live = params.get("prefer_live_card", True) is not False
-    if prefer_live and LC.has_live_card(html):
-        live_cover_html = params.get("live_cover_html_file")
-        live_cover_html = _abs(live_cover_html) if live_cover_html else base + ".live-card-cover.html"
-        live_width = int(params.get("live_card_width") or params.get("width") or WIDTH)
-        live_height = int(params.get("live_card_height") or round(live_width * 3 / 4))
-        with open(live_cover_html, "w", encoding="utf-8") as f:
-            f.write(_inject_live_card_capture_html(html, outputs))
-        shot, live_card_capture = _capture_exact(
-            live_cover_html,
-            out_file,
-            width=live_width,
-            height=live_height,
-            wait_ms=int(params.get("live_card_wait_ms") or params.get("wait_ms") or 1500),
-            query="cover=1",
-        )
-        if shot:
-            dims = RC._png_dims(shot)
-            upload = _upload_if_requested(params, shot)
-            return {
-                "code": 0,
-                "source": source,
-                "mode": "live-card",
-                "out_file": shot,
-                "cover_html": live_cover_html,
-                "width": dims[0] if dims else None,
-                "height": dims[1] if dims else None,
-                "bytes": os.path.getsize(shot),
-                "sha256": hashlib.sha256(open(shot, "rb").read()).hexdigest(),
-                "query": query,
-                "capture": live_card_capture,
-                "upload": upload,
-                "thumbnail_url": upload.get("thumbnail_url") if isinstance(upload, dict) else None,
-            }
 
     with open(cover_html, "w", encoding="utf-8") as f:
         f.write(_inject_cover_html(html, outputs))

@@ -1,0 +1,104 @@
+{
+  "version": "reply_templates_v2",
+  "templates": [
+    {
+      "id": "meta_tooling_response_v1",
+      "title": "Meta Tooling Response",
+      "file": "meta_tooling_response_v1.md",
+      "source_playbooks": ["00_meta_tooling.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "single_stock_deep_dive_v1",
+      "title": "Single Stock Deep Dive",
+      "file": "single_stock_deep_dive_v1.md",
+      "source_playbooks": ["03_single_stock_deep_dive.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "single_stock_valuation_quality_v1",
+      "title": "Single Stock Valuation And Quality Report",
+      "file": "single_stock_valuation_quality_v1.md",
+      "source_playbooks": ["03_single_stock_deep_dive.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "market_event_impact_v1",
+      "title": "Macro Market And Event Impact Brief",
+      "file": "market_event_impact_v1.md",
+      "source_playbooks": ["01_macro_event.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "sector_theme_opportunity_v1",
+      "title": "Sector Theme Opportunity Report",
+      "file": "sector_theme_opportunity_v1.md",
+      "source_playbooks": ["02_sector_theme.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "multi_asset_compare_v1",
+      "title": "Multi Asset Comparison Report",
+      "file": "multi_asset_compare_v1.md",
+      "source_playbooks": ["04_multi_asset_compare.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "capital_flow_quant_signal_v1",
+      "title": "Capital Flow Quant Signal Brief",
+      "file": "capital_flow_quant_signal_v1.md",
+      "source_playbooks": ["05_capital_flow_quant.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "fund_etf_bond_profile_v1",
+      "title": "Fund ETF Bond Profile",
+      "file": "fund_etf_bond_profile_v1.md",
+      "source_playbooks": ["06_fund_etf_bond.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "hk_us_overseas_asset_v1",
+      "title": "HK US Overseas Asset Brief",
+      "file": "hk_us_overseas_asset_v1.md",
+      "source_playbooks": ["07_hk_us_overseas.md", "09_dashboard_guidance.md"],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "dashboard_guidance_appendix_v1",
+      "title": "Realtime Dashboard Guidance Appendix",
+      "file": "dashboard_guidance_appendix_v1.md",
+      "source_playbooks": ["09_dashboard_guidance.md"],
+      "default_reply_scope": "hybrid",
+      "output_format": "markdown",
+      "status": "active"
+    },
+    {
+      "id": "generic_live_page_delivery_v1",
+      "title": "Generic Live Page Delivery",
+      "file": "generic_live_page_delivery_v1.md",
+      "source_playbooks": [],
+      "default_reply_scope": "full_answer",
+      "output_format": "markdown",
+      "status": "active"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Workflow · 需求 → 看板分享链接（端到端）
 
+> 前置分诊：新会话先走 [new-session-paradigm-routing.md](new-session-paradigm-routing.md) 查范式卡判命中。**① 直接命中**直接返回现成链接，不走本流程；本流程覆盖 **② fork**（换标的注册自己的公式包）和 **③ 未命中自建**。
+
 把 quant-buddy-skill 里探索好的指标，做成一个公开可分享、数据自动更新的网页看板。
 
 > 场景：用户说「帮我做个沪深300指数最近一年走势 + 最新涨跌幅的监控页，要能发给同事」。
@@ -78,6 +80,10 @@ python scripts/static_page.py upload '{"html_file":"output/pages/沪深300监控
   重建并替换也可一步完成：在 spec.json 里加 `"update_page_id": "page_xxx"`（优先于新上传），跑 `build_dashboard.py @spec.json` 即重建 + 替换。
 - **数据更新了想刷新页面**：无需重建——页面是 live 实时取数，访问者打开即见最新；只有改版式/文案时才重跑第 2 步并按上一条 `update` 覆盖同一页面。
 - **下线页面**：`python scripts/static_page.py revoke '{"page_id":"page_xxx"}'`。
-- **轮换公式包签名**：`python scripts/formula_package.py refresh '{"package_id":"pkg_xxx","rotate_signature":true}'`，再用新签名重建页面（页面内嵌的旧签名才会更新）。
+- **轮换公式包签名（⚠️ 破坏性，默认不做）**：`refresh` 默认 `rotate_signature:false`、不动签名。只有需要主动换令牌 / 吊销已泄露旧签名时才轮换：`python scripts/formula_package.py refresh '{"package_id":"pkg_xxx","rotate_signature":true}'`。
+  - 轮换会**立刻作废所有已发布、内嵌该包旧签名的页面**（取数报 `SIGNATURE_INVALID`），新签名只明文返回一次、丢了不可恢复。
+  - 轮换后**必须紧接着**对每个内嵌该包的页面重建 HTML + `update` 覆盖同一 `page_id`，把新签名同步进去——一步不能漏。
+  - 仅当本地存在凭证 `output/formula_packages/<package_id>.json` 时脚本才会回写新签名供重建；换会话/换机器、凭证不在本地时**不要轮换**（新明文会丢、页面救不回）。
+  - 「数据更新想刷新页面」见上一条：页面 live 取数自动拿最新，**无需 refresh、更无需轮换**。
 
 > 页面是实时取数的（HTML 内嵌 `package_id + signature`，打开时调 `queryFormulaPackage` 取最新数据）。前置：端点对页面域名放开 CORS、协议与页面一致、且接受 signature 公开在 HTML 里——当前 `https://www.quantbuddy.cn/skill` 均满足。

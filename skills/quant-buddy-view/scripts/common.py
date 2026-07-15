@@ -10,9 +10,10 @@ quant-buddy-view 共享底座（self-contained，不依赖 quant-buddy-skill 的
   - 无代理 HTTP          _NO_PROXY_OPENER / http_json()
   - 入参解析 & 输出       read_params() / emit()
 
-认证模型：本 skill 不维护会话 / task_id。register/list/revoke/refresh 与 static_page 凭
-config.json 的 api_key（Bearer）认身份；query 取数无需 api_key（凭 package_id + signature）。
-版本协商走请求头 x-skill-version / x-skill-name（见 headers()），与 task_id 无关。
+认证模型：register/list/revoke/refresh 与 static_page 凭 config.json 的 api_key（Bearer）
+认身份；query 取数以 package/grant + signature 为能力凭证，CLI 本地有 api_key 时会可选附带用于审计归因。
+每次用户任务先由
+trace_context.py begin 建立 task_id，后续脚本通过入参复用，headers() 自动透传 x-task-id。
 """
 
 import io
@@ -145,6 +146,64 @@ def api_url(endpoint, path):
 # HTTP
 # ────────────────────────────────────────────────
 
+_TRACE_TASK_ID = None
+_TRACE_USER_QUERY = None
+
+
+def set_trace_context(task_id=None, user_query=None):
+    """设置当前进程的 Trace Context；供 read_params / trace_context.py 共用。"""
+    global _TRACE_TASK_ID, _TRACE_USER_QUERY
+    _TRACE_TASK_ID = str(task_id).strip() if task_id else None
+    _TRACE_USER_QUERY = str(user_query).strip() if user_query else None
+    return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
+
+
+def configure_trace_context(params=None):
+    """从参数或环境变量恢复本次任务上下文，不使用会互相覆盖的全局 session 文件。"""
+    params = params if isinstance(params, dict) else {}
+    nested = params.get("trace_context") if isinstance(params.get("trace_context"), dict) else {}
+    task_id = params.get("task_id") or nested.get("task_id") or os.environ.get("QBV_TASK_ID")
+    user_query = params.get("user_query") or nested.get("user_query") or os.environ.get("QBV_USER_QUERY")
+    return set_trace_context(task_id, user_query)
+
+
+def current_trace_context():
+    return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
+
+
+def cleanup_task_temp_files(task_id):
+    """删除本任务按 qbv_<task_id>_*.json 命名的临时参数文件，只允许操作系统临时目录。"""
+    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
+    if not safe_task:
+        return []
+    temp_root = os.path.realpath(tempfile.gettempdir())
+    deleted = []
+    for name in os.listdir(temp_root):
+        if not (name.startswith(f"qbv_{safe_task}_") and name.endswith(".json")):
+            continue
+        path = os.path.realpath(os.path.join(temp_root, name))
+        if os.path.dirname(path) != temp_root:
+            continue
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except OSError:
+            continue
+    return deleted
+
+
+def require_trace_context():
+    if _TRACE_TASK_ID:
+        return None
+    return {
+        "code": 1,
+        "error": "TRACE_CONTEXT_REQUIRED",
+        "message": (
+            "发布/更新活页前必须先运行 scripts/trace_context.py begin，"
+            "并把返回的 task_id 传给本次任务的每个 quant-buddy-view 命令。"
+        ),
+    }
+
 def headers(api_key=None, accept=None):
     h = {
         "Content-Type": "application/json; charset=utf-8",
@@ -153,6 +212,8 @@ def headers(api_key=None, accept=None):
     }
     if SKILL_CHANNEL:
         h["x-skill-channel"] = SKILL_CHANNEL
+    if _TRACE_TASK_ID:
+        h["x-task-id"] = _TRACE_TASK_ID
     if api_key:
         h["Authorization"] = f"Bearer {api_key}"
     if accept:
@@ -427,11 +488,14 @@ def read_params(argv, env_var="VIEW_PARAMS"):
         raw = sys.stdin.buffer.read().decode("utf-8", errors="replace").strip()
     raw = raw or "{}"
     try:
-        return json.loads(raw)
+        params = json.loads(raw)
+        configure_trace_context(params)
+        return params
     except json.JSONDecodeError as e:
         if from_argv:
             flags = _parse_flags(argv)
             if flags is not None:
+                configure_trace_context(flags)
                 return flags
         emit({"code": 1, "message": f"参数 JSON 解析失败: {e}", "raw": raw[:200],
               "hint": "参数用单个 JSON 字符串，如 list '{\"scope\":\"test_all\"}'；命令行也支持 --scope test_all"})
