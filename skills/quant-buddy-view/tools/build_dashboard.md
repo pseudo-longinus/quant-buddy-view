@@ -1,5 +1,28 @@
 # build_dashboard — spec → 自包含看板 HTML
 
+## image panel
+
+`type:"image"` 只接受 `image_upload` 返回的绝对同域 WebP `image_url`，不接受本地文件、外部 CDN 或来源 page_id 的 URL，且不参与公式/授权输出健康检查。
+
+```json
+{
+  "type": "image",
+  "title": "商业模式",
+  "image_url": "https://pages.quantbuddy.cn/pages/assets/page_xxx/asset_xxx.webp",
+  "alt": "公司商业模式与收入结构示意图",
+  "caption": "资料来源：公司公告",
+  "span": "full",
+  "fit": "contain",
+  "zoomable": true,
+  "width": 1600,
+  "height": 900
+}
+```
+
+`alt` 必填；`fit` 支持 `cover/contain/fill/none/scale-down`。正文图片默认 `zoomable:true`：点击后在当前页面打开大图，支持关闭按钮、点击遮罩和 `Esc` 退出，不跳转图片 URL；Logo、海报或纯装饰图可传 `zoomable:false`。首屏/海报区域默认 eager，只有明确位于正文下方时才传 `loading:"lazy"`。
+
+页面全部由 `text/image` 面板组成时可直接生成静态看板，不要求公式包或数据授权；只要出现 `line/bar/table/number/raw` 等数据型面板，仍必须提供对应的 `output` 或 `grant_id`。
+
 > 把「公式任务包 + 看板 spec」编译成一份自包含 HTML（样式内联，图表用公网 CDN ECharts）。可顺带上传发布。
 > 通过本地脚本 `scripts/build_dashboard.py` 调用（单命令，无子命令）。
 

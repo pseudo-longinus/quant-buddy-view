@@ -19,6 +19,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { resolveVerificationProfile } from './verification_profiles.mjs';
+import { staticImageProblems } from './image_verification.mjs';
 
 const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
@@ -122,6 +123,7 @@ function staticChecks(html) {
   if (/<script\s+src=["'][^"']*(assets\/data-kernel|assets\/qr-mini|templates\/_shared)/i.test(html)) {
     problems.push('仍引用本地运行时脚本，未内联公共资源');
   }
+  problems.push(...staticImageProblems(html));
   const hasPackage = /(?:["']?(?:package_id|packageId)["']?)\s*:\s*["'][^"']+["']/.test(html);
   return { ok: problems.length === 0, problems, hasPackage };
 }
@@ -501,10 +503,55 @@ async function launchPlaywrightBrowser(pw) {
   throw new Error(errors.join(' | '));
 }
 
+async function prepareImagesExpression() {
+  const images = Array.from(document.images || []);
+  for (const img of images) {
+    if (/^data:image\//i.test(img.currentSrc || img.src || '')) continue;
+    img.loading = 'eager';
+    try { img.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+  }
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  await Promise.all(images.map(async img => {
+    if (/^data:image\//i.test(img.currentSrc || img.src || '')) return;
+    try { if (typeof img.decode === 'function') await img.decode(); } catch {}
+  }));
+  const managed = images.filter(img => /^https:\/\/pages\.quantbuddy\.cn\/pages\/assets\/[^/]+\/asset_[0-9a-f]{24}\.webp(?:[?#].*)?$/i.test(img.currentSrc || img.src || ''));
+  const posterTarget = document.querySelector('[data-qb-poster-target]');
+  let posterCanvasExportable = managed.length === 0;
+  if (managed.length && document.getElementById('shareBtn')) {
+    try {
+      document.getElementById('shareBtn').click();
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const preview = document.getElementById('sharePosterImage');
+        if (preview && /^data:image\/png/i.test(preview.src || '')) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const canvas = document.getElementById('sharePosterCanvas');
+      posterCanvasExportable = !!(canvas && canvas.width > 0 && canvas.height > 0 && /^data:image\/png/i.test(canvas.toDataURL('image/png')));
+      const close = document.getElementById('closePoster');
+      if (close) close.click();
+    } catch {
+      posterCanvasExportable = false;
+    }
+  }
+  return {
+    total: images.length,
+    checked: images.filter(img => !/^data:image\//i.test(img.currentSrc || img.src || '')).length,
+    broken: images
+      .filter(img => !/^data:image\//i.test(img.currentSrc || img.src || '') && (!img.complete || Number(img.naturalWidth || 0) <= 0))
+      .map(img => ({ src: img.currentSrc || img.src || '', complete: !!img.complete, naturalWidth: Number(img.naturalWidth || 0) })),
+    managedTotal: managed.length,
+    managedInPosterTarget: managed.filter(img => !!posterTarget && posterTarget.contains(img)).length,
+    posterCanvasExportable,
+  };
+}
+
 async function playwrightBrowserChecks(pw, url, options = {}) {
   const browser = await launchPlaywrightBrowser(pw);
   const results = [];
   const consoleErrors = [];
+  const imageNetworkErrors = [];
   const viewports = VIEWPORTS;
   const settleMs = 1200;
   try {
@@ -516,6 +563,16 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
           if (CORE_ERROR_RE.test(text)) {
             consoleErrors.push({ viewport: viewport.name, type: msg.type(), text: sanitizeBrowserText(text) });
           }
+        }
+      });
+      page.on('requestfailed', request => {
+        if (request.resourceType() === 'image') {
+          imageNetworkErrors.push({ viewport: viewport.name, type: 'requestfailed', url: sanitizeBrowserText(request.url()), message: sanitizeBrowserText(request.failure()?.errorText || '') });
+        }
+      });
+      page.on('response', response => {
+        if (response.request().resourceType() === 'image' && !response.ok()) {
+          imageNetworkErrors.push({ viewport: viewport.name, type: `http_${response.status()}`, url: sanitizeBrowserText(response.url()) });
         }
       });
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -530,14 +587,16 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
       }
       const hasRuntime = await page.evaluate(() => !!window.QB_DATA_RUNTIME);
       await page.waitForTimeout(hasRuntime ? 250 : Math.max(settleMs, 3000));
+      const imageMetrics = await page.evaluate(prepareImagesExpression);
       const metrics = await page.evaluate(pageMetricsExpression);
+      metrics.images = imageMetrics;
       results.push(viewportResult(viewport, metrics, options));
       await page.close();
     }
   } finally {
     await browser.close();
   }
-  return { checked: true, engine: 'playwright', viewports: results, consoleErrors };
+  return { checked: true, engine: 'playwright', viewports: results, consoleErrors, imageNetworkErrors };
 }
 
 function pageMetricsExpression() {
@@ -826,6 +885,10 @@ function viewportResult(viewport, metrics, options = {}) {
     runtime: metrics.runtime,
     failureTextHits: metrics.failureTextHits || [],
     loadingTextHits: metrics.loadingTextHits || [],
+    images: {
+      ...(metrics.images || {}),
+      broken: (metrics.images?.broken || []).map(item => ({ ...item, src: sanitizeBrowserText(item.src) })),
+    },
   };
   return result;
 }
@@ -1119,6 +1182,8 @@ async function cdpBrowserChecks(url, options = {}) {
     const cdp = new CdpSession(ws);
     const results = [];
     const consoleErrors = [];
+    const imageNetworkErrors = [];
+    let currentViewport = 'unknown';
     cdp.onEvent(msg => {
       if (msg.method === 'Runtime.exceptionThrown') {
         const text = msg.params?.exceptionDetails?.text || 'Runtime exception';
@@ -1131,12 +1196,20 @@ async function cdpBrowserChecks(url, options = {}) {
           consoleErrors.push({ viewport: 'unknown', type, text: sanitizeBrowserText(text) });
         }
       }
+      if (msg.method === 'Network.loadingFailed' && msg.params?.type === 'Image') {
+        imageNetworkErrors.push({ viewport: currentViewport, type: 'requestfailed', message: sanitizeBrowserText(msg.params?.errorText || '') });
+      }
+      if (msg.method === 'Network.responseReceived' && msg.params?.type === 'Image' && Number(msg.params?.response?.status || 0) >= 400) {
+        imageNetworkErrors.push({ viewport: currentViewport, type: `http_${msg.params.response.status}`, url: sanitizeBrowserText(msg.params.response.url || '') });
+      }
     });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable');
     const viewports = VIEWPORTS;
     const settleMs = 1200;
     for (const viewport of viewports) {
+      currentViewport = viewport.name;
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: viewport.width,
         height: viewport.height,
@@ -1164,6 +1237,11 @@ async function cdpBrowserChecks(url, options = {}) {
         returnByValue: true,
       });
       await delay(runtimePresent.result && runtimePresent.result.value ? 250 : Math.max(settleMs, 3000));
+      const preparedImages = await cdp.send('Runtime.evaluate', {
+        expression: `(${prepareImagesExpression.toString()})()`,
+        returnByValue: true,
+        awaitPromise: true,
+      });
       const evaluated = await cdp.send('Runtime.evaluate', {
         expression: `(${pageMetricsExpression.toString()})()`,
         returnByValue: true,
@@ -1173,10 +1251,11 @@ async function cdpBrowserChecks(url, options = {}) {
         consoleErrors.push({ viewport: viewport.name, type: 'error', text: sanitizeBrowserText(evaluated.exceptionDetails.text || 'Runtime.evaluate failed') });
         continue;
       }
+      evaluated.result.value.images = preparedImages.result?.value || {};
       results.push(viewportResult(viewport, evaluated.result.value, options));
     }
     ws.close();
-    return { checked: true, engine: 'system-browser', browser: browserPath, viewports: results, consoleErrors };
+    return { checked: true, engine: 'system-browser', browser: browserPath, viewports: results, consoleErrors, imageNetworkErrors };
   } catch (err) {
     return { checked: false, skipped: true, reason: err && err.message ? err.message : String(err), browser: browserPath };
   } finally {
@@ -1232,8 +1311,16 @@ function summarize(staticResult, browserResult, options) {
       if (r.loadingTextHits.length && r.runtime && r.runtime.pending === 0) {
         problems.push(`${r.viewport}: 数据完成后仍显示加载态 ${r.loadingTextHits.join(', ')}`);
       }
+      if ((r.images?.broken || []).length) problems.push(`${r.viewport}: 存在无法解码或零宽图片`);
+      if (Number(r.images?.managedTotal || 0) > Number(r.images?.managedInPosterTarget || 0)) {
+        problems.push(`${r.viewport}: 同域 WebP 未全部包含在分享海报目标内`);
+      }
+      if (Number(r.images?.managedTotal || 0) > 0 && !r.images?.posterCanvasExportable) {
+        problems.push(`${r.viewport}: 分享海报 canvas 无法导出`);
+      }
     }
     if (browserResult.consoleErrors.length) problems.push('控制台存在核心接口/运行时错误');
+    if ((browserResult.imageNetworkErrors || []).length) problems.push('图片请求存在 requestfailed 或非 2xx 响应');
   } else {
     const warning = `浏览器视口检查未执行: ${browserResult.reason}`;
     warnings.push(warning);

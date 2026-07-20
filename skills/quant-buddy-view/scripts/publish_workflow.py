@@ -23,7 +23,7 @@ def _failure(error, message, **extra):
     return {"code": 1, "error": error, "message": message, **extra}
 
 
-def _marker_specs(packages, grants):
+def _marker_specs(packages, grants, images=None):
     specs = []
     for index, item in enumerate(packages):
         markers = item.get("markers") if isinstance(item, dict) else None
@@ -41,6 +41,10 @@ def _marker_specs(packages, grants):
             (f"grants[{index}].markers.grant_id", markers.get("grant_id")),
             (f"grants[{index}].markers.signature", markers.get("signature")),
         ])
+    for index, item in enumerate(images or []):
+        if not isinstance(item, dict):
+            raise ValueError(f"images[{index}] 必须是对象")
+        specs.append((f"images[{index}].marker", item.get("marker")))
     normalized = []
     seen = set()
     for label, value in specs:
@@ -102,6 +106,7 @@ def run_workflow(params):
     user_query = str(params.get("user_query") or "").strip()
     packages = params.get("packages")
     grants = params.get("grants") or []
+    images = params.get("images") or []
     publish_params = params.get("publish_verified")
     if not task_id or not user_query:
         return _failure("QBV_TRACE_CONTEXT_REQUIRED", "task_id 和 user_query 必填")
@@ -109,6 +114,8 @@ def run_workflow(params):
         return _failure("PACKAGES_REQUIRED", "packages 必须是非空数组")
     if not isinstance(grants, list):
         return _failure("INVALID_GRANTS", "grants 必须是数组")
+    if not isinstance(images, list):
+        return _failure("INVALID_IMAGES", "images 必须是数组")
     if not isinstance(publish_params, dict) or not publish_params.get("page_id"):
         return _failure("PUBLISH_PARAMS_REQUIRED", "publish_verified.page_id 必填")
 
@@ -121,10 +128,19 @@ def run_workflow(params):
 
     try:
         html = template_file.read_text(encoding="utf-8")
-        marker_specs = _marker_specs(packages, grants)
+        marker_specs = _marker_specs(packages, grants, images)
         for label, marker in marker_specs:
             if html.count(marker) != 1:
                 return _failure("HTML_MARKER_INVALID", f"{label} 必须在 HTML 中恰好出现一次")
+        prepared_images = []
+        for index, item in enumerate(images):
+            logical_name = str(item.get("logical_name") or item.get("name") or "").strip()
+            if not logical_name:
+                return _failure("IMAGE_PREFLIGHT_FAILED", f"images[{index}].logical_name 必填")
+            path, image_error = SP._resolve_local_image_file(item)
+            if image_error:
+                return _failure("IMAGE_PREFLIGHT_FAILED", image_error.get("message") or f"images[{index}] 图片预检失败", failed_index=index)
+            prepared_images.append({**item, "logical_name": logical_name, "resolved_image_file": path})
     except (OSError, ValueError) as exc:
         return _failure("WORKFLOW_PREFLIGHT_FAILED", str(exc))
 
@@ -160,6 +176,34 @@ def run_workflow(params):
         html = _replace_once(html, markers["signature"], result["signature"], f"grants[{index}].signature")
         registered_grants.append({"name": str(item.get("name") or index), "grant_id": result["grant_id"]})
 
+    uploaded_images = []
+    for index, item in enumerate(prepared_images):
+        result = SP.cmd_image_upload({
+            "task_id": task_id,
+            "page_id": publish_params["page_id"],
+            "image_file": item["resolved_image_file"],
+            "logical_name": item["logical_name"],
+        })
+        image_url = result.get("url") if isinstance(result, dict) else ""
+        if not (isinstance(result, dict) and result.get("code") == 0 and result.get("asset_id") and image_url):
+            return _failure(
+                "IMAGE_UPLOAD_FAILED",
+                f"正文图片上传失败: {item.get('name') or index}",
+                failed_index=index,
+                registered_packages=registered_packages,
+                registered_grants=registered_grants,
+                uploaded_images=uploaded_images,
+                image_result=result,
+            )
+        html = _replace_once(html, item["marker"], image_url, f"images[{index}].marker")
+        uploaded_images.append({
+            "name": str(item.get("name") or item["logical_name"]),
+            "logical_name": item["logical_name"],
+            "asset_id": result["asset_id"],
+            "url": image_url,
+            "sha256": result.get("sha256"),
+        })
+
     prepared_file.parent.mkdir(parents=True, exist_ok=True)
     prepared_file.write_text(html, encoding="utf-8", newline="\n")
     verified_params = dict(publish_params)
@@ -176,8 +220,10 @@ def run_workflow(params):
         "task_id": task_id,
         "package_count": len(registered_packages),
         "grant_count": len(registered_grants),
+        "image_count": len(uploaded_images),
         "registered_packages": registered_packages,
         "registered_grants": registered_grants,
+        "uploaded_images": uploaded_images,
         "validation_receipt_files": receipts,
         "prepared_html_file": str(prepared_file),
         "publish_verified": published,

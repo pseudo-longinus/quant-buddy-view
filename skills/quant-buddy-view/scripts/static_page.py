@@ -167,6 +167,8 @@ _PATH = {
     "list":      "/skill/listStaticPages",
     "revoke":    "/skill/revokeStaticPage",
     "thumbnail": "/skill/setPageThumbnail",
+    "image_upload": "/skill/uploadPageImage",
+    "image_list": "/skill/listPageImages",
     "tags":      "/skill/listPageTags",
     "autotag":   "/skill/autoTagStaticPage",
     "publish_community":   "/skill/publishStaticPageToCommunity",
@@ -184,11 +186,17 @@ _DEFAULT_TIMEOUT = 60
 _MAX_HTML_BYTES = 2 * 1024 * 1024
 # 缩略图上限（与服务端 setPageThumbnail 一致，2MB）
 _MAX_THUMB_BYTES = 2 * 1024 * 1024
+_MAX_PAGE_IMAGE_BYTES = 5 * 1024 * 1024
 _SHARE_POSTER_VERSION = "snapshot-tall-v1"
 _SHARE_SHELL_VERSION = "copy-link-v1"
 _FORK_MANIFEST_VERSION = "fork_manifest_v1"
 _FORK_TASK_BINDING_VERSION = "fork_task_binding_v1"
 _FORK_PREFLIGHT_SENTINEL = object()
+_MANAGED_IMAGE_RE = re.compile(
+    r"(?:https://pages\.quantbuddy\.cn)?/pages/assets/([^/\s\"')]+)/(asset_[0-9a-f]{24})\.webp",
+    re.IGNORECASE,
+)
+_IMAGE_MARKER_RE = re.compile(r"__QB_IMAGE_[A-Z0-9_]+__")
 _VALIDATION_RECEIPT_VERSION = "qb_validation_receipt_v1"
 _PROGRESS_SHELL_THEME = {
     "chrome_bg": "#ffffff",
@@ -424,8 +432,14 @@ def _strip_html_text(value):
 
 
 def _page_headings(html):
+    source = re.sub(
+        r"<(script|style|template)\b[^>]*>.*?</\1>",
+        " ",
+        str(html or ""),
+        flags=re.I | re.S,
+    )
     headings = []
-    for match in re.finditer(r"<h([2-3])\b([^>]*)>(.*?)</h\1>", str(html or ""), re.I | re.S):
+    for match in re.finditer(r"<h([2-3])\b([^>]*)>(.*?)</h\1>", source, re.I | re.S):
         attrs = match.group(2)
         if re.search(r"\bid\s*=\s*(['\"])sharePosterTitle\1", attrs, re.I):
             continue
@@ -1724,6 +1738,21 @@ def _validate_fork_manifest(params, template_resolution, final_html):
         return None, {"code": 1, "message": "fork_manifest 未完整记录来源 HTML 的 grant_ids"}
     if html_signature_hashes != manifest_signature_hashes:
         return None, {"code": 1, "message": "fork_manifest 未完整记录来源 HTML 的 signature 指纹"}
+    source_managed_images = manifest.get("source_managed_images") or []
+    if not isinstance(source_managed_images, list):
+        return None, {"code": 1, "message": "fork_manifest.source_managed_images 必须是数组"}
+    for index, image in enumerate(source_managed_images):
+        if not isinstance(image, dict):
+            return None, {"code": 1, "message": f"fork_manifest.source_managed_images[{index}] 必须是对象"}
+        image_file = _fork_path(image.get("image_file"))
+        expected_image_sha = str(image.get("sha256") or "").lower()
+        marker = str(image.get("marker") or "")
+        if not image_file or not os.path.isfile(image_file) or not expected_image_sha or not marker:
+            return None, {"code": 1, "message": f"fork_manifest.source_managed_images[{index}] 缺少文件/marker/hash"}
+        with open(image_file, "rb") as handle:
+            actual_image_sha = hashlib.sha256(handle.read()).hexdigest()
+        if actual_image_sha != expected_image_sha:
+            return None, {"code": 1, "message": f"fork 来源托管图片 SHA256 校验失败: {image.get('source_asset_id') or index}"}
     try:
         minimum_packages = int(manifest.get("minimum_target_package_count", len(manifest_packages)) or 0)
         minimum_grants = int(manifest.get("minimum_target_grant_count", len(manifest_grants)) or 0)
@@ -1801,6 +1830,7 @@ def _validate_fork_manifest(params, template_resolution, final_html):
         "required_outputs": required_outputs,
         "package_runtime_check": package_output_check,
         "card_runtime_required": bool(manifest.get("card_runtime_required")),
+        "source_managed_images": source_managed_images,
     }
     return summary, None
 
@@ -2571,14 +2601,22 @@ def cmd_fork_validate(params):
             "source_template_id": (template_resolution or {}).get("source_template_id") or "",
         }
         return validation_error
-    if not validation:
-        return {"code": 1, "error": "FORK_CONTEXT_REQUIRED", "message": "fork_validate 需要已绑定的 fork task 或 source_template_id + manifest"}
+    manifest_validation = ({"ok": True, **validation} if validation else {
+        "ok": True,
+        "required": False,
+        "mode": "unmatched",
+    })
+    image_validation, image_error = _validate_fork_images(final_html, params.get("page_id"))
+    if image_error:
+        image_error["fork_manifest_validation"] = manifest_validation
+        return image_error
     return {
         "code": 0,
-        "message": "fork 工作 HTML 门禁校验通过，可以进入浏览器验收",
-        "fork_manifest_validation": {"ok": True, **validation},
+        "message": "发布前 HTML 门禁校验通过，可以进入浏览器验收",
+        "fork_manifest_validation": manifest_validation,
         "fork_task_binding": fork_task_binding,
         "html_sha256": hashlib.sha256(final_html.encode("utf-8")).hexdigest(),
+        "image_validation": image_validation,
     }
 
 
@@ -2590,6 +2628,96 @@ def _fetch_oss(url):
             return resp.read().decode("utf-8", errors="replace"), None
     except Exception as e:
         return None, {"code": 1, "message": f"从 OSS 下载失败: {e}", "url": url}
+
+
+def _fetch_public_bytes(url):
+    req = urllib.request.Request(url, headers={"Accept": "image/webp,image/*"}, method="GET")
+    try:
+        with C._NO_PROXY_OPENER.open(req, timeout=_DEFAULT_TIMEOUT) as resp:
+            return resp.read(), None
+    except Exception as exc:
+        return None, {"code": 1, "error": "PAGE_ASSET_NOT_AVAILABLE", "message": f"下载来源托管图片失败: {exc}", "url": url}
+
+
+def _prepare_fork_managed_images(html, output_dir):
+    assets_dir = os.path.join(output_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    download_cache = {}
+    manifest_images = []
+    occurrence = 0
+
+    def replace(match):
+        nonlocal occurrence
+        occurrence += 1
+        source_page_id, asset_id = match.group(1), match.group(2)
+        source_url = f"https://pages.quantbuddy.cn/pages/assets/{source_page_id}/{asset_id}.webp"
+        if source_url not in download_cache:
+            payload, error = _fetch_public_bytes(source_url)
+            if error:
+                raise RuntimeError(json.dumps(error, ensure_ascii=False))
+            if not (payload and len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"):
+                raise RuntimeError(json.dumps({
+                    "code": 1,
+                    "error": "PAGE_ASSET_NOT_AVAILABLE",
+                    "message": f"来源托管图片不是有效 WebP: {asset_id}",
+                    "url": source_url,
+                }, ensure_ascii=False))
+            image_file = os.path.join(assets_dir, f"{asset_id}.webp")
+            with open(image_file, "wb") as handle:
+                handle.write(payload)
+            download_cache[source_url] = {
+                "image_file": image_file,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        marker = f"__QB_IMAGE_FORK_{occurrence:03d}_{asset_id[6:14].upper()}__"
+        cached = download_cache[source_url]
+        manifest_images.append({
+            "name": f"fork-image-{occurrence}",
+            "logical_name": f"fork-{asset_id[6:18]}",
+            "source_page_id": source_page_id,
+            "source_asset_id": asset_id,
+            "source_url": source_url,
+            "image_file": cached["image_file"],
+            "marker": marker,
+            "sha256": cached["sha256"],
+        })
+        return marker
+
+    try:
+        working = _MANAGED_IMAGE_RE.sub(replace, str(html or ""))
+    except RuntimeError as exc:
+        try:
+            return None, None, json.loads(str(exc))
+        except json.JSONDecodeError:
+            return None, None, {"code": 1, "error": "PAGE_ASSET_NOT_AVAILABLE", "message": str(exc)}
+    return working, manifest_images, None
+
+
+def _validate_fork_images(html, page_id):
+    text = str(html or "")
+    markers = sorted(set(_IMAGE_MARKER_RE.findall(text)))
+    if markers:
+        return None, {"code": 1, "error": "UNRESOLVED_IMAGE_MARKER", "message": "fork HTML 仍含未解析图片 marker: " + ", ".join(markers)}
+    insecure = re.findall(r"(?:src\s*=\s*[\"']|url\(\s*[\"']?)(http://[^\"')\s]+)", text, re.IGNORECASE)
+    if insecure:
+        return None, {"code": 1, "error": "HTTP_IMAGE_FORBIDDEN", "message": "图片必须使用 HTTPS: " + ", ".join(sorted(set(insecure)))}
+    managed = [{"page_id": m.group(1), "asset_id": m.group(2), "url": m.group(0)} for m in _MANAGED_IMAGE_RE.finditer(text)]
+    cross = [item for item in managed if str(item["page_id"]) != str(page_id or "")]
+    if cross:
+        return None, {"code": 1, "error": "CROSS_PAGE_ASSET_REFERENCE", "message": "fork HTML 引用了其他 page_id 的托管图片: " + ", ".join(sorted({item["asset_id"] for item in cross}))}
+    if managed:
+        listed = cmd_image_list({"page_id": page_id})
+        if not (isinstance(listed, dict) and listed.get("code") == 0):
+            return None, {"code": 1, "error": "PAGE_ASSET_CHECK_FAILED", "message": "无法校验目标页面托管图片", "image_list": listed}
+        active = {str(item.get("asset_id")) for item in (listed.get("list") or []) if item.get("status") == "active"}
+        missing = sorted({item["asset_id"] for item in managed if item["asset_id"] not in active})
+        if missing:
+            return None, {"code": 1, "error": "PAGE_ASSET_NOT_AVAILABLE", "message": "托管图片不存在或已撤销: " + ", ".join(missing)}
+    image_urls = re.findall(r"<img\b[^>]*\bsrc\s*=\s*[\"'](https://[^\"']+)[\"']", text, re.IGNORECASE)
+    image_urls += re.findall(r"url\(\s*[\"']?(https://[^\"')\s]+)", text, re.IGNORECASE)
+    external = sorted({url for url in image_urls if not _MANAGED_IMAGE_RE.fullmatch(url)})
+    warnings = [{"type": "external_https_image", "url": url} for url in external]
+    return {"managed_asset_ids": sorted({item["asset_id"] for item in managed}), "external_image_warnings": warnings}, None
 
 
 def cmd_download(params):
@@ -2878,14 +3006,8 @@ def _http_multipart(url, api_key, fields, file_field, file_bytes, file_name, fil
     buf.write(file_bytes + crlf)
     buf.write(b"--" + boundary.encode() + b"--" + crlf)
 
-    hdrs = {
-        "Content-Type": f"multipart/form-data; boundary={boundary}",
-        "Authorization": f"Bearer {api_key}",
-        "x-skill-version": C.SKILL_VERSION,
-        "x-skill-name": C.SKILL_NAME,
-    }
-    if C.SKILL_CHANNEL:
-        hdrs["x-skill-channel"] = C.SKILL_CHANNEL
+    hdrs = C.headers(api_key)
+    hdrs["Content-Type"] = f"multipart/form-data; boundary={boundary}"
     req = urllib.request.Request(url, data=buf.getvalue(), headers=hdrs, method="POST")
     try:
         with C._NO_PROXY_OPENER.open(req, timeout=_UPLOAD_TIMEOUT) as resp:
@@ -2922,6 +3044,62 @@ def cmd_thumbnail(params):
     return _http_multipart(C.api_url(endpoint, _PATH["thumbnail"]), api_key,
                            {"page_id": params["page_id"]},
                            "file", img_bytes, file_name, content_type)
+
+
+def _resolve_local_image_file(params):
+    image_file = params.get("image_file") or params.get("image") or params.get("file")
+    if not image_file:
+        return None, {"code": 1, "error": "IMAGE_REQUIRED", "message": "image_file 必填"}
+    path = os.path.abspath(os.path.expanduser(str(image_file)))
+    if not os.path.isfile(path):
+        return None, {"code": 1, "error": "IMAGE_REQUIRED", "message": f"image_file 不存在: {path}"}
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        return None, {"code": 1, "error": "BAD_IMAGE_TYPE", "message": "image_file 扩展名仅支持 PNG/JPEG/WebP"}
+    size = os.path.getsize(path)
+    if size > _MAX_PAGE_IMAGE_BYTES:
+        return None, {"code": 1, "error": "IMAGE_TOO_LARGE", "message": f"原始图片 {size} 字节，超过 5MB 上限"}
+    return path, None
+
+
+def cmd_image_upload(params):
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    page_id = str(params.get("page_id") or "").strip()
+    logical_name = str(params.get("logical_name") or "").strip()
+    task_id = str(params.get("task_id") or C.current_trace_context().get("task_id") or "").strip()
+    if not page_id:
+        return {"code": 1, "error": "PAGE_ID_REQUIRED", "message": "image_upload 需要 page_id"}
+    if not logical_name:
+        return {"code": 1, "error": "LOGICAL_NAME_REQUIRED", "message": "image_upload 需要 logical_name"}
+    if not task_id:
+        return {"code": 1, "error": "TRACE_CONTEXT_REQUIRED", "message": "image_upload 需要 task_id"}
+    path, error = _resolve_local_image_file(params)
+    if error:
+        return error
+    with open(path, "rb") as handle:
+        image_bytes = handle.read()
+    ext = os.path.splitext(path)[1].lower()
+    content_type = "image/jpeg" if ext in (".jpg", ".jpeg") else ("image/webp" if ext == ".webp" else "image/png")
+    return _http_multipart(
+        C.api_url(endpoint, _PATH["image_upload"]),
+        api_key,
+        {"page_id": page_id, "logical_name": logical_name, "task_id": task_id},
+        "file",
+        image_bytes,
+        os.path.basename(path),
+        content_type,
+    )
+
+
+def cmd_image_list(params):
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    page_id = str(params.get("page_id") or "").strip()
+    if not page_id:
+        return {"code": 1, "error": "PAGE_ID_REQUIRED", "message": "image_list 需要 page_id"}
+    url = C.api_url(endpoint, _PATH["image_list"]) + "?" + _up.urlencode({"page_id": page_id})
+    return C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
 
 
 def cmd_tags(params):
@@ -3423,7 +3601,9 @@ def cmd_fork_prepare(params):
     if not isinstance(replacements, dict):
         return {"code": 1, "message": "fork_prepare.asset_replacements 必须是对象"}
     replacements = _expand_asset_replacements(replacements)
-    working_html = source_html
+    working_html, source_managed_images, image_error = _prepare_fork_managed_images(source_html, output_dir)
+    if image_error:
+        return image_error
     replacement_audit = []
     for source_value, target_value in sorted(replacements.items(), key=lambda item: len(str(item[0])), reverse=True):
         source_text = str(source_value or "")
@@ -3451,7 +3631,8 @@ def cmd_fork_prepare(params):
     source_h2 = [heading for heading in _html_headings(source_html, levels=(2,)) if heading not in ("分享海报",)]
     required_sections = _unique_strings(params.get("required_sections") or source_h2)
     required_outputs = _unique_strings(params.get("required_outputs") or _template_required_outputs(record))
-    source_markers = _unique_strings(list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()))
+    image_markers = [item["marker"] for item in source_managed_images]
+    source_markers = _unique_strings(list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()) + image_markers)
     card_runtime_required = bool(
         params.get("card_runtime_required")
         if "card_runtime_required" in params
@@ -3499,6 +3680,7 @@ def cmd_fork_prepare(params):
         "card_runtime_required": card_runtime_required,
         "agent_reply_template": record.get("agent_reply_template"),
         "page_context_reference": context or None,
+        "source_managed_images": source_managed_images,
     }
     with open(manifest_file, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
@@ -3526,6 +3708,7 @@ def cmd_fork_prepare(params):
         "required_outputs": required_outputs,
         "card_runtime_required": card_runtime_required,
         "replacement_audit": replacement_audit,
+        "images": source_managed_images,
         "page_context": context or None,
         "agent_reply_template": record.get("agent_reply_template"),
         "fork_task_binding": fork_task_binding,
@@ -4028,6 +4211,8 @@ _COMMANDS = {
     "init_reply_metadata": cmd_init_reply_metadata,
     "revoke": cmd_revoke,
     "thumbnail": cmd_thumbnail,
+    "image_upload": cmd_image_upload,
+    "image_list": cmd_image_list,
     "tags": cmd_tags,
     "autotag": cmd_autotag,
     "publish_community": cmd_publish_community,
@@ -4044,7 +4229,7 @@ _COMMANDS = {
 }
 
 _TRACE_REQUIRED_COMMANDS = {
-    "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate",
+    "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate", "image_upload",
 }
 
 

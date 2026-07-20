@@ -1,5 +1,18 @@
 # static_page — 静态页托管（上传 / 替换 HTML → 公开可分享链接）
 
+## 正文图片命令（0.6.15）
+
+先有目标 `page_id`，再上传图片：
+
+```bash
+python scripts/static_page.py image_upload @params.json
+python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
+```
+
+`image_upload` 参数为 `task_id/page_id/image_file/logical_name`。本地只预检文件存在、扩展名为 PNG/JPEG/WebP 和 5MB 上限；真实 magic bytes、尺寸、转码和配额以服务端为准。成功响应的 `url` 是同页、同域、immutable WebP，必须用该绝对 URL 写入 HTML。
+
+`image_list` 用于确认目标页资产为 active。Agent 不提供删除命令；发布失败遗留的 unused 图片由 growthX 后台两段式安全删除。公共 multipart helper 从 `common.headers()` 继承 `x-task-id/x-skill-version/x-skill-name/x-skill-channel` 后只覆盖 `Content-Type`，缩略图和正文图片的审计上下文一致。
+
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
 > **首链进度页**：新会话先查官方精选+社区范式卡；direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize。fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护同一首链。

@@ -1,5 +1,22 @@
 # publish_workflow — 验证、注册、凭证替换与发布的一次性编排
 
+## `images[]` 正文图片绑定
+
+图片与 package/grant marker 一起在任何网络写入前预检：文件必须存在、扩展名合法、≤5MB；所有 marker 全局唯一，并在 HTML 中恰好出现一次。
+
+```json
+{
+  "images": [{
+    "name": "business-model",
+    "image_file": "output/images/business-model.png",
+    "logical_name": "business-model",
+    "marker": "__QB_IMAGE_BUSINESS_MODEL__"
+  }]
+}
+```
+
+顺序固定为 package-set 验证 → package/grant 注册与 marker 替换 → 图片上传到 `publish_verified.page_id` 并替换 marker → 写 prepared HTML → 单次 `publish_verified`。图片上传或发布失败不会自动删除资产；重试依赖确定性 `asset_id` 复用，未引用资产在后台显示为 unused。
+
 `scripts/publish_workflow.py` 用于 fork/unmatched 的多公式包页面。它按固定顺序执行：
 
 1. 在任何网络写入前检查模板文件和全部 marker；每个 marker 必须非空、互不重复，并且在 HTML 中恰好出现一次。

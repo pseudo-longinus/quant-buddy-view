@@ -1,5 +1,11 @@
 # Guide · 手搓 bespoke 页（自由排版 + 共享取数内核）
 
+## 正文图片
+
+bespoke 页面不得直接引用本地路径、HTTP 图片或其他 page_id 的托管图片。先 `image_upload`，再使用绝对 `https://pages.quantbuddy.cn/pages/assets/{当前 page_id}/{asset_id}.webp`。每个 `<img>` 明确写 `width`、`height`、有意义的 `alt` 和稳定布局尺寸；首屏或 `[data-qb-poster-target]` 内图片禁止 lazy，正文下方图片可使用 `loading="lazy" decoding="async"`。
+
+`verify_page.mjs` 会触发懒加载、等待 `img.decode()`、检查 `complete/naturalWidth`、记录图片 requestfailed/非 2xx，并对同域 WebP 检查海报目标包含关系与 canvas 可导出性。错误摘要会移除 URL 查询签名。
+
 > 场景：`build_dashboard` 的通用 panel 满足不了——你要的是有版式设计感、自定义 SVG/交互的那种页面
 > （像商品期货研报、泡沫监测终端、个股画像卡）。**呈现自由发挥，但"拿数据"这层别再各写各的。**
 

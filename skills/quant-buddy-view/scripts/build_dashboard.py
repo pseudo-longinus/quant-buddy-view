@@ -249,8 +249,9 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     """组装 HTML。骨架自包含（样式/内核内联），数据走运行时实时取数：页面内联 endpoint+凭证 + 取数 JS。
     grants：panel 里引用 grant_id 的数据授权列表 [{grant_id,signature}]，与公式包 panel 同页并存。"""
     share = _share_config(spec)
+    page_mode = "live" if package_id or grants else "static"
     boot = {
-        "mode": "live",
+        "mode": page_mode,
         "panels": panels,
         "grants": grants or [],
         "generatedAt": generated_at,
@@ -501,6 +502,47 @@ function renderText(el, panel) {
   el.innerHTML = '<div class="text-panel">' + esc(text).replace(/\n/g, '<br>') + '</div>';
 }
 
+function openImageLightbox(src, alt, caption, trigger) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'image-lightbox';
+  dialog.setAttribute('aria-label', '图片大图预览');
+  dialog.innerHTML = '<div class="image-lightbox__shell">' +
+    '<button type="button" class="image-lightbox__close" aria-label="关闭大图">×</button>' +
+    '<figure class="image-lightbox__figure"><img src="' + esc(src) + '" alt="' + esc(alt) + '" decoding="async">' +
+    (caption ? '<figcaption>' + esc(caption) + '</figcaption>' : '') + '</figure></div>';
+  const close = () => { if (dialog.open) dialog.close(); };
+  dialog.querySelector('.image-lightbox__close').addEventListener('click', close);
+  dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
+  dialog.addEventListener('close', () => {
+    document.body.classList.remove('image-lightbox-open');
+    dialog.remove();
+    if (trigger && document.contains(trigger)) trigger.focus();
+  }, {once: true});
+  document.body.appendChild(dialog);
+  document.body.classList.add('image-lightbox-open');
+  dialog.showModal();
+  dialog.querySelector('.image-lightbox__close').focus();
+}
+
+function renderImage(el, panel) {
+  const url = panel.image_url || '';
+  const fit = ['cover', 'contain', 'fill', 'none', 'scale-down'].includes(panel.fit) ? panel.fit : 'contain';
+  const width = Number(panel.width || 0);
+  const height = Number(panel.height || 0);
+  const eager = panel.loading === 'lazy' ? 'lazy' : 'eager';
+  const alt = panel.alt || panel.title || '';
+  const zoomable = panel.zoomable !== false;
+  const attrs = (width > 0 ? ' width="' + width + '"' : '') + (height > 0 ? ' height="' + height + '"' : '');
+  const image = '<img src="' + esc(url) + '" alt="' + esc(alt) + '" loading="' + eager + '" decoding="async"' + attrs + ' style="object-fit:' + fit + '">';
+  const visual = zoomable
+    ? '<button type="button" class="image-zoom-trigger" aria-label="查看大图：' + esc(alt) + '">' + image + '<span class="image-zoom-hint" aria-hidden="true">查看大图</span></button>'
+    : image;
+  el.innerHTML = '<figure class="image-panel">' + visual +
+    (panel.caption ? '<figcaption>' + esc(panel.caption) + '</figcaption>' : '') + '</figure>';
+  const trigger = el.querySelector('.image-zoom-trigger');
+  if (trigger) trigger.addEventListener('click', () => openImageLightbox(url, alt, panel.caption || '', trigger));
+}
+
 function renderChart(el, tab, panel) {
   const chart = echarts.init(el);
   const xName = panel.x || tab.columns[0];
@@ -577,6 +619,7 @@ function buildSkeletons() {
     const reg = {panel: panel, body: made.body, span: made.span, filled: false};
     PANEL_REG.push(reg);
     if (type === 'text') { renderText(made.body, panel); reg.filled = true; return; }
+    if (type === 'image') { renderImage(made.body, panel); reg.filled = true; return; }
     made.body.innerHTML = '<p class="empty">加载中…</p>';
     const name = panel.output;
     if (name) (OUTPUT_INDEX[name] = OUTPUT_INDEX[name] || []).push(reg);
@@ -825,9 +868,13 @@ document.addEventListener('DOMContentLoaded', () => {
 """
     render_js = render_js.replace("__BOOT__", boot_json)
 
-    mode_note = "数据：打开时实时取最新"
-    mode_label = "Live HTML"
+    mode_note = "数据：打开时实时取最新" if page_mode == "live" else "内容：静态展示"
+    mode_label = "Live HTML" if page_mode == "live" else "Static HTML"
     mode_label_esc = html_escape(mode_label)
+    poster_target_attr = " data-qb-poster-target" if any(
+        isinstance(panel, dict) and (panel.get("type") or "").lower() == "image"
+        for panel in panels
+    ) else ""
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -898,6 +945,23 @@ document.addEventListener('DOMContentLoaded', () => {
   .big .unit {{ font-size: 16px; font-weight: 400; margin-left: 6px; opacity: .7; }}
   .desc {{ color:var(--qb-muted); font-size:12px; line-height:1.35; margin-top:2px; }}
   .text-panel {{ color:#334155; font-size:13px; line-height:1.7; max-height:7em; overflow:auto; padding-right:4px; }}
+  .image-panel {{ margin:0; display:grid; gap:8px; }}
+  .image-panel img {{ display:block; width:100%; max-height:520px; border-radius:10px; background:#f1f5f9; }}
+  .image-panel figcaption {{ color:#64748b; font-size:12px; line-height:1.6; }}
+  .image-zoom-trigger {{ position:relative; display:block; width:100%; padding:0; overflow:hidden; border:0; border-radius:10px; background:transparent; cursor:zoom-in; }}
+  .image-zoom-trigger:focus-visible {{ outline:3px solid var(--qb-accent); outline-offset:3px; }}
+  .image-zoom-hint {{ position:absolute; right:10px; bottom:10px; padding:5px 9px; border:1px solid rgba(255,255,255,.35); border-radius:999px; background:rgba(16,24,39,.78); color:#fff; font-size:12px; line-height:1.2; opacity:0; transform:translateY(4px); transition:opacity .16s ease, transform .16s ease; pointer-events:none; }}
+  .image-zoom-trigger:hover .image-zoom-hint, .image-zoom-trigger:focus-visible .image-zoom-hint {{ opacity:1; transform:none; }}
+  body.image-lightbox-open {{ overflow:hidden; }}
+  .image-lightbox {{ width:min(96vw, 1600px); max-width:none; max-height:94vh; padding:0; overflow:hidden; border:1px solid rgba(255,255,255,.18); border-radius:14px; background:#0b1220; color:#fff; box-shadow:0 28px 90px rgba(0,0,0,.48); }}
+  .image-lightbox::backdrop {{ background:rgba(3,8,18,.82); backdrop-filter:blur(5px); }}
+  .image-lightbox__shell {{ position:relative; display:grid; max-height:94vh; padding:42px 18px 16px; }}
+  .image-lightbox__close {{ position:absolute; z-index:1; top:8px; right:10px; width:34px; height:34px; padding:0; border:1px solid rgba(255,255,255,.24); border-radius:50%; background:rgba(255,255,255,.10); color:#fff; font:400 26px/30px Arial,sans-serif; cursor:pointer; }}
+  .image-lightbox__close:hover {{ background:rgba(255,255,255,.18); }}
+  .image-lightbox__close:focus-visible {{ outline:3px solid #f2c86f; outline-offset:2px; }}
+  .image-lightbox__figure {{ display:grid; gap:10px; min-height:0; margin:0; }}
+  .image-lightbox__figure img {{ display:block; width:auto; max-width:100%; height:auto; max-height:calc(94vh - 92px); margin:auto; border-radius:8px; object-fit:contain; }}
+  .image-lightbox__figure figcaption {{ overflow:hidden; color:#d4dbe7; font-size:12px; line-height:1.5; text-align:center; text-overflow:ellipsis; white-space:nowrap; }}
   .empty {{ color: #8a9099; padding: 12px 0; }}
   .empty.err {{ color: #d33; }}
   pre {{ margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; }}
@@ -922,7 +986,16 @@ document.addEventListener('DOMContentLoaded', () => {
     .big {{ font-size:24px; }}
     .big .unit {{ font-size:13px; margin-left:4px; }}
     .card-line {{ padding:14px 12px 16px; }}
+    .image-lightbox {{ width:96vw; max-height:92vh; border-radius:10px; }}
+    .image-lightbox__shell {{ max-height:92vh; padding:40px 10px 10px; }}
+    .image-lightbox__figure img {{ max-height:calc(92vh - 82px); }}
     .footer-inner {{ flex-direction:column; }}
+  }}
+  @media (hover:none) {{
+    .image-zoom-hint {{ opacity:1; transform:none; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .image-zoom-hint {{ transition:none; }}
   }}
   @media (max-width: 360px) {{
     .card-number.span-auto {{ grid-column: span 12; }}
@@ -951,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', () => {
 </head>
 <body>
 {shared_header}
-<main>
+<main{poster_target_attr}>
   {card_runtime_artifacts}
   <section class="std-hero">
     <div class="eyebrow">{mode_note}</div>
@@ -1085,7 +1158,7 @@ def _inspect_outputs(panels, outputs):
     """逐 panel 体检其引用的产出，返回问题列表（空=全部健康）。"""
     problems = []
     for p in panels:
-        if (p.get("type") or "").lower() == "text":
+        if (p.get("type") or "").lower() in ("text", "image"):
             continue
         name = p.get("output")
         out = outputs.get(name)
@@ -1315,6 +1388,24 @@ def _validate_template_contract(params, panels):
         "issues": issues,
         "hint": "请先通过 static_page.py templates/template 复用在线个股画像模板；若自行构建 spec，保留 template=single-stock，并补齐阅读摘要、px/chg/ret20/ret60/pe/pb/amt_yi、subtitle 与日期口径。",
     }
+
+
+def _validate_image_panels(panels):
+    for index, panel in enumerate(panels):
+        if not isinstance(panel, dict) or (panel.get("type") or "").lower() != "image":
+            continue
+        image_url = str(panel.get("image_url") or "").strip()
+        if not re.fullmatch(r"https://pages\.quantbuddy\.cn/pages/assets/[^/]+/asset_[0-9a-f]{24}\.webp", image_url):
+            return {
+                "code": 1,
+                "error": "IMAGE_URL_REQUIRED",
+                "message": f"panels[{index}] image 只接受已上传的 pages.quantbuddy.cn 托管 WebP image_url",
+            }
+        if not str(panel.get("alt") or "").strip():
+            return {"code": 1, "error": "IMAGE_ALT_REQUIRED", "message": f"panels[{index}] image.alt 必填"}
+        if "zoomable" in panel and not isinstance(panel.get("zoomable"), bool):
+            return {"code": 1, "error": "IMAGE_ZOOMABLE_INVALID", "message": f"panels[{index}] image.zoomable 必须是布尔值"}
+    return None
 
 
 def _manifest_path_for(out_file):
@@ -1782,6 +1873,9 @@ def cmd_build(params):
     panels = params.get("panels")
     if not isinstance(panels, list) or not panels:
         return {"code": 1, "message": "spec.panels 必须是非空数组"}
+    image_panel_error = _validate_image_panels(panels)
+    if image_panel_error:
+        return image_panel_error
     template_err = _validate_template_contract(params, panels)
     if template_err:
         return template_err
@@ -1806,7 +1900,11 @@ def cmd_build(params):
         if not pkg or not sig:
             return {"code": 1, "message": "需要 package_id + signature 才能在页面内实时取数（signature 可由本地凭证补全）"}
 
-    if not pkg and not grants:
+    static_only = all(
+        isinstance(p, dict) and (p.get("type") or "").lower() in ("text", "image")
+        for p in panels
+    )
+    if not pkg and not grants and not static_only:
         return {"code": 1, "message": "spec.panels 未引用任何 output（公式包）或 grant_id（数据授权），无法确定取数来源"}
 
     endpoint = C.endpoint_of(C.load_config())  # query 无需 api_key，仅取 endpoint
@@ -1905,10 +2003,11 @@ def cmd_build(params):
         manifest["thumbnail_generation"] = thumbnail_info["generation"]
     manifest_path = _write_manifest(out_file, manifest)
 
+    page_mode = "live" if pkg or grants else "static"
     result = {
         "code": 0,
         "out_file": out_file,
-        "mode": "live",
+        "mode": page_mode,
         "package_id": pkg,
         "grants": [g["grant_id"] for g in grants],
         "panels": len(panels),
@@ -1916,12 +2015,12 @@ def cmd_build(params):
         "manifest": manifest_path,
         "thumbnail_file": thumbnail_info.get("file"),
         "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
-        "message": "已生成实时取数看板 HTML",
+        "message": "已生成实时取数看板 HTML" if page_mode == "live" else "已生成静态看板 HTML",
     }
     if thumbnail_info.get("generation"):
         result["thumbnail_generation"] = thumbnail_info["generation"]
-    if legacy_mode and legacy_mode != "live":
-        result["note"] = "spec 里的 mode 字段已忽略，页面按实时取数生成。"
+    if legacy_mode and legacy_mode != page_mode:
+        result["note"] = f"spec 里的 mode 字段已忽略，页面按实际数据源生成 {page_mode} 模式。"
     if single_stock_facts:
         result["facts"] = {
             k: {"value": round(v["value"], 4), "date": v.get("date")}
