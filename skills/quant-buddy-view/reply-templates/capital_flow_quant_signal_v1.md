@@ -19,7 +19,7 @@ Use for pages focused on capital flow, turnover, volume-price confirmation, and 
 - If detailed main/large/small order data is unavailable, say so instead of inventing a breakdown.
 - Do not predict next-day limit-up probability.
 - Preserve capital-flow composition, volume-price confirmation, sector linkage, cited news, signal judgment, risks, and disclaimer.
-- When a requested flow field is unavailable, write `本轮未返回` and do not replace it with turnover or transaction amount.
+- When the entire requested flow structure is unavailable, omit that optional section. For an occasional missing value inside a valid section use `--`; never replace flow with turnover or transaction amount.
 
 ## Markdown Skeleton
 

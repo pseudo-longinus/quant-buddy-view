@@ -2,7 +2,7 @@
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
-> **首链进度页**：新会话先查官方精选+社区范式卡；direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize。fork/unmatched 才用 `new_page`、`update_progress`、`publish_final` 维护同一首链。
+> **首链进度页**：新会话先查官方精选+社区范式卡；direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize。fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护同一首链。
 > 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`，后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
@@ -11,6 +11,7 @@
 |------|-------------|
 | 首链进度页 | 脚本包装：`new_page` 调 `uploadStaticPage`，`update_progress` 调 `updateStaticPage` |
 | 首链最终发布 | 脚本包装：`publish_final` 先调 `update_progress` 进入 `final_publish`，再调 `updateStaticPage` 写正式活页；失败时回写失败进度页 |
+| 分级验收发布 | 脚本包装：`publish_verified` 固定执行 `fork_validate → fork-local 浏览器门禁 → publish_final → public-smoke` |
 | 上传 | `POST /skill/uploadStaticPage` |
 | 替换 | `POST /skill/updateStaticPage` |
 | 下载 | `GET /skill/getStaticPage?page_id=&url=` （返回公开链接 + 元信息，不含字节） |
@@ -45,11 +46,8 @@ python scripts/static_page.py update_progress '{"task_id":"task_xxx","page_id":"
 # fork 来源准备：下载来源 HTML 并生成 fork_manifest_v1
 python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
 
-# 编辑 working_html_file 后、浏览器验收前先复用发布门禁（不发布）
-python scripts/static_page.py fork_validate '{"task_id":"task_xxx","html_file":"output/forks/page_template_xxx/page_template_xxx.fork.html"}'
-
-# fork 首链最终发布：仍是同一个 page_id / URL，失败时会回写失败进度页
-python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json"}'
+# fork 首链分级验收并发布：仍是同一个 page_id / URL
+python scripts/static_page.py publish_verified '{"task_id":"task_xxx","page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","validation_receipt_files":["receipt.json"]}'
 
 # 上传（推荐用 build_dashboard 产物文件）
 python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
@@ -161,6 +159,21 @@ python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_templa
 python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"目标标的估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
 ```
 
+新 fork 默认改用 `publish_verified`，由脚本一次完成发布前后验收。它在启动浏览器前完成 fork 来源、凭证 tuple、最终公式包输出和分位语义预检。manifest 的 `required_outputs` 必须真实存在于最终 HTML 所绑定公式包的输出 union 中；仅在 HTML 中声明 `QB_REQUIRED_OUTPUTS` 或其他同名字符串不能通过。若同一 `package_id` 对应多个 signature，则以 `credential_ambiguity` 拒绝发布。
+
+成功结果会返回 `agent_reply_contract_file + agent_reply_contract_sha256`、`reply_draft_file`、`reply_validation_params_file` 和 `reply_validation_command`。只把最终 Markdown 写入 draft 并执行返回的命令一次；validator 不接受手工重建的 contract。CLI stdout 只保留阶段摘要，完整结果写入返回的 `full_report_file`。
+
+浏览器 profile：
+
+- `full`：1440 / 390 / 320，结构或 CSS 大改时单独运行。
+- `fork-local`：发布前 1440 / 320，检查布局、占位符、控制台和可选 Card Runtime。
+- `public-smoke`：发布后单视口检查公网可达、核心内容、控制台和实时 hydrate，不重复完整布局验收。
+- `live-only`：direct/certified 页面只检查 Card Runtime hydrate。
+
+发布前失败返回 `published:false` 且不会调用 `publish_final`；发布成功后公网冒烟失败返回 `published:true, verified:false` 并保留最终公开 URL。
+
+包含多个公式包和数据授权时，使用 [publish_workflow.md](publish_workflow.md) 的单命令编排，把 package-set 验证、注册、marker 替换和 `publish_verified` 串联起来，避免 Agent 分步拼接。
+
 ## 公共页头页尾门禁
 
 `upload` / `update` 在真正请求服务端前会做一次本地 preflight：
@@ -248,7 +261,7 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 - `fork_prepare`：返回来源 HTML 与 `fork_manifest_v1` 文件路径，同时保持 `agent_reply_hint.terminal=false`；它是 fork 输入，不是完成证据。
 - `list` / 默认 `download`：只返回 `agent_reply_hint`，`resource_role=existing_page`。
 - `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。`waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`，只授权一次澄清停顿，不是业务完成证据。
-- 成功的 `upload` / `update` / `publish_final` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url`。
+- 成功的 `upload` / `update` / `publish_final` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`direct_deliver` 还附加只含公式 output 名称与脱敏 grant 字段路径的 `reply_data_availability`。
 - 只有终态 contract 可以触发最终回复；其中 `required=true` 时才要求读取 Markdown 回复骨架。任何 hint、来源模板 metadata 或 `terminal:false` 都表示必须继续工作。
 - `publish_final` 会 fail-closed 校验同一首链 `page_id` / URL、排除来源模板 URL；fork 还要求有效 manifest、禁止任一来源 package/grant 残留，并检查核心栏目、必需输出、Card Runtime 和用户自己的实时凭证。
 
@@ -375,9 +388,10 @@ scene_tags, paradigm_tags, recommend_tags }`。其中：
 **3) direct 命中**：范围一致时先发现成链接 → 一次性查询原页凭证并校验交付证据
 
 ```bash
-python scripts/formula_package.py query '{"task_id":"task_xxx","package_id":"pkg_xxx","signature":"sig_xxx","result_mode":"summary"}'
 python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
 ```
+
+命中后不要先单独查询公式包或数据授权；`direct_deliver` 内部负责一次模板详情、每个数据源一次查询和一次 finalize。成功响应还会返回完整 task ID 命名的 `agent_reply_contract_file`、`reply_draft_file`、`reply_validation_params_file` 与 `reply_validation_command`。Agent 根据 contract 的字段可用性和裁剪策略删除结构性空内容，只写入返回的草稿路径并执行校验命令一次；`valid=true` 后临时文件已清理，应立即最终回复，不再运行工具。
 
 **4) fork 成自己的页**：`fork_prepare` → 改资产/文案/凭证 → `publish_final`
 

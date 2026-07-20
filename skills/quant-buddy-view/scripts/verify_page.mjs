@@ -18,14 +18,24 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { resolveVerificationProfile } from './verification_profiles.mjs';
 
 const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
-const cardRuntimeOnly = args.includes('--card-runtime-only');
+const profileIdx = args.indexOf('--profile');
+const profileName = profileIdx >= 0 ? args[profileIdx + 1] : 'full';
+let verificationProfile;
+try {
+  verificationProfile = resolveVerificationProfile(profileName);
+} catch (err) {
+  fs.writeSync(1, JSON.stringify({ code: 1, error: err.code || 'UNKNOWN_VERIFICATION_PROFILE', message: err.message }) + '\n');
+  process.exit(1);
+}
+const cardRuntimeOnly = args.includes('--card-runtime-only') || verificationProfile.cardRuntimeOnly;
 const cardRuntime = args.includes('--card-runtime') || cardRuntimeOnly;
 const manifestIdx = args.indexOf('--manifest');
 const manifestPath = manifestIdx >= 0 ? args[manifestIdx + 1] : '';
-const valueFlags = new Set(['--manifest']);
+const valueFlags = new Set(['--manifest', '--profile']);
 const positionals = [];
 for (let i = 0; i < args.length; i += 1) {
   const arg = args[i];
@@ -38,12 +48,14 @@ for (let i = 0; i < args.length; i += 1) {
 }
 const target = positionals[0];
 
-const VIEWPORTS = [
-  { name: 'desktop', width: 1440, height: 1000, mobile: false },
-  { name: 'mobile390', width: 390, height: 844, mobile: true },
-  { name: 'mobile320', width: 320, height: 720, mobile: true },
-];
+const VIEWPORTS = verificationProfile.viewports;
 const CORE_ERROR_RE = /queryFormulaPackage|CORS|mixed-content|Failed to fetch|ReferenceError|TypeError/i;
+
+function sanitizeBrowserText(value) {
+  return String(value || '')
+    .replace(/https?:\/\/[^\s)'"<>]+/gi, '[URL]')
+    .replace(/([?&](?:x-amz-[^=]+|signature)\s*=)[^&\s]+/gi, '$1[REDACTED]');
+}
 
 function emit(obj) {
   fs.writeSync(1, JSON.stringify(obj, null, 2) + '\n');
@@ -55,7 +67,7 @@ function fail(message) {
 }
 
 if (!target) {
-  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only]');
+  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--profile full|fork-local|public-smoke|live-only] [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only]');
 }
 
 function delay(ms) {
@@ -502,12 +514,22 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
         if (['error', 'warning'].includes(msg.type())) {
           const text = msg.text();
           if (CORE_ERROR_RE.test(text)) {
-            consoleErrors.push({ viewport: viewport.name, type: msg.type(), text });
+            consoleErrors.push({ viewport: viewport.name, type: msg.type(), text: sanitizeBrowserText(text) });
           }
         }
       });
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(settleMs);
+      try {
+        await page.waitForFunction(
+          () => !window.QB_DATA_RUNTIME || Number(window.QB_DATA_RUNTIME.pending || 0) === 0,
+          null,
+          { timeout: 30000 },
+        );
+      } catch (error) {
+        consoleErrors.push({ viewport: viewport.name, type: 'error', text: 'QB_DATA_RUNTIME pending 等待超时（30s）' });
+      }
+      const hasRuntime = await page.evaluate(() => !!window.QB_DATA_RUNTIME);
+      await page.waitForTimeout(hasRuntime ? 250 : Math.max(settleMs, 3000));
       const metrics = await page.evaluate(pageMetricsExpression);
       results.push(viewportResult(viewport, metrics, options));
       await page.close();
@@ -526,6 +548,18 @@ function pageMetricsExpression() {
   const placeholderHits = ['QB_SHARED_', 'replace_with_signature', 'pkg_replace', '__PLACEHOLDER__']
     .filter(token => document.documentElement.innerHTML.includes(token));
   const placeholderOnly = visibleText.length > 0 && /^[—\-\s.0暂无数据等待取数加载中]+$/.test(visibleText);
+  const runtime = window.QB_DATA_RUNTIME && typeof window.QB_DATA_RUNTIME === 'object'
+    ? {
+        pending: Number(window.QB_DATA_RUNTIME.pending || 0),
+        status: String(window.QB_DATA_RUNTIME.status || ''),
+        transport: String(window.QB_DATA_RUNTIME.transport || ''),
+        error: window.QB_DATA_RUNTIME.error ? String(window.QB_DATA_RUNTIME.error) : null,
+      }
+    : null;
+  const failureTextHits = ['未返回可绘制数据', '取数失败', 'CSV 下载失败', 'CSV 解析失败']
+    .filter(token => bodyText.includes(token));
+  const loadingTextHits = ['取数中', '数据加载中', '加载中…', '加载中...']
+    .filter(token => bodyText.includes(token));
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const coverSelectors = [
     '[data-qb-live-card]',
@@ -738,6 +772,9 @@ function pageMetricsExpression() {
     hasH1: !!(h1 && h1.textContent.trim()),
     placeholderHits,
     placeholderOnly,
+    runtime,
+    failureTextHits,
+    loadingTextHits,
     cover: {
       rootFound: !!coverRoot,
       selector: elementLabel(coverRoot, coverSource),
@@ -786,6 +823,9 @@ function viewportResult(viewport, metrics, options = {}) {
     hasH1: metrics.hasH1,
     placeholderHits: metrics.placeholderHits,
     placeholderOnly: metrics.placeholderOnly,
+    runtime: metrics.runtime,
+    failureTextHits: metrics.failureTextHits || [],
+    loadingTextHits: metrics.loadingTextHits || [],
   };
   return result;
 }
@@ -1082,13 +1122,13 @@ async function cdpBrowserChecks(url, options = {}) {
     cdp.onEvent(msg => {
       if (msg.method === 'Runtime.exceptionThrown') {
         const text = msg.params?.exceptionDetails?.text || 'Runtime exception';
-        if (CORE_ERROR_RE.test(text)) consoleErrors.push({ viewport: 'unknown', type: 'error', text });
+        if (CORE_ERROR_RE.test(text)) consoleErrors.push({ viewport: 'unknown', type: 'error', text: sanitizeBrowserText(text) });
       }
       if (msg.method === 'Runtime.consoleAPICalled') {
         const type = msg.params?.type || '';
         const text = (msg.params?.args || []).map(arg => String(arg.value || arg.description || '')).join(' ');
         if (['error', 'warning', 'warn'].includes(type) && CORE_ERROR_RE.test(text)) {
-          consoleErrors.push({ viewport: 'unknown', type, text });
+          consoleErrors.push({ viewport: 'unknown', type, text: sanitizeBrowserText(text) });
         }
       }
     });
@@ -1106,14 +1146,31 @@ async function cdpBrowserChecks(url, options = {}) {
       const loaded = cdp.waitForEvent('Page.loadEventFired', 30000).catch(() => null);
       await cdp.send('Page.navigate', { url });
       await loaded;
-      await delay(settleMs);
+      const runtimeDeadline = Date.now() + 30000;
+      for (;;) {
+        const state = await cdp.send('Runtime.evaluate', {
+          expression: `!window.QB_DATA_RUNTIME || Number(window.QB_DATA_RUNTIME.pending || 0) === 0`,
+          returnByValue: true,
+        });
+        if (state.result && state.result.value === true) break;
+        if (Date.now() >= runtimeDeadline) {
+          consoleErrors.push({ viewport: viewport.name, type: 'error', text: 'QB_DATA_RUNTIME pending 等待超时（30s）' });
+          break;
+        }
+        await delay(100);
+      }
+      const runtimePresent = await cdp.send('Runtime.evaluate', {
+        expression: `!!window.QB_DATA_RUNTIME`,
+        returnByValue: true,
+      });
+      await delay(runtimePresent.result && runtimePresent.result.value ? 250 : Math.max(settleMs, 3000));
       const evaluated = await cdp.send('Runtime.evaluate', {
         expression: `(${pageMetricsExpression.toString()})()`,
         returnByValue: true,
         awaitPromise: true,
       });
       if (evaluated.exceptionDetails) {
-        consoleErrors.push({ viewport: viewport.name, type: 'error', text: evaluated.exceptionDetails.text || 'Runtime.evaluate failed' });
+        consoleErrors.push({ viewport: viewport.name, type: 'error', text: sanitizeBrowserText(evaluated.exceptionDetails.text || 'Runtime.evaluate failed') });
         continue;
       }
       results.push(viewportResult(viewport, evaluated.result.value, options));
@@ -1165,10 +1222,16 @@ function summarize(staticResult, browserResult, options) {
   const warnings = [];
   if (browserResult.checked) {
     for (const r of browserResult.viewports) {
-      if (r.horizontalOverflow) problems.push(`${r.viewport}: 存在横向溢出`);
+      if (options.checkLayout !== false && r.horizontalOverflow) problems.push(`${r.viewport}: 存在横向溢出`);
       if (!r.hasH1) problems.push(`${r.viewport}: 缺少可见 h1`);
       if (r.placeholderHits.length) problems.push(`${r.viewport}: 占位符残留 ${r.placeholderHits.join(', ')}`);
       if (r.placeholderOnly) problems.push(`${r.viewport}: 核心内容疑似全是占位符`);
+      if (r.runtime && r.runtime.pending > 0) problems.push(`${r.viewport}: 数据运行态仍有 ${r.runtime.pending} 个 pending`);
+      if (r.runtime && r.runtime.status === 'error') problems.push(`${r.viewport}: 数据运行时失败: ${r.runtime.error || '未知错误'}`);
+      if (r.failureTextHits.length) problems.push(`${r.viewport}: 页面显示失败状态 ${r.failureTextHits.join(', ')}`);
+      if (r.loadingTextHits.length && r.runtime && r.runtime.pending === 0) {
+        problems.push(`${r.viewport}: 数据完成后仍显示加载态 ${r.loadingTextHits.join(', ')}`);
+      }
     }
     if (browserResult.consoleErrors.length) problems.push('控制台存在核心接口/运行时错误');
   } else {
@@ -1204,6 +1267,7 @@ try {
     const result = {
       code: cardRuntimeResult.ok ? 0 : 1,
       target,
+      verification_profile: verificationProfile.name,
       verification_level: artifactHydrate.checked ? 'card-runtime-artifact' : 'card-runtime-static',
       require_browser: requireBrowser,
       card_runtime: true,
@@ -1225,7 +1289,7 @@ try {
     process.exit(cardRuntimeResult.ok ? 0 : 1);
   }
   const browserResult = await browserChecks(target, {});
-  const summary = summarize(staticResult, browserResult, { requireBrowser });
+  const summary = summarize(staticResult, browserResult, { requireBrowser, checkLayout: verificationProfile.checkLayout });
   if (cardRuntimeResult.problems.length) {
     summary.ok = false;
     summary.problems.push(...cardRuntimeResult.problems);
@@ -1233,6 +1297,7 @@ try {
   const result = {
     code: summary.ok ? 0 : 1,
     target,
+    verification_profile: verificationProfile.name,
     verification_level: browserResult.checked ? 'browser' : 'static-only',
     require_browser: requireBrowser,
     card_runtime: cardRuntime,

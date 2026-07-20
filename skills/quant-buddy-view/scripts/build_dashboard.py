@@ -67,6 +67,7 @@ from urllib.parse import quote
 import common as C
 import formula_package as FP
 import data_grant as DG
+import fast_query_csv as FQCSV
 import live_card as LC
 
 PAGES_DIR = os.path.join(C.SKILL_ROOT, "output", "pages")
@@ -288,6 +289,9 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     shared_modal = _shared_shell_section("MODAL")
     shared_css = _shared_shell_css()
     shared_runtime_js = _shared_shell_js()
+    data_kernel_js = _read_text(os.path.join(ASSETS_DIR, "data-kernel.js")).replace(
+        "__QBV_SKILL_VERSION__", C.SKILL_VERSION or ""
+    )
     live_card_config = LC.dashboard_config(spec, panels)
     live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
     card_runtime_artifacts = LC.card_runtime_artifacts(
@@ -376,6 +380,29 @@ function normalizeGrantData(kind, data) {
   var k = (kind || '').toLowerCase();
   if (k === 'fast_query') {
     var results = data.results || [];
+    var hasSeries = results.some(function (r) {
+      return (r.fields || []).some(function (f) { return Array.isArray(f.series); });
+    });
+    if (hasSeries) {
+      var multiSeries = results.length > 1, seriesRows = [];
+      results.forEach(function (r) {
+        var name = r.asset_name || r.ticker || r.asset_intent;
+        var byDate = new Map(), dateOrder = [];
+        (r.fields || []).forEach(function (f) {
+          if (!Array.isArray(f.series)) return;
+          f.series.forEach(function (p) {
+            var date = fmtDate(p.date);
+            if (!byDate.has(date)) {
+              var base = multiSeries ? {'标的': name, '日期': date} : {'日期': date};
+              byDate.set(date, base); dateOrder.push(date);
+            }
+            byDate.get(date)[f.intent] = p.value;
+          });
+        });
+        dateOrder.forEach(function (date) { seriesRows.push(byDate.get(date)); });
+      });
+      if (seriesRows.length) return seriesRows;
+    }
     var multi = results.length > 1, rows = [];
     results.forEach(function (r) {
       var name = r.asset_name || r.ticker || r.asset_intent;
@@ -617,7 +644,7 @@ function markPackagePanelsError(msg) {
 }
 
 // 公式包取数：SSE 流，边收边渲染（钉死 output → panel，重算会走 stale/recomputed）
-async function fetchPackageLive() {
+async function _fetchPackageLive() {
   let resp;
   try {
     resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
@@ -630,9 +657,9 @@ async function fetchPackageLive() {
     });
   } catch (e) {
     markPackagePanelsError('取数失败（可能是跨域/网络）：' + e);
-    return;
+    throw new Error('公式包取数失败（网络或跨域）');
   }
-  if (!resp.ok) { markPackagePanelsError('取数失败：HTTP ' + resp.status); return; }
+  if (!resp.ok) { markPackagePanelsError('取数失败：HTTP ' + resp.status); throw new Error('公式包取数失败：HTTP ' + resp.status); }
 
   // 老环境不支持可读流：回退到一次性取整段再渲染
   if (!resp.body || typeof resp.body.getReader !== 'function') {
@@ -667,8 +694,15 @@ async function fetchPackageLive() {
     }
     if (buf.trim()) handle(buf);     // 收尾残留块
   } catch (e) {
-    // 流中途断开：已渲染的保留，未到的面板维持「加载中」
+    throw new Error('公式包流式取数中断');
   }
+}
+
+async function fetchPackageLive() {
+  QB.runtime.begin('sse');
+  try { return await _fetchPackageLive(); }
+  catch (e) { QB.runtime.fail(e); throw e; }
+  finally { QB.runtime.end(); }
 }
 
 // 数据授权取数：普通 JSON（非 SSE，不重算），各 grant 并发独立请求、互不阻塞
@@ -677,22 +711,9 @@ async function fetchGrantsLive() {
   await Promise.all(grants.map(async (g) => {
     let out;
     try {
-      const resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryDataGrant'), {
-        method: 'POST',
-        headers: Object.assign(
-          {'Content-Type': 'application/json'},
-          BOOT.skillVersion ? {'x-skill-version': BOOT.skillVersion, 'x-skill-name': BOOT.skillName || 'quant-buddy-view'} : {}
-        ),
-        body: JSON.stringify({grant_id: g.grant_id, signature: g.signature}),
-      });
-      let body = null;
-      try { body = await resp.json(); } catch (e) {}
-      if (!resp.ok || !body || body.code !== 0) {
-        const err = (body && body.error) || {};
-        out = {data: null, error: (err.code || ('HTTP ' + resp.status)) + (err.message ? (': ' + err.message) : '')};
-      } else {
-        out = {data: normalizeGrantData(body.kind, body.data), error: null};
-      }
+      const grantOut = await QB.queryGrant({endpoint: BOOT.endpoint, grant_id: g.grant_id, signature: g.signature});
+      const item = grantOut[g.grant_id];
+      out = {data: normalizeGrantData(item.kind, item.data), error: item.error || null};
     } catch (e) {
       out = {data: null, error: '取数失败（可能是跨域/网络）：' + e};
     }
@@ -708,7 +729,7 @@ async function fetchLive() {
   const tasks = [];
   if (BOOT.packageId) tasks.push(fetchPackageLive());
   if (BOOT.grants && BOOT.grants.length) tasks.push(fetchGrantsLive());
-  if (tasks.length) await Promise.all(tasks);
+  if (tasks.length) await Promise.all(tasks.map(task => task.catch(() => null)));
   // 收尾：始终没等到产出的非 text 面板，标注无产出
   PANEL_REG.forEach(reg => {
     if (!reg.filled && (reg.panel.type || 'table') !== 'text') {
@@ -835,18 +856,6 @@ document.addEventListener('DOMContentLoaded', () => {
   a {{ color: inherit; }}
   a:focus-visible {{ outline: 2px solid #d8a54b; outline-offset: 3px; }}
   .shell-inner {{ max-width: 1180px; margin: 0 auto; padding: 0 20px; }}
-  .topbar {{ min-height: 62px; display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid rgba(255,255,255,.1); }}
-  .brand-lockup {{ display:flex; align-items:center; gap:10px; text-decoration:none; min-width:0; }}
-  .brand-mark {{ width:34px; height:34px; flex:0 0 34px; border:1px solid rgba(216,165,75,.65); display:grid; place-items:center;
-                font-weight:800; font-size:13px; color:#f5d28f; background:#fff; border-radius:8px; overflow:hidden; padding:4px; }}
-  .brand-mark svg {{ width:100%; height:100%; display:block; }}
-  .brand-name {{ font-weight:750; letter-spacing:.01em; }}
-  .brand-cn {{ display:block; color:#aeb8c8; font-size:12px; font-weight:500; margin-top:1px; }}
-  .official-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:0 13px;
-                   border:1px solid rgba(255,255,255,.18); border-radius:8px; text-decoration:none; color:#edf2f7;
-                   background:rgba(255,255,255,.06); white-space:nowrap; font-size:13px; }}
-  .official-link:hover {{ background:rgba(255,255,255,.12); }}
-  .hero-grid {{ display:grid; grid-template-columns:minmax(0,1fr) 146px; gap:28px; align-items:end; padding:30px 0 28px; }}
   .eyebrow {{ margin: 0 0 8px; color: #a8b1c2; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }}
   h1 {{ margin: 0; font-size: 32px; line-height: 1.12; letter-spacing: 0; }}
   .subtitle {{ margin: 12px 0 0; color: #dbe2ee; max-width: 860px; font-size: 14px; }}
@@ -854,13 +863,6 @@ document.addEventListener('DOMContentLoaded', () => {
   .meta-pill {{ display:inline-flex; align-items:center; min-height:26px; padding:0 9px; border-radius:8px;
                background:rgba(255,255,255,.08); color:#cbd5e1; font-size:12px; }}
   .meta-pill-strong {{ background:rgba(216,165,75,.16); color:#f8e4b7; border:1px solid rgba(216,165,75,.34); }}
-  .share-card {{ justify-self:end; width:146px; border:1px solid rgba(216,165,75,.38); border-radius:8px; padding:12px;
-                background:linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03)); }}
-  .share-title {{ color:#f8e4b7; font-weight:700; font-size:13px; margin-bottom:9px; }}
-  .share-body {{ display:grid; place-items:center; }}
-  .qr-frame {{ width:116px; height:116px; padding:0; background:#fff; border-radius:6px; overflow:hidden; display:grid; place-items:center; }}
-  .qr-frame canvas {{ width:116px; height:116px; display:block; }}
-  .qr-fallback {{ color:#111827; font-size:12px; text-align:center; line-height:1.45; }}
   main {{ max-width: 1180px; margin: 0 auto; padding: 18px 20px 26px; }}
   #grid {{ display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; align-items: stretch; }}
   .card {{ position:relative; background: var(--qb-surface); border: 1px solid var(--qb-border); border-radius: 8px; padding: 14px 16px;
@@ -908,13 +910,7 @@ document.addEventListener('DOMContentLoaded', () => {
   @media (max-width: 860px) {{
     .span-full, .span-wide, .span-auto {{ grid-column: span 12; }}
     .card-number.span-auto {{ grid-column: span 6; }}
-    .topbar {{ min-height:58px; }}
-    .brand-cn {{ max-width: clamp(150px, calc(100vw - 188px), 250px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-    .brand-cn-name, .brand-dot {{ display:none; }}
-    .official-link {{ min-height: 34px; padding: 0 10px; font-size: 12px; }}
-    .hero-grid {{ grid-template-columns:1fr; padding:24px 0; gap:18px; }}
     h1 {{ font-size:26px; }}
-    .share-card {{ display:none; }}
     main {{ padding:14px 12px 22px; }}
     #grid {{ gap:10px; }}
     .card-text {{ grid-template-columns:1fr; gap:8px; padding:13px 14px 14px; }}
@@ -929,8 +925,6 @@ document.addEventListener('DOMContentLoaded', () => {
     .footer-inner {{ flex-direction:column; }}
   }}
   @media (max-width: 360px) {{
-    .topbar {{ min-height:70px; align-items:center; }}
-    .brand-cn {{ max-width:150px; white-space:normal; line-height:1.22; }}
     .card-number.span-auto {{ grid-column: span 12; }}
   }}
   @media (prefers-color-scheme: dark) {{
@@ -976,6 +970,7 @@ document.addEventListener('DOMContentLoaded', () => {
 <script src="{_ECHARTS_CDN}"></script>
 <script>
 {shared_runtime_js}
+{data_kernel_js}
 {render_js}
 </script>
 {card_runtime_js}
@@ -993,6 +988,30 @@ def _normalize_grant_data(kind, data):
     k = (kind or "").lower()
     if k == "fast_query":
         results = data.get("results") or []
+        has_series = any(
+            isinstance(field.get("series"), list)
+            for result in results
+            for field in (result.get("fields") or [])
+        )
+        if has_series:
+            series_rows = []
+            multi_series = len(results) > 1
+            for result in results:
+                name = result.get("asset_name") or result.get("ticker") or result.get("asset_intent")
+                by_date = {}
+                date_order = []
+                for field in result.get("fields") or []:
+                    if not isinstance(field.get("series"), list):
+                        continue
+                    for point in field["series"]:
+                        date = point.get("date")
+                        if date not in by_date:
+                            by_date[date] = {"标的": name, "日期": date} if multi_series else {"日期": date}
+                            date_order.append(date)
+                        by_date[date][field.get("intent")] = point.get("value")
+                series_rows.extend(by_date[date] for date in date_order)
+            if series_rows:
+                return series_rows
         rows = []
         multi = len(results) > 1
         for r in results:
@@ -1801,7 +1820,16 @@ def cmd_build(params):
                     "failures": res.get("failures"), "query_result": res}
         verify_outputs.update(res.get("outputs") or {})
     for g in grants:
-        gr = DG.query_grant(endpoint, g["grant_id"], g["signature"])
+        try:
+            gr = FQCSV.hydrate_query_result(
+                lambda g=g: DG.query_grant(endpoint, g["grant_id"], g["signature"]),
+                timeout=20,
+                max_workers=4,
+            )
+        except FQCSV.CsvHydrationError as exc:
+            return {"code": 1,
+                    "message": f"构建期 CSV 取数失败（数据授权 grant_id={g['grant_id']}）：{exc}",
+                    "grant_id": g["grant_id"]}
         if gr.get("code") != 0:
             return {"code": 1, "message": f"构建期取数失败（数据授权 grant_id={g['grant_id']}），拒绝生成看板",
                     "grant_id": g["grant_id"], "query_result": gr}

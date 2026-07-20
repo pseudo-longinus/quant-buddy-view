@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """校验终态 contract 对应的最终 Markdown 草稿，防止漏章节、漏链接或泄露敏感信息。"""
 
+import hashlib
 import json
 import os
 import re
 import sys
 
 import common as C
+import reply_template_registry as RTR
 
 
 _HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _FENCED_MARKDOWN_RE = re.compile(r"```markdown\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _UNRESOLVED_FIELD_RE = re.compile(r"\{[^{}\r\n]+\}")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_MISSING_VALUES = {"", "--", "—", "本轮未返回", "不适用", "n/a", "na"}
 _SENSITIVE_PATTERNS = [
     ("windows_local_path", re.compile(r"(?i)(?:^|[\s(])(?:[a-z]:\\|file:///)")),
     ("unix_local_path", re.compile(r"(?:^|[\s(])/(?:Users|home|tmp|var/tmp)/")),
@@ -45,17 +49,128 @@ def _read_text(params, key, file_key):
 
 
 def _required_headings(template_ref):
-    if not template_ref:
-        return []
-    safe_ref = re.sub(r"[^0-9A-Za-z._-]+", "", str(template_ref))
-    path = os.path.join(C.SKILL_ROOT, "reply-templates", f"{safe_ref}.md")
-    if not os.path.isfile(path):
-        return []
-    with open(path, "r", encoding="utf-8-sig") as handle:
-        text = handle.read()
-    fenced = _FENCED_MARKDOWN_RE.search(text)
-    skeleton = fenced.group(1) if fenced else text
-    return [heading.strip() for heading in _HEADING_RE.findall(skeleton)]
+    return RTR.get_template_headings(template_ref)
+
+
+def _is_missing_value(value):
+    normalized = re.sub(r"[。；;，,]+$", "", str(value or "").strip()).lower()
+    return normalized in _MISSING_VALUES
+
+
+def _section_bodies(draft):
+    matches = list(_HEADING_RE.finditer(draft or ""))
+    sections = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(draft)
+        sections.append({
+            "heading": match.group(1).strip(),
+            "body": draft[match.end():end].strip(),
+            "position": match.start(),
+        })
+    return sections
+
+
+def _split_table_row(line):
+    text = str(line or "").strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    return [cell.strip() for cell in text.split("|")]
+
+
+def _markdown_tables(draft):
+    lines = str(draft or "").splitlines()
+    tables = []
+    index = 0
+    while index + 1 < len(lines):
+        header = _split_table_row(lines[index]) if "|" in lines[index] else []
+        separator = _split_table_row(lines[index + 1]) if "|" in lines[index + 1] else []
+        if (
+            len(header) >= 2
+            and len(separator) == len(header)
+            and all(_TABLE_SEPARATOR_CELL_RE.match(cell) for cell in separator)
+        ):
+            rows = []
+            cursor = index + 2
+            while cursor < len(lines) and "|" in lines[cursor]:
+                row = _split_table_row(lines[cursor])
+                if len(row) != len(header):
+                    break
+                rows.append(row)
+                cursor += 1
+            tables.append({"headers": header, "rows": rows, "line": index + 1})
+            index = cursor
+            continue
+        index += 1
+    return tables
+
+
+def _placeholder_only(body):
+    text = re.sub(r"[`*_>#\-+\[\]()]", " ", str(body or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return _is_missing_value(text)
+
+
+def _render_policy_errors(template_ref, policy, draft, sections):
+    errors = []
+    canonical = RTR.get_reply_render_policy(template_ref)
+    if not isinstance(policy, dict) or policy.get("version") != RTR.POLICY_VERSION or not canonical:
+        return None, [{"code": "REPLY_RENDER_POLICY_INVALID", "message": "终态 contract 的回复裁剪策略无效或模板未注册"}]
+    policy = canonical
+    required = policy["required_sections"]
+    optional = policy["optional_sections"]
+    present = [item["heading"] for item in sections]
+    present_set = set(present)
+
+    for heading in required:
+        if heading not in present_set:
+            errors.append({"code": "REQUIRED_SECTION_MISSING", "message": f"缺少必填章节：## {heading}"})
+    for group in policy["at_least_one_groups"]:
+        if not present_set.intersection(group):
+            errors.append({
+                "code": "AT_LEAST_ONE_SECTION_REQUIRED",
+                "message": "以下章节至少展示一个：" + " / ".join(group),
+                "sections": group,
+            })
+
+    template_order = {heading: index for index, heading in enumerate(RTR.get_template_headings(template_ref))}
+    displayed_template_sections = [heading for heading in present if heading in template_order]
+    if displayed_template_sections != sorted(displayed_template_sections, key=template_order.get):
+        errors.append({"code": "SECTION_ORDER_INVALID", "message": "已展示章节未保持回复模板中的原始顺序"})
+
+    for item in sections:
+        if item["heading"] in optional and _placeholder_only(item["body"]):
+            errors.append({
+                "code": "EMPTY_OPTIONAL_SECTION",
+                "message": f"可选章节只有空值占位，应删除：## {item['heading']}",
+                "section": item["heading"],
+            })
+
+    for table in _markdown_tables(draft):
+        rows = table["rows"]
+        if not rows:
+            continue
+        if policy["omit_all_missing_columns"]:
+            for column_index in range(1, len(table["headers"])):
+                if all(_is_missing_value(row[column_index]) for row in rows):
+                    errors.append({
+                        "code": "EMPTY_TABLE_COLUMN",
+                        "message": f"表格整列为空，应删除：{table['headers'][column_index]}",
+                        "column": table["headers"][column_index],
+                        "line": table["line"],
+                    })
+        if policy["omit_all_missing_rows"]:
+            for row in rows:
+                if all(_is_missing_value(cell) for cell in row[1:]):
+                    errors.append({
+                        "code": "EMPTY_TABLE_ROW",
+                        "message": f"表格整行无有效指标，应删除：{row[0]}",
+                        "row": row[0],
+                        "line": table["line"],
+                    })
+
+    return policy, errors
 
 
 def validate_reply(contract_payload, draft):
@@ -70,43 +185,87 @@ def validate_reply(contract_payload, draft):
     elif public_url not in draft:
         errors.append({"code": "PUBLIC_URL_MISSING", "message": "最终回复未包含终态 public_url"})
 
-    required = _required_headings(contract.get("template_ref")) if contract.get("required") else []
-    actual = [heading.strip() for heading in _HEADING_RE.findall(draft)]
-    cursor = -1
-    for heading in required:
-        try:
-            index = actual.index(heading, cursor + 1)
-        except ValueError:
-            errors.append({"code": "REQUIRED_SECTION_MISSING", "message": f"缺少或顺序错误的章节：## {heading}"})
-            continue
-        cursor = index
+    sections = _section_bodies(draft)
+    actual = [item["heading"] for item in sections]
+    render_policy = contract.get("reply_render_policy")
+    required = []
+    optional = []
+    if render_policy is not None:
+        render_policy, policy_errors = _render_policy_errors(
+            contract.get("template_ref"), render_policy, draft, sections
+        )
+        errors.extend(policy_errors)
+        if render_policy:
+            required = render_policy["required_sections"]
+            optional = render_policy["optional_sections"]
+    else:
+        required = _required_headings(contract.get("template_ref")) if contract.get("required") else []
+        cursor = -1
+        for heading in required:
+            try:
+                index = actual.index(heading, cursor + 1)
+            except ValueError:
+                errors.append({"code": "REQUIRED_SECTION_MISSING", "message": f"缺少或顺序错误的章节：## {heading}"})
+                continue
+            cursor = index
 
     unresolved = _UNRESOLVED_FIELD_RE.findall(draft)
     if unresolved:
         errors.append({
             "code": "UNRESOLVED_FIELDS",
-            "message": "最终回复仍有模板字段未替换；缺失数据必须写 -- 或 本轮未返回",
+            "message": "最终回复仍有模板字段未替换；结构性不存在的字段应删除，偶发缺值才可写 --",
             "fields": unresolved[:20],
         })
     for name, pattern in _SENSITIVE_PATTERNS:
         if pattern.search(draft):
             errors.append({"code": "SENSITIVE_CONTENT", "message": f"最终回复包含禁止内容：{name}"})
 
-    return {
+    result = {
         "code": 0 if not errors else 1,
         "valid": not errors,
         "template_ref": contract.get("template_ref") or None,
         "required_sections": required,
         "errors": errors,
     }
+    if render_policy is not None:
+        result.update({
+            "reply_render_policy": render_policy,
+            "optional_sections": optional,
+            "present_sections": actual,
+            "omitted_optional_sections": [heading for heading in optional if heading not in set(actual)],
+        })
+    return result
+
+
+def _read_hashed_contract(params):
+    contract_file = str(params.get("contract_file") or "").strip()
+    expected_sha256 = str(params.get("contract_sha256") or "").strip().lower()
+    if not contract_file or not expected_sha256:
+        return None, {
+            "code": "CONTRACT_ARTIFACT_REQUIRED",
+            "message": "必须使用发布器返回的 contract_file 和 contract_sha256",
+        }
+    with open(contract_file, "rb") as handle:
+        payload = handle.read()
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        return None, {
+            "code": "CONTRACT_HASH_MISMATCH",
+            "message": "contract 文件已变化，拒绝验证手工重建或篡改的 contract",
+            "expected_sha256": expected_sha256,
+            "actual_sha256": actual_sha256,
+        }
+    return json.loads(payload.decode("utf-8")), None
 
 
 def main():
     params = C.read_params(sys.argv[1:], env_var="REPLY_PARAMS")
     try:
-        contract = _read_json_or_object(params, "contract", "contract_file")
+        contract, contract_error = _read_hashed_contract(params)
         draft = _read_text(params, "draft", "draft_file")
-        if not contract or not draft:
+        if contract_error:
+            result = {"code": 1, "valid": False, "errors": [contract_error]}
+        elif not contract or not draft:
             result = {"code": 1, "valid": False, "errors": [{"code": "INPUT_REQUIRED", "message": "需要 contract/contract_file 和 draft/draft_file"}]}
         else:
             result = validate_reply(contract, draft)

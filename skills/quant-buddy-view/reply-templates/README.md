@@ -25,6 +25,9 @@ Use these files when a static page metadata object contains:
 - `reply_template_v1` remains compatible. `reply_template_v2` hybrid replies require `hybrid_composition` and a top-level `page_context`.
 - `page_context` is a sibling metadata object that describes the current page. Never copy a source template's context into a generated user page; regenerate it from the final page.
 - `generic_live_page_delivery_v1` is the required fallback for new pages that do not match a professional skeleton.
+- Every registry entry has a `reply_render_policy` with required, optional, and at-least-one section rules. Terminal contracts copy this policy so the validator and Agent use the same semantics.
+- `omit_all_missing_columns` / `omit_all_missing_rows` remove structures that have no real data. `placeholder_policy: partial_only` permits `--` only for an occasional missing cell inside an otherwise valid structure; structurally unavailable fields and empty optional sections must be omitted.
+- Direct delivery contracts also expose `reply_data_availability` containing formula output names and redacted grant leaf field paths only. It never contains values, signatures, API keys, or authorization material.
 - Keep template files focused on the final answer shape: section order, table headers, required disclaimers, and output constraints. Do not copy tool-routing or deprecated skill instructions into these files.
 
 `index.json` is the registry for stable ids and source provenance. Each template file carries the same id in frontmatter so it can be read standalone.

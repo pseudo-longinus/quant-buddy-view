@@ -11,6 +11,7 @@ r"""
     upload     上传 HTML，返回 page_id + 公开 url
     update     替换已有页面内容（URL / page_id 不变，已分享链接照常可用）
     publish_final  首链进度页最终发布封装：先进入 final_publish，失败时回写失败态
+    publish_verified  fork 门禁、本地分级浏览器检查、同链接发布和公网冒烟的一体化封装
     download   取回已发布页面的 HTML（再编辑用）：服务端鉴权返回 url，脚本直连 OSS 下载
     list       列出我的页面
     init_reply_metadata  为缺少 page_context / agent_reply_template 的旧页面初始化回复元数据
@@ -76,6 +77,7 @@ publish_final 参数：同 update；推荐用于首链进度页的最终正式�
     复用在线模板时传 source_template_id + fork_manifest_file；前者继承回复骨架，后者证明来源 HTML 已下载并声明 fork 门禁；page_context 必须按最终用户活页重新生成。
     同一 task_id 执行过 fork_prepare 后，publish_final 会自动恢复已绑定的来源与 manifest；省略或改写参数不能绕过 fork 门禁。
     无法匹配专业骨架时使用 generic_live_page_delivery_v1；v2 hybrid 缺 page_context / hybrid_composition 时 fail-closed。
+publish_verified 参数：同 publish_final，另传 validation_receipt_files；固定执行 fork_validate → fork-local → publish_final → public-smoke。发布前失败不写页面；发布后冒烟失败返回 published=true、verified=false 和最终 URL。
 update 参数：page_id 必填；title / description / ttl_days / scene_tags / paradigm_tags /
     user_query / tagging_method / tagging_source / tagging_meta /
     page_context / agent_reply_template / verify_card_runtime 仅在传了才改
@@ -112,6 +114,7 @@ verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, 
     python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
     python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
     python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
+    python scripts/static_page.py publish_verified '{"task_id":"task_xxx","page_id":"page_xxx","html_file":"output/pages/final.html","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","validation_receipt_files":["receipt.json"]}'
     python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
     python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html"}'
     python scripts/static_page.py download '{"page_id":"page_xxx","save":"output/pages/back.html"}'
@@ -145,6 +148,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse as _up
 import urllib.request
@@ -154,6 +158,7 @@ import compile_bespoke_page as CB
 import card_runtime_retrofit as CRT
 import common as C
 import progress_page as PP
+import reply_template_registry as RTR
 
 _PATH = {
     "upload":    "/skill/uploadStaticPage",
@@ -183,6 +188,7 @@ _SHARE_POSTER_VERSION = "snapshot-tall-v1"
 _SHARE_SHELL_VERSION = "copy-link-v1"
 _FORK_MANIFEST_VERSION = "fork_manifest_v1"
 _FORK_TASK_BINDING_VERSION = "fork_task_binding_v1"
+_FORK_PREFLIGHT_SENTINEL = object()
 _VALIDATION_RECEIPT_VERSION = "qb_validation_receipt_v1"
 _PROGRESS_SHELL_THEME = {
     "chrome_bg": "#ffffff",
@@ -228,6 +234,7 @@ _GENERIC_LIVE_PAGE_REPLY_TEMPLATE = {
     "output_format": "markdown",
 }
 _REPLY_FOCUS = {
+    "global_asset_bubble_monitor_v1": "先比较七个指数的区间位置与偏离度，再结合本轮实际返回的宏观压力变量解释结构性高温。",
     "market_event_impact_v1": "先给出事件结论，再解释传导链、受益受损方向和验证指标。",
     "sector_theme_opportunity_v1": "先判断主题所处阶段，再解释催化、产业链位置、风险和跟踪指标。",
     "single_stock_valuation_quality_v1": "先判断估值水位，再判断盈利与现金流质量，最后给出风险条件。",
@@ -239,6 +246,7 @@ _REPLY_FOCUS = {
     "generic_live_page_delivery_v1": "概括活页用途、核心模块、当前可见结论、使用方法和能力边界。",
 }
 _PAGE_CONTEXT_SUMMARY = {
+    "global_asset_bubble_monitor_v1": "用于持续监测七个全球主要股票指数的泡沫温度及利率、美元、波动率与流动性压力。",
     "market_event_impact_v1": "用于呈现宏观市场、事件影响与跨资产传导的实时分析活页。",
     "sector_theme_opportunity_v1": "用于呈现行业或主题强弱、标的池、催化与风险的实时分析活页。",
     "single_stock_valuation_quality_v1": "用于呈现单只上市公司的估值水位与财务质量分析活页。",
@@ -448,7 +456,7 @@ def _infer_page_context_from_publish_params(params, *, html=None, template_ref=N
         "core_sections": sections,
         "primary_outputs": outputs,
         "reply_focus": _REPLY_FOCUS.get(template_ref, _REPLY_FOCUS["generic_live_page_delivery_v1"]),
-        "limitations": "仅依据活页当前可用数据解释；缺失字段标记为 --，不编造数据或提供保证性预测。",
+        "limitations": "仅依据活页当前可用数据解释；结构性不存在的内容不展示，偶发缺值才标记为 --，不编造数据或提供保证性预测。",
     }
     normalized, error = _normalize_page_context(context)
     return None if error else normalized
@@ -658,6 +666,7 @@ def _agent_reply_template_contract(record, *, operation=None):
         "public_url": public_url,
     }
     if template_ref:
+        reply_render_policy = RTR.get_reply_render_policy(template_ref)
         contract.update({
             "template_ref": template_ref,
             "template_file": template_file,
@@ -665,13 +674,17 @@ def _agent_reply_template_contract(record, *, operation=None):
             "reply_scope": meta.get("reply_scope") or "full_answer",
             "output_format": meta.get("output_format") or "markdown",
             "hybrid_composition": meta.get("hybrid_composition"),
+            "reply_render_policy": reply_render_policy,
             "final_response_required": "read_template_file_and_reply_in_template_format_plus_links",
             "final_response_steps": [
             "Read template_file before writing the final answer.",
             "Use that Markdown template as the final answer shape; do not replace it with a generic publish summary.",
             "Use page_context to understand what this page does; for hybrid replies also follow hybrid_composition.",
             "Include public_url.",
-            "Fill missing data with -- instead of inventing values.",
+            "Use reply_data_availability to identify fields that actually exist in this delivery.",
+            "Delete structurally unavailable fields, all-missing columns, all-missing rows, and empty optional sections.",
+            "Use -- only for an occasional missing value inside an otherwise valid structure.",
+            "Never substitute turnover for capital flow or otherwise replace a missing metric with a different definition.",
             "Do not expose local file paths, api_key, signatures, or internal verification logs to the user.",
             ],
         })
@@ -1277,6 +1290,57 @@ def _server_mentions_package_issue(out):
     return bool(_PACKAGE_ISSUE_RE.search(text))
 
 
+def _iter_braced_blocks(text):
+    """Yield balanced brace blocks while ignoring braces inside JS strings/comments."""
+    text = text or ""
+    stack = []
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if line_comment:
+            if char in "\r\n":
+                line_comment = False
+            i += 1
+            continue
+        if block_comment:
+            if char == "*" and nxt == "/":
+                block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            i += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "/" and nxt == "/":
+            line_comment = True
+            i += 2
+            continue
+        elif char == "/" and nxt == "*":
+            block_comment = True
+            i += 2
+            continue
+        elif char == "{":
+            stack.append(i)
+        elif char == "}" and stack:
+            start = stack.pop()
+            yield text[start:i + 1]
+        i += 1
+
+
 def _extract_package_credentials(html):
     pkg_re = re.compile(r'(?:["\']?(?:package_id|packageId)["\']?)\s*:\s*["\']([^"\']+)["\']')
     sig_re = re.compile(r'(?:["\']?signature["\']?)\s*:\s*["\']([^"\']+)["\']')
@@ -1284,30 +1348,20 @@ def _extract_package_credentials(html):
     short_sig_re = re.compile(r'(?:["\']?sig["\']?)\s*:\s*["\']([^"\']+)["\']')
     pairs = []
     seen = set()
-    for m in pkg_re.finditer(html or ""):
-        pkg = m.group(1)
-        window = html[max(0, m.start() - 500): min(len(html), m.end() + 1500)]
-        sig_m = sig_re.search(window)
-        if not sig_m:
-            continue
-        sig = sig_m.group(1)
-        key = (pkg, sig)
-        if key not in seen:
-            seen.add(key)
-            pairs.append({"package_id": pkg, "signature": sig})
-    # Some published pages keep compact credential maps such as
-    # `{id:'pkg_xxx',sig:'...'}`. Restrict the shorthand to pkg_ values so a
-    # generic business object with id/sig fields cannot be mistaken for data credentials.
-    for obj_match in re.finditer(r"\{[^{}]{0,4000}\}", html or "", flags=re.S):
-        block = obj_match.group(0)
-        pkg_match = short_pkg_re.search(block)
-        sig_match = short_sig_re.search(block)
-        if not (pkg_match and sig_match):
-            continue
-        key = (pkg_match.group(1), sig_match.group(1))
-        if key not in seen:
-            seen.add(key)
-            pairs.append({"package_id": key[0], "signature": key[1]})
+    for block in _iter_braced_blocks(html):
+        long_packages = set(pkg_re.findall(block))
+        long_signatures = set(sig_re.findall(block))
+        short_packages = set(short_pkg_re.findall(block))
+        short_signatures = set(short_sig_re.findall(block))
+        candidates = []
+        if len(long_packages) == 1 and len(long_signatures) == 1:
+            candidates.append((next(iter(long_packages)), next(iter(long_signatures))))
+        if len(short_packages) == 1 and len(short_signatures) == 1:
+            candidates.append((next(iter(short_packages)), next(iter(short_signatures))))
+        for key in candidates:
+            if key not in seen:
+                seen.add(key)
+                pairs.append({"package_id": key[0], "signature": key[1]})
     return pairs
 
 
@@ -1704,12 +1758,19 @@ def _validate_fork_manifest(params, template_resolution, final_html):
     if missing_sections:
         return None, {"code": 1, "message": "fork 目标 HTML 缺少核心栏目: " + ", ".join(missing_sections)}
 
-    missing_outputs = [
-        output for output in _unique_strings(manifest.get("required_outputs"))
-        if output not in (final_html or "")
-    ]
-    if missing_outputs:
-        return None, {"code": 1, "message": "fork 目标 HTML 缺少必需输出: " + ", ".join(missing_outputs)}
+    required_outputs = _unique_strings(manifest.get("required_outputs"))
+    package_output_check = None
+    if required_outputs:
+        endpoint = C.endpoint_of(C.load_config())
+        package_output_check = _required_package_outputs_check(endpoint, final_html, required_outputs)
+        if package_output_check.get("status") != "required_outputs_ok":
+            missing_outputs = package_output_check.get("missing_outputs") or required_outputs
+            return None, {
+                "code": 1,
+                "error": "FORK_REQUIRED_OUTPUTS_UNAVAILABLE",
+                "message": "fork 最终公式包缺少必需输出: " + ", ".join(missing_outputs),
+                "package_runtime_check": package_output_check,
+            }
 
     leftover_markers = [
         marker for marker in _unique_strings(manifest.get("source_markers"))
@@ -1737,7 +1798,8 @@ def _validate_fork_manifest(params, template_resolution, final_html):
         "minimum_target_grant_count": minimum_grants,
         "credential_count_reduction_reason": reduction_reason,
         "required_sections": _unique_strings(manifest.get("required_sections")),
-        "required_outputs": _unique_strings(manifest.get("required_outputs")),
+        "required_outputs": required_outputs,
+        "package_runtime_check": package_output_check,
         "card_runtime_required": bool(manifest.get("card_runtime_required")),
     }
     return summary, None
@@ -1756,6 +1818,21 @@ def _package_runtime_check(endpoint, html, *, force=False, publish_out=None):
             "reason": "no package_id + signature pair found in page html",
         }
 
+    signatures_by_package = {}
+    for cred in creds:
+        signatures_by_package.setdefault(cred["package_id"], set()).add(cred["signature"])
+    ambiguous = [
+        {"package_id": package_id, "signature_count": len(signatures)}
+        for package_id, signatures in sorted(signatures_by_package.items())
+        if len(signatures) > 1
+    ]
+    if ambiguous:
+        return {
+            "status": "credential_ambiguity",
+            "reason": "同一 package_id 在页面中声明了多个 signature",
+            "ambiguous_packages": ambiguous,
+        }
+
     import formula_package as FP
     packages = []
     all_ok = True
@@ -1772,6 +1849,62 @@ def _package_runtime_check(endpoint, html, *, force=False, publish_out=None):
         })
     return {
         "status": "query_with_signature_ok" if all_ok else "query_with_signature_failed",
+        "packages": packages,
+    }
+
+
+def _required_package_outputs_check(endpoint, html, required_outputs):
+    required = _unique_strings(required_outputs)
+    creds = _extract_package_credentials(html)
+    if not creds:
+        return {
+            "status": "package_credentials_missing",
+            "available_outputs": [],
+            "missing_outputs": required,
+            "packages": [],
+        }
+
+    signatures_by_package = {}
+    for cred in creds:
+        signatures_by_package.setdefault(cred["package_id"], set()).add(cred["signature"])
+    ambiguous = [
+        {"package_id": package_id, "signature_count": len(signatures)}
+        for package_id, signatures in sorted(signatures_by_package.items())
+        if len(signatures) > 1
+    ]
+    if ambiguous:
+        return {
+            "status": "credential_ambiguity",
+            "available_outputs": [],
+            "missing_outputs": required,
+            "ambiguous_packages": ambiguous,
+            "packages": [],
+        }
+
+    import formula_package as FP
+    available = set()
+    packages = []
+    all_ok = True
+    for cred in creds:
+        response = FP.query_package(endpoint, cred["package_id"], cred["signature"])
+        ok = isinstance(response, dict) and response.get("code") == 0
+        output_keys = sorted((response.get("outputs") or {}).keys()) if isinstance(response, dict) else []
+        if ok:
+            available.update(output_keys)
+        all_ok = all_ok and ok
+        packages.append({
+            "package_id": cred["package_id"],
+            "ok": ok,
+            "output_count": len(output_keys),
+            "error": (response.get("error") or response.get("message")) if isinstance(response, dict) else str(response),
+        })
+    missing = [output for output in required if output not in available]
+    return {
+        "status": "required_outputs_ok" if all_ok and not missing else (
+            "required_outputs_missing" if all_ok else "query_with_signature_failed"
+        ),
+        "available_outputs": sorted(available),
+        "missing_outputs": missing,
         "packages": packages,
     }
 
@@ -1810,7 +1943,7 @@ def cmd_upload(params):
         return metadata_err
 
     body = {"html": html}
-    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding", "trace_evidence"):
         if params.get(k) is not None:
             body[k] = params[k]
     if "page_context" in params and params.get("page_context") is None:
@@ -1872,7 +2005,7 @@ def cmd_update(params):
         return metadata_err
 
     body = {"page_id": params["page_id"], "html": html}
-    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding", "trace_evidence"):
         if params.get(k) is not None:
             body[k] = params[k]
     if "page_context" in params and params.get("page_context") is None:
@@ -2173,11 +2306,26 @@ def cmd_publish_final(params):
     params, template_resolution, template_error = _resolve_publish_agent_reply_template(params, html=final_html)
     if template_error:
         return template_error
-    fork_manifest_resolution, fork_manifest_error = _validate_fork_manifest(
-        params,
-        template_resolution,
-        final_html,
-    )
+    preflight = params.pop("_fork_preflight", None)
+    preflight_sentinel = params.pop("_fork_preflight_sentinel", None)
+    if preflight_sentinel is _FORK_PREFLIGHT_SENTINEL and isinstance(preflight, dict):
+        actual_html_sha256 = hashlib.sha256(final_html.encode("utf-8")).hexdigest()
+        if preflight.get("html_sha256") != actual_html_sha256:
+            return {
+                "code": 1,
+                "error": "FORK_PREFLIGHT_STALE",
+                "message": "fork HTML 在浏览器预检后发生变化，拒绝发布",
+                "page_id": params.get("page_id"),
+            }
+        fork_manifest_resolution = dict(preflight.get("fork_manifest_validation") or {})
+        fork_manifest_resolution.pop("ok", None)
+        fork_manifest_error = None
+    else:
+        fork_manifest_resolution, fork_manifest_error = _validate_fork_manifest(
+            params,
+            template_resolution,
+            final_html,
+        )
     if fork_manifest_error:
         fork_manifest_error.setdefault("page_id", params.get("page_id"))
         if isinstance(fork_task_binding, dict) and fork_task_binding.get("mode") == "task_binding":
@@ -2275,6 +2423,135 @@ def cmd_publish_final(params):
             "final_html_published": False,
         },
     }
+
+
+def _verified_trace_evidence(params, *, browser_precheck_passed):
+    receipts = params.get("validation_receipt_files")
+    if isinstance(receipts, str):
+        receipts = [receipts]
+    receipt_count = len(receipts) if isinstance(receipts, list) else 0
+    expected_skills = ["quant-buddy-view"]
+    if receipt_count:
+        expected_skills.append("quant-buddy-skill")
+    return {
+        "expected_skills": expected_skills,
+        "validation_receipt_count": receipt_count,
+        "browser_profile": "fork-local+public-smoke",
+        "browser_precheck_passed": bool(browser_precheck_passed),
+    }
+
+
+def cmd_publish_verified(params):
+    if not params.get("page_id"):
+        return {"code": 1, "error": "PAGE_ID_REQUIRED", "message": "publish_verified 需要 page_id"}
+    target = params.get("html_file")
+    temp_path = None
+    if not target and params.get("html") is not None:
+        fd, temp_path = tempfile.mkstemp(prefix="qbv_publish_verified_", suffix=".html")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(str(params.get("html") or ""))
+        target = temp_path
+    if not target:
+        return {"code": 1, "error": "HTML_REQUIRED", "message": "publish_verified 需要 html 或 html_file"}
+
+    stages = {}
+    timings = {}
+    try:
+        started = time.perf_counter()
+        stages["fork_validate"] = cmd_fork_validate(dict(params))
+        timings["fork_validate_ms"] = round((time.perf_counter() - started) * 1000)
+        if not (isinstance(stages["fork_validate"], dict) and stages["fork_validate"].get("code") == 0):
+            return {"code": 1, "published": False, "verified": False, "stages": stages, "timing": timings}
+
+        fork_validation = stages["fork_validate"].get("fork_manifest_validation") or {}
+        card_runtime = bool(params.get("card_runtime_required") or fork_validation.get("card_runtime_required"))
+        started = time.perf_counter()
+        stages["local_browser"] = _run_page_verifier(target, "fork-local", card_runtime=card_runtime)
+        timings["local_browser_ms"] = round((time.perf_counter() - started) * 1000)
+        if not (isinstance(stages["local_browser"], dict) and stages["local_browser"].get("code") == 0):
+            return {"code": 1, "published": False, "verified": False, "stages": stages, "timing": timings}
+
+        publish_params = dict(params)
+        publish_params["trace_evidence"] = _verified_trace_evidence(params, browser_precheck_passed=True)
+        publish_params["_fork_preflight_sentinel"] = _FORK_PREFLIGHT_SENTINEL
+        publish_params["_fork_preflight"] = {
+            "html_sha256": stages["fork_validate"].get("html_sha256"),
+            "fork_manifest_validation": stages["fork_validate"].get("fork_manifest_validation") or {},
+        }
+        started = time.perf_counter()
+        stages["publish_final"] = cmd_publish_final(publish_params)
+        timings["publish_final_ms"] = round((time.perf_counter() - started) * 1000)
+        published = isinstance(stages["publish_final"], dict) and stages["publish_final"].get("code") == 0
+        if not published:
+            return {"code": 1, "published": False, "verified": False, "stages": stages, "timing": timings}
+
+        public_url = _record_url(stages["publish_final"])
+        started = time.perf_counter()
+        stages["public_smoke"] = _run_page_verifier(public_url, "public-smoke", card_runtime=card_runtime)
+        timings["public_smoke_ms"] = round((time.perf_counter() - started) * 1000)
+        verified = isinstance(stages["public_smoke"], dict) and stages["public_smoke"].get("code") == 0
+        result = {
+            "code": 0 if verified else 1,
+            "published": True,
+            "verified": verified,
+            "page_id": params.get("page_id"),
+            "public_url": public_url,
+            "stages": stages,
+            "timing": timings,
+        }
+        if verified:
+            contract = stages["publish_final"].get("agent_reply_contract")
+            if isinstance(contract, dict):
+                result["agent_reply_contract"] = {**contract, "operation": "publish_verified"}
+            if stages["publish_final"].get("agent_reply_template_file"):
+                result["agent_reply_template_file"] = stages["publish_final"]["agent_reply_template_file"]
+            if isinstance(result.get("agent_reply_contract"), dict):
+                try:
+                    result.update(_write_agent_reply_artifacts(params.get("task_id"), result))
+                except (OSError, ValueError) as exc:
+                    result.update({
+                        "code": 1,
+                        "verified": False,
+                        "contract_artifact_error": str(exc),
+                    })
+        return result
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def _publish_verified_cli_result(result, task_id):
+    result = result if isinstance(result, dict) else {"code": 1, "message": str(result)}
+    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "unknown")).strip("._-") or "unknown"
+    report_file = os.path.join(tempfile.gettempdir(), f"qbv_{safe_task}_publish_verified_report.json")
+    with open(report_file, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=2)
+
+    stage_summaries = {}
+    for name, stage in (result.get("stages") or {}).items():
+        if not isinstance(stage, dict):
+            continue
+        stage_summaries[name] = {
+            key: stage[key]
+            for key in ("code", "error", "message", "verification_profile", "page_id", "url", "target")
+            if stage.get(key) not in (None, "")
+        }
+    summary = {
+        key: result[key]
+        for key in (
+            "code", "published", "verified", "page_id", "public_url", "timing",
+            "agent_reply_contract_file", "agent_reply_contract_sha256",
+            "reply_draft_file", "reply_validation_params_file", "reply_validation_command",
+            "agent_reply_template_file", "contract_artifact_error",
+        )
+        if result.get(key) is not None
+    }
+    summary["stages"] = stage_summaries
+    summary["full_report_file"] = report_file
+    return summary
 
 
 def cmd_fork_validate(params):
@@ -2853,13 +3130,68 @@ def _redact_direct_payload(value):
         out = {}
         for key, item in value.items():
             normalized = str(key).strip().lower().replace("-", "_")
-            if normalized in {"signature", "api_key", "authorization", "bearer"}:
+            if normalized in {"api_key", "authorization", "bearer", "access_token"} or normalized.startswith("signature"):
                 continue
             out[key] = _redact_direct_payload(item)
         return out
     if isinstance(value, list):
         return [_redact_direct_payload(item) for item in value]
     return value
+
+
+def _direct_leaf_field_paths(value, prefix="", limit=200):
+    """Return stable leaf field names only; list positions use [] and values never escape."""
+    paths = []
+
+    def visit(item, current):
+        if len(paths) >= limit:
+            return
+        if isinstance(item, dict):
+            for key, child in item.items():
+                normalized = str(key).strip().lower().replace("-", "_")
+                if normalized in {"api_key", "authorization", "bearer", "access_token"} or normalized.startswith("signature"):
+                    continue
+                next_path = f"{current}.{key}" if current else str(key)
+                visit(child, next_path)
+            return
+        if isinstance(item, list):
+            next_path = current + "[]" if current else "[]"
+            for child in item:
+                visit(child, next_path)
+                if len(paths) >= limit:
+                    break
+            return
+        if current and current not in paths:
+            paths.append(current)
+
+    visit(_redact_direct_payload(value), prefix)
+    return sorted(paths)[:limit]
+
+
+def _direct_reply_data_availability(package_results, grant_results):
+    formula_outputs = {}
+    for item in package_results or []:
+        if not isinstance(item, dict):
+            continue
+        package_id = str(item.get("package_id") or "").strip()
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        outputs = result.get("outputs") if isinstance(result.get("outputs"), dict) else {}
+        if package_id:
+            formula_outputs[package_id] = sorted(str(name) for name in outputs if str(name).strip())
+
+    grant_paths = {}
+    for item in grant_results or []:
+        if not isinstance(item, dict):
+            continue
+        grant_id = str(item.get("grant_id") or "").strip()
+        if grant_id:
+            grant_paths[grant_id] = _direct_leaf_field_paths(item.get("result"), limit=200)
+
+    return {
+        "version": "reply_data_availability_v1",
+        "formula_outputs_by_package": formula_outputs,
+        "grant_field_paths_by_grant": grant_paths,
+    }
 
 
 def _write_direct_grant_result(task_id, grant_id, result):
@@ -2869,6 +3201,43 @@ def _write_direct_grant_result(task_id, grant_id, result):
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(_redact_direct_payload(result), handle, ensure_ascii=False, indent=2)
     return path
+
+
+def _write_agent_reply_artifacts(task_id, finalized):
+    """Persist the exact terminal contract and hash-bound one-shot validator inputs."""
+    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
+    contract = finalized.get("agent_reply_contract") if isinstance(finalized, dict) else None
+    if not safe_task or not isinstance(contract, dict) or contract.get("terminal") is not True:
+        raise ValueError("direct_deliver 缺少可持久化的 terminal agent_reply_contract")
+
+    temp_root = tempfile.gettempdir()
+    contract_file = os.path.join(temp_root, f"qbv_{safe_task}_agent_contract.json")
+    draft_file = os.path.join(temp_root, f"qbv_{safe_task}_draft.md")
+    params_file = os.path.join(temp_root, f"qbv_{safe_task}_validate.json")
+    contract_bytes = json.dumps(contract, ensure_ascii=False, indent=2).encode("utf-8")
+    contract_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+    with open(contract_file, "wb") as handle:
+        handle.write(contract_bytes)
+    validator_params = {
+        "contract_file": contract_file,
+        "contract_sha256": contract_sha256,
+        "draft_file": draft_file,
+        "task_id": str(task_id),
+        "cleanup_task_id": str(task_id),
+    }
+    with open(params_file, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(validator_params, handle, ensure_ascii=False, indent=2)
+    return {
+        "agent_reply_contract_file": contract_file,
+        "agent_reply_contract_sha256": contract_sha256,
+        "reply_draft_file": draft_file,
+        "reply_validation_params_file": params_file,
+        "reply_validation_command": f'python scripts/validate_agent_reply.py "@{params_file}"',
+    }
+
+
+def _write_direct_reply_artifacts(task_id, finalized):
+    return _write_agent_reply_artifacts(task_id, finalized)
 
 
 def _direct_failure(code, message, **extra):
@@ -2924,6 +3293,7 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
         package_results.append({"package_id": package_id, "result": _redact_direct_payload(result)})
 
     grant_results = []
+    grant_query_results = []
     for grant_id in grant_ids:
         signature = next(iter(grant_credentials[grant_id]))
         result = _direct_query_grant(grant_id, signature)
@@ -2935,6 +3305,8 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
                 failed_id=grant_id,
                 result=_redact_direct_payload(result),
             )
+        redacted_result = _redact_direct_payload(result)
+        grant_query_results.append({"grant_id": grant_id, "result": redacted_result})
         grant_results.append({
             "grant_id": grant_id,
             "result_file": _write_direct_grant_result(task_id, grant_id, result),
@@ -2951,12 +3323,17 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
     out = dict(finalized)
     out["operation"] = "direct_finalize"
     out["orchestration"] = "direct_deliver"
+    availability = _direct_reply_data_availability(package_results, grant_query_results)
+    contract = out.get("agent_reply_contract")
+    if isinstance(contract, dict):
+        contract["reply_data_availability"] = availability
     out["direct_data_evidence"] = {
         "package_results": package_results,
         "grant_results": grant_results,
         "package_query_count": len(package_results),
         "grant_query_count": len(grant_results),
     }
+    out.update(_write_direct_reply_artifacts(task_id, out))
     return out
 
 
@@ -3159,7 +3536,11 @@ def cmd_fork_prepare(params):
 
 def _expected_template_metadata(params):
     expected = params.get("expected_metadata") if isinstance(params.get("expected_metadata"), dict) else {}
-    for key in ("download_url", "title", "description", "category", "size", "sha256", "updated_at", "page_context", "agent_reply_template", "reply_contract_binding"):
+    for key in (
+        "download_url", "title", "description", "category", "size", "sha256", "updated_at",
+        "package_ids", "grant_ids", "created_task_id", "latest_task_id", "latest_publish_trace_id",
+        "page_context", "agent_reply_template", "reply_contract_binding",
+    ):
         flag = "expected_" + key
         if flag in params:
             expected[key] = params[flag]
@@ -3320,6 +3701,46 @@ def _run_card_runtime_verify(html_file, *, artifact_only=False, require_browser=
         data = {"code": proc.returncode, "raw": raw[-1000:]}
     data.setdefault("code", proc.returncode)
     return data
+
+
+def _run_page_verifier(target, profile, *, card_runtime=False, timeout_sec=180):
+    cmd = [
+        "node",
+        os.path.join(C.SKILL_ROOT, "scripts", "verify_page.mjs"),
+        str(target),
+        "--profile",
+        str(profile),
+        "--require-browser",
+    ]
+    if card_runtime:
+        cmd.append("--card-runtime")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=C.SKILL_ROOT,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raw = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
+        return {
+            "code": 124,
+            "error": "BROWSER_VERIFICATION_TIMEOUT",
+            "verification_profile": profile,
+            "target": str(target),
+            "raw": raw[-1000:],
+        }
+    raw = (proc.stdout or proc.stderr or "").strip()
+    try:
+        result = json.loads(raw) if raw else {}
+    except Exception:
+        result = {"code": proc.returncode, "raw": raw[-1000:]}
+    result.setdefault("code", proc.returncode)
+    result.setdefault("verification_profile", profile)
+    return result
 
 
 def _verify_card_runtime_html(html, *, require_browser=True, timeout_sec=180):
@@ -3599,6 +4020,7 @@ _COMMANDS = {
     "new_page": cmd_new_page,
     "update_progress": cmd_update_progress,
     "publish_final": cmd_publish_final,
+    "publish_verified": cmd_publish_verified,
     "upload": cmd_upload,
     "update": cmd_update,
     "download": cmd_download,
@@ -3622,7 +4044,7 @@ _COMMANDS = {
 }
 
 _TRACE_REQUIRED_COMMANDS = {
-    "new_page", "update_progress", "publish_final", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate",
+    "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate",
 }
 
 
@@ -3649,7 +4071,8 @@ def main():
         result = trace_err or _COMMANDS[cmd](params)
     except (FileNotFoundError, ValueError) as e:
         result = {"code": 1, "message": str(e)}
-    C.emit(result, out_name="sp_out.txt")
+    emitted = _publish_verified_cli_result(result, params.get("task_id")) if cmd == "publish_verified" else result
+    C.emit(emitted, out_name="sp_out.txt")
     sys.exit(0 if (isinstance(result, dict) and result.get("code") == 0) else 1)
 
 

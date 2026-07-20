@@ -172,14 +172,14 @@ def current_trace_context():
 
 
 def cleanup_task_temp_files(task_id):
-    """删除本任务按 qbv_<task_id>_*.json 命名的临时参数文件，只允许操作系统临时目录。"""
+    """删除本任务按 qbv_<task_id>_* 命名的参数/草稿文件，只允许操作系统临时目录。"""
     safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
     if not safe_task:
         return []
     temp_root = os.path.realpath(tempfile.gettempdir())
     deleted = []
     for name in os.listdir(temp_root):
-        if not (name.startswith(f"qbv_{safe_task}_") and name.endswith(".json")):
+        if not (name.startswith(f"qbv_{safe_task}_") and os.path.splitext(name)[1].lower() in {".json", ".md"}):
             continue
         path = os.path.realpath(os.path.join(temp_root, name))
         if os.path.dirname(path) != temp_root:
@@ -449,6 +449,13 @@ def _parse_flags(argv):
     if not argv or not any(a.startswith("--") for a in argv):
         return None
     out = {}
+
+    def put(key, value):
+        normalized = key.replace("-", "_")
+        if normalized in out and out[normalized] != value:
+            raise ValueError(f"命令行参数冲突: --{key} 与同名参数的值不一致")
+        out[normalized] = value
+
     i, n = 0, len(argv)
     while i < n:
         tok = argv[i]
@@ -457,13 +464,13 @@ def _parse_flags(argv):
         key = tok[2:]
         if "=" in key:
             key, val = key.split("=", 1)
-            out[key] = _coerce(val)
+            put(key, _coerce(val))
             i += 1
         elif i + 1 < n and not argv[i + 1].startswith("--"):
-            out[key] = _coerce(argv[i + 1])
+            put(key, _coerce(argv[i + 1]))
             i += 2
         else:  # 末尾或后接另一个 --flag：当布尔开关
-            out[key] = True
+            put(key, True)
             i += 1
     return out or None
 
@@ -493,7 +500,11 @@ def read_params(argv, env_var="VIEW_PARAMS"):
         return params
     except json.JSONDecodeError as e:
         if from_argv:
-            flags = _parse_flags(argv)
+            try:
+                flags = _parse_flags(argv)
+            except ValueError as conflict:
+                emit({"code": 1, "message": str(conflict)})
+                sys.exit(1)
             if flags is not None:
                 configure_trace_context(flags)
                 return flags

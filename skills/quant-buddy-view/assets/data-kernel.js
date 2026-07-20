@@ -1,3 +1,4 @@
+/* QB_DATA_KERNEL_START:v2 */
 /* ============================================================
    观照量化 · 取数内核 (data-kernel)  —— 所有手搓页面共用的一份
    ------------------------------------------------------------
@@ -31,6 +32,73 @@ const QB = (function () {
   const SKILL_VERSION = '__QBV_SKILL_VERSION__';
   const SKILL_NAME = 'quant-buddy-view';
   const _hasSkillVer = SKILL_VERSION && SKILL_VERSION.indexOf('__QBV_') !== 0;
+  const _runtimeHost = typeof window !== 'undefined' ? window :
+    (typeof globalThis !== 'undefined' ? globalThis : null);
+  const _runtimeTransports = new Set();
+
+  function _runtimeState() {
+    if (!_runtimeHost) return null;
+    if (!_runtimeHost.QB_DATA_RUNTIME || typeof _runtimeHost.QB_DATA_RUNTIME !== 'object') {
+      _runtimeHost.QB_DATA_RUNTIME = {
+        pending: 0,
+        status: 'idle',
+        transport: 'none',
+        error: null,
+      };
+    }
+    return _runtimeHost.QB_DATA_RUNTIME;
+  }
+
+  function _safeError(error) {
+    return String(error && error.message ? error.message : error || '未知错误')
+      .replace(/https?:\/\/[^\s)'"<>]+/gi, '[URL]')
+      .replace(/([?&](?:x-amz-[^=]+|signature)\s*=)[^&\s]+/gi, '$1[REDACTED]');
+  }
+
+  function _runtimeTransport(transport) {
+    if (!transport || transport === 'none') return;
+    _runtimeTransports.add(transport);
+    const state = _runtimeState();
+    if (state) state.transport = _runtimeTransports.size > 1 ? 'mixed' : Array.from(_runtimeTransports)[0];
+  }
+
+  function _runtimeBegin(transport) {
+    const state = _runtimeState();
+    if (!state) return;
+    if (!Number.isFinite(state.pending) || state.pending <= 0) {
+      state.pending = 0;
+      state.error = null;
+      state.transport = 'none';
+      _runtimeTransports.clear();
+    }
+    state.pending += 1;
+    state.status = 'loading';
+    _runtimeTransport(transport);
+  }
+
+  function _runtimeFail(error) {
+    const state = _runtimeState();
+    if (state && !state.error) state.error = _safeError(error);
+  }
+
+  function _runtimeEnd() {
+    const state = _runtimeState();
+    if (!state) return;
+    state.pending = Math.max(0, (Number(state.pending) || 0) - 1);
+    if (state.pending === 0) state.status = state.error ? 'error' : 'ready';
+  }
+
+  async function _withRuntime(transport, fn) {
+    _runtimeBegin(transport);
+    try {
+      return await fn();
+    } catch (error) {
+      _runtimeFail(error);
+      throw error;
+    } finally {
+      _runtimeEnd();
+    }
+  }
 
   // —— 有效数值：非 null、是有限数（NaN / Infinity 都不算）——
   const num = v => (typeof v === 'number' && isFinite(v)) ? v : null;
@@ -61,7 +129,7 @@ const QB = (function () {
 
   /* 连服务器 + 读 SSE 流，组装成 outputs 直查表（out['变量名'] 即该产出）。
      元信息（stale / recomputed）挂在 out.__done 上，需要时取。 */
-  async function query(cfg, opts) {
+  async function _queryRaw(cfg, opts) {
     const { endpoint, package_id, signature } = cfg || {};
     if (!endpoint || !package_id || !signature)
       throw new Error('取数内核：endpoint / package_id / signature 三者必填');
@@ -140,6 +208,248 @@ const QB = (function () {
     return out;
   }
 
+  async function query(cfg, opts) {
+    return _withRuntime('sse', () => _queryRaw(cfg, opts));
+  }
+
+  function _parseWideCsvPayload(payload) {
+    const intent = String((payload && payload.intent) || '未知字段');
+    let text = payload && payload.text;
+    if (typeof text !== 'string') throw new Error('CSV 内容类型无效（字段=' + intent + '）');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+    function records(source) {
+      const out = [];
+      let row = [], cell = '', quoted = false, quoteClosed = false;
+      for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (quoted) {
+          if (ch === '"') {
+            if (source[i + 1] === '"') { cell += '"'; i += 1; }
+            else { quoted = false; quoteClosed = true; }
+          } else cell += ch;
+          continue;
+        }
+        if (ch === '"') {
+          if (cell.length || quoteClosed) throw new Error('CSV 引号格式无效（字段=' + intent + '）');
+          quoted = true;
+        } else if (ch === ',') {
+          row.push(cell); cell = ''; quoteClosed = false;
+        } else if (ch === '\n' || ch === '\r') {
+          if (ch === '\r' && source[i + 1] === '\n') i += 1;
+          row.push(cell); out.push(row); row = []; cell = ''; quoteClosed = false;
+        } else {
+          if (quoteClosed && !/\s/.test(ch)) throw new Error('CSV 引号后存在非法字符（字段=' + intent + '）');
+          if (!quoteClosed) cell += ch;
+        }
+      }
+      if (quoted) throw new Error('CSV 引号未闭合（字段=' + intent + '）');
+      if (cell.length || row.length) { row.push(cell); out.push(row); }
+      return out;
+    }
+
+    function normalDate(value) {
+      const raw = String(value || '').trim();
+      let y, m, d;
+      if (/^\d{8}$/.test(raw)) { y = +raw.slice(0, 4); m = +raw.slice(4, 6); d = +raw.slice(6, 8); }
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) { y = +raw.slice(0, 4); m = +raw.slice(5, 7); d = +raw.slice(8, 10); }
+      else throw new Error('CSV 日期列无效: ' + (raw || '<empty>'));
+      const date = new Date(Date.UTC(y, m - 1, d));
+      if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d)
+        throw new Error('CSV 日期列无效: ' + raw);
+      return String(y).padStart(4, '0') + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    }
+
+    function number(value, rowNumber, date) {
+      const raw = String(value == null ? '' : value).trim();
+      if (/^(?:|null|none|nan|[+-]?(?:infinity|inf))$/i.test(raw)) return null;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed))
+        throw new Error('CSV 数值无效（字段=' + intent + ', 行=' + rowNumber + ', 日期=' + date + '）');
+      return parsed;
+    }
+
+    const parsedRecords = records(text);
+    const header = parsedRecords.shift();
+    if (!header || header.length < 3 || String(header[0]).trim().toLowerCase() !== 'ticker' ||
+        String(header[1]).trim().toLowerCase() !== 'name')
+      throw new Error('CSV 表头异常（字段=' + intent + '）：期望 ticker,name,<日期...>');
+    const dates = header.slice(2).map(normalDate);
+    if (new Set(dates).size !== dates.length) throw new Error('CSV 日期列重复（字段=' + intent + '）');
+    const rows = [], seen = new Set();
+    parsedRecords.forEach((row, index) => {
+      if (!row.length || row.every(item => !String(item || '').trim())) return;
+      const rowNumber = index + 2;
+      if (row.length !== header.length) throw new Error('CSV 列数不一致（字段=' + intent + ', 行=' + rowNumber + '）');
+      const ticker = String(row[0] || '').trim();
+      const name = String(row[1] || '').trim() || ticker;
+      if (!ticker) throw new Error('CSV ticker 为空（字段=' + intent + ', 行=' + rowNumber + '）');
+      if (seen.has(ticker)) throw new Error('CSV ticker 重复（字段=' + intent + ', ticker=' + ticker + '）');
+      seen.add(ticker);
+      const values = row.slice(2).map((value, valueIndex) => number(value, rowNumber, dates[valueIndex]));
+      if (!values.some(value => value !== null))
+        throw new Error('CSV 字段无有效数据（字段=' + intent + ', ticker=' + ticker + '）');
+      rows.push({ ticker, name, values });
+    });
+    if (!rows.length) throw new Error('CSV 无资产数据（字段=' + intent + '）');
+    return { dates, rows };
+  }
+
+  async function _parseCsvPayloads(fields, texts, useWorker) {
+    const payloads = fields.map((field, index) => ({ intent: field.intent, text: texts[index] }));
+    if (!useWorker || typeof Worker === 'undefined' || typeof Blob === 'undefined' ||
+        typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      return payloads.map(_parseWideCsvPayload);
+    }
+    try {
+      return await new Promise((resolve, reject) => {
+        const workerSource = 'const parse=' + _parseWideCsvPayload.toString() + ';' +
+          'self.onmessage=function(e){try{self.postMessage({ok:true,value:e.data.map(parse)})}' +
+          'catch(err){self.postMessage({ok:false,error:String(err&&err.message||err)})}};';
+        const objectUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+        let worker;
+        try { worker = new Worker(objectUrl); }
+        catch (error) { URL.revokeObjectURL(objectUrl); error.code = 'WORKER_UNAVAILABLE'; reject(error); return; }
+        const finish = () => { try { worker.terminate(); } catch (e) {} URL.revokeObjectURL(objectUrl); };
+        worker.onmessage = event => {
+          const message = event.data || {};
+          finish();
+          if (message.ok) resolve(message.value);
+          else { const error = new Error(message.error || 'CSV Worker 解析失败'); error.code = 'CSV_PARSE'; reject(error); }
+        };
+        worker.onerror = () => { finish(); const error = new Error('CSV Worker 不可用'); error.code = 'WORKER_UNAVAILABLE'; reject(error); };
+        worker.postMessage(payloads);
+      });
+    } catch (error) {
+      if (error && error.code === 'WORKER_UNAVAILABLE') return payloads.map(_parseWideCsvPayload);
+      throw error;
+    }
+  }
+
+  function _fieldUnit(field, ticker) {
+    if (field.unit_per_asset) {
+      const unit = field.units && field.units[ticker];
+      if (unit == null) throw new Error('CSV 缺少资产单位（字段=' + field.intent + ', ticker=' + ticker + '）');
+      return unit;
+    }
+    return field.unit;
+  }
+
+  function _mergeHydratedCsv(data, parsedFields) {
+    const fields = data.csv_fields || [], assets = new Map(), order = [];
+    fields.forEach((field, fieldIndex) => {
+      const intent = String(field.intent || '').trim();
+      if (!intent) throw new Error('CSV 字段缺少 intent');
+      const parsed = parsedFields[fieldIndex];
+      const rowsByTicker = new Map(parsed.rows.map(row => [row.ticker, row]));
+      const declared = (field.tickers || []).map(String).filter(Boolean);
+      const missing = declared.filter(ticker => !rowsByTicker.has(ticker));
+      if (missing.length) throw new Error('CSV 缺少声明 ticker（字段=' + intent + ', ticker=' + missing[0] + '）');
+      parsed.rows.forEach(row => {
+        if (!assets.has(row.ticker)) {
+          assets.set(row.ticker, { asset_intent: row.name, asset_name: row.name, ticker: row.ticker, fields: [] });
+          order.push(row.ticker);
+        } else if (assets.get(row.ticker).asset_name !== row.name) {
+          throw new Error('CSV 资产名称不一致（ticker=' + row.ticker + '）');
+        }
+        const series = parsed.dates.map((date, index) => ({ date, value: row.values[index] }));
+        const hydratedField = {
+          intent,
+          index_title: field.index_title,
+          unit: _fieldUnit(field, row.ticker),
+          date_type: field.date_type,
+          series,
+        };
+        if (String(data.query_type || '').toLowerCase() !== 'window') {
+          for (let i = series.length - 1; i >= 0; i--) {
+            if (series[i].value !== null) { hydratedField.date = series[i].date; hydratedField.value = series[i].value; break; }
+          }
+        }
+        assets.get(row.ticker).fields.push(hydratedField);
+      });
+    });
+    return Object.assign({}, data, { source_mode: 'csv', results: order.map(ticker => assets.get(ticker)) });
+  }
+
+  async function _downloadCsvField(field, controllers) {
+    const intent = String(field.intent || '未知字段');
+    if (!field.csv_url) throw new Error('CSV 下载地址缺失（字段=' + intent + '）');
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (controller) controllers.add(controller);
+    const timer = controller ? setTimeout(() => controller.abort(), 20000) : null;
+    let response;
+    try {
+      response = await fetch(field.csv_url, {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'omit',
+        signal: controller ? controller.signal : undefined,
+      });
+      if (!response.ok) {
+        const error = new Error('CSV 下载失败（字段=' + intent + ', HTTP ' + response.status + '）');
+        error.status = response.status;
+        error.retryable = [401, 403, 404].includes(response.status);
+        throw error;
+      }
+      return await response.text();
+    } catch (error) {
+      if (error && error.status) throw error;
+      const wrapped = new Error('CSV 下载失败（字段=' + intent + ', 网络或超时）');
+      wrapped.code = 'CSV_NETWORK';
+      throw wrapped;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (controller) controllers.delete(controller);
+    }
+  }
+
+  async function _downloadCsvFields(fields) {
+    const texts = new Array(fields.length), controllers = new Set();
+    let next = 0;
+    async function worker() {
+      for (;;) {
+        const index = next++;
+        if (index >= fields.length) return;
+        texts[index] = await _downloadCsvField(fields[index], controllers);
+      }
+    }
+    try {
+      await Promise.all(Array.from({ length: Math.min(4, fields.length) }, worker));
+      return texts;
+    } catch (error) {
+      controllers.forEach(controller => { try { controller.abort(); } catch (e) {} });
+      throw error;
+    }
+  }
+
+  async function _hydrateFastQueryCsv(data) {
+    const fields = data && data.csv_fields;
+    if (!Array.isArray(fields) || !fields.length) throw new Error('CSV 字段清单为空');
+    const texts = await _downloadCsvFields(fields);
+    const points = Number(data.summary && data.summary.total_data_points) || 0;
+    const parsed = await _parseCsvPayloads(fields, texts, points > 20000);
+    return _mergeHydratedCsv(data, parsed);
+  }
+
+  async function _requestGrantBody(cfg) {
+    const { endpoint, grant_id, signature } = cfg;
+    const resp = await fetch(apiUrl(endpoint, '/skill/queryDataGrant'), {
+      method: 'POST',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        _hasSkillVer ? { 'x-skill-version': SKILL_VERSION, 'x-skill-name': SKILL_NAME } : {}
+      ),
+      body: JSON.stringify({ grant_id, signature }),
+    });
+    let body = null;
+    try { body = await resp.json(); } catch (e) {}
+    if (!resp.ok || !body || body.code !== 0) {
+      const err = (body && body.error) || {};
+      throw new Error((err.code || ('HTTP ' + resp.status)) + (err.message ? (': ' + err.message) : ''));
+    }
+    return body;
+  }
+
   /* 数据授权取数：免 key，凭 grant_id + signature；普通 JSON POST（不重算，永远反映当下数据）。
      成功/失败都走同一份 throw-on-error 约定；成功时返回的 out 直查表与 query() 同形状，
      key 用 grant_id，series/lastValue/topValues/perAsset 等取值器直接复用。 */
@@ -155,25 +465,28 @@ const QB = (function () {
         '\n  发布前请把 endpoint 换成 https 地址。');
     }
 
-    const resp = await fetch(apiUrl(endpoint, '/skill/queryDataGrant'), {
-      method: 'POST',
-      headers: Object.assign(
-        { 'Content-Type': 'application/json' },
-        _hasSkillVer ? { 'x-skill-version': SKILL_VERSION, 'x-skill-name': SKILL_NAME } : {}
-      ),
-      body: JSON.stringify({ grant_id, signature }),
+    return _withRuntime('none', async () => {
+      let body = await _requestGrantBody({ endpoint, grant_id, signature });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (body && body.data && String(body.data.mode || '').toLowerCase() === 'csv') {
+          _runtimeTransport('csv');
+          try {
+            body = Object.assign({}, body, { data: await _hydrateFastQueryCsv(body.data) });
+          } catch (error) {
+            if (attempt === 0 && error && error.retryable) {
+              body = await _requestGrantBody({ endpoint, grant_id, signature });
+              continue;
+            }
+            throw error;
+          }
+        } else _runtimeTransport('inline');
+        const out = {};
+        out[grant_id] = { output: grant_id, data: body.data, error: null, kind: body.kind };
+        out.__status = { grant_id, kind: body.kind, ok: true, error: null };
+        return out;
+      }
+      throw new Error('CSV 刷新后仍无法取数');
     });
-    let body = null;
-    try { body = await resp.json(); } catch (e) { /* 非 JSON 响应，body 留 null，下面统一按失败处理 */ }
-    if (!resp.ok || !body || body.code !== 0) {
-      const err = (body && body.error) || {};
-      throw new Error((err.code || ('HTTP ' + resp.status)) + (err.message ? (': ' + err.message) : ''));
-    }
-
-    const out = {};
-    out[grant_id] = { output: grant_id, data: body.data, error: null, kind: body.kind };
-    out.__status = { grant_id, kind: body.kind, ok: true, error: null };
-    return out;
   }
 
   async function queryMany(packagesByRole, opts) {
@@ -314,9 +627,11 @@ const QB = (function () {
 
   return {
     query, queryMany, queryGrant, apiUrl,
+    runtime: { begin: _runtimeBegin, transport: _runtimeTransport, fail: _runtimeFail, end: _runtimeEnd },
     num, outputStatus,
     lastValue, lastDate, series, values, topValues, statDate,
     perAsset, perAssetMap,
     fmtDate
   };
 })();
+/* QB_DATA_KERNEL_END:v2 */

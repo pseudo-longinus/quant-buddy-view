@@ -17,7 +17,7 @@ Use for broad market, index, commodity, or event-impact pages where the answer s
 - Anchor every interpretation to index, sector, commodity, or event-study data returned by the page or tools.
 - Separate market facts from interpretation.
 - Keep the conclusion, index table, sector moves, capital conditions, event transmission, positioning framework, risks, and disclaimer in that order.
-- For unavailable funding or index fields, write `--` / `本轮未返回`; never substitute turnover for capital flow.
+- Omit structurally unavailable funding, index, sector, or positioning sections. Use `--` only for an occasional missing cell inside a section backed by real data; never substitute turnover for capital flow.
 - Do not give precise index targets. Use qualitative positioning and risk framing.
 - Append `dashboard_guidance_appendix_v1` only when the current data contains a sustainable tracking signal.
 

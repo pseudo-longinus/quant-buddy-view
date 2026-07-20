@@ -19,7 +19,7 @@ Use for Hong Kong, US, and overseas listed assets where market suffix, currency,
 - If financial fields are unavailable for the market, say so and keep the analysis to available price, valuation, and cited public information.
 - Do not apply A-share-only fields or assumptions to overseas assets.
 - Keep original currency unless the user explicitly asks for conversion and provides a rate convention.
-- Missing overseas financial fields stay `--` / `本轮未返回`; do not estimate them from A-share conventions.
+- Omit an overseas data section that is structurally unavailable. Use `--` only for an occasional missing field inside a valid section; do not estimate it from A-share conventions.
 
 ## Markdown Skeleton
 
@@ -64,7 +64,7 @@ Use for Hong Kong, US, and overseas listed assets where market suffix, currency,
 | 换手率 | {turnover} | {period_compare} | {signal} |
 | 做空比例 | {short_ratio} | {period_compare} | {signal} |
 
-> 港美股未返回 A 股“主力/散户”口径时写 `本轮未返回`，不得用成交额替代。
+> 港美股未返回 A 股“主力/散户”口径时删除该资金结构，不得用成交额替代。
 
 ## 计算维度
 

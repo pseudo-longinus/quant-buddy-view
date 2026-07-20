@@ -80,6 +80,24 @@ python scripts/data_grant.py refresh '{"grant_id":"dg_xxx","rotate_signature":tr
 
 外层统一带 `grant_id`；失败返回 `code:1` 并附错误。
 
+当 FastQuery 数据点超过服务端阈值时，`queryDataGrant` 会返回 `mode:"csv"` 和当次生成的
+`csv_fields[].csv_url`。页面仍先调用 `queryDataGrant`，随后由内联 `data-kernel` 下载 CSV 并
+hydrate 为 `results[].fields[].series`；刷新时重新请求 Grant 获取新 URL，不缓存或持久化
+presigned URL。生产环境优先返回 `https://pages.quantbuddy.cn/exports/...`，与活页同源，
+无需 OSS CORS。页面下载仍固定 `credentials:"omit"`、`cache:"no-store"`，访问能力完全由
+presigned URL 控制；如果兼容期仍返回 OSS 跨域地址，则 Bucket 必须额外允许无 Cookie 的
+`GET/HEAD` CORS。
+
+旧页升级只替换内核，不改页面业务脚本：
+
+```bash
+DKR_PARAMS='{"html_file":"old.html","out_file":"old-new.html"}' python scripts/data_kernel_retrofit.py
+# 也可用公开 url 读取，但 url 模式必须显式给 out_file
+```
+
+工具优先匹配新 `QB_DATA_KERNEL_START/END` marker；没有 marker 时只接受唯一一个同时包含
+`const QB`、`queryGrant`、公开 API 返回表和 `SKILL_VERSION` 的旧脚本块。
+
 ## 硬门槛与约束
 
 - **先验证再注册**：注册任何 grant 前，必须先在 **quant-buddy-skill** 用 api-key 跑通对应接口（fastQuery / stockProfile / selectByComposition），确认命中/出数，再回本技能注册。不要凭空注册未验证的请求。

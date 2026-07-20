@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.9
+version: 0.6.14
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, thumbnails, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
@@ -12,7 +12,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.9
+  version: 0.6.14
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -56,11 +56,13 @@ runtimeRequirements:
 
 把「已验证的量化数据与公式」沉淀成一个**公开可分享、实时取数**的网页看板/落地页。本技能不做一次性行情查询或回测探索；默认执行路线是：
 
+> **0.6.14 变更**：`data-kernel` 可在浏览器实时下载并解析 FastQuery `mode:"csv"`，自动 hydrate 为兼容的 `results[].fields[].series`；标准看板和构建期体检共用同口径，发布门禁等待 `QB_DATA_RUNTIME` 完成后再验收。
+
 0. 在任何后端请求前运行 `scripts/trace_context.py begin`，保存唯一 `task_id` 并在后续命令中复用。
 1. 运行一次 `scripts/static_page.py templates`，传 `recommend:"all"`，查询官方精选+社区命中池。
 2. direct 命中后先把列表返回的现成 URL 发给用户，再运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
-3. fork/unmatched 才创建 `new_page` 首链；验证目标公式后注册当前用户凭证、替换页面内容、浏览器验收并用 `publish_final` 更新同一链接。
-4. 所有分支最终按 `agent_reply_contract` 和回复模板生成草稿，再运行 `validate_agent_reply.py`。
+3. fork/unmatched 才创建 `new_page` 首链；验证目标公式后注册当前用户凭证、替换页面内容，并用 `publish_verified` 完成分级浏览器门禁和同链接发布。
+4. 所有分支最终按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
 
 ## 何时用本技能 vs quant-buddy-skill
 
@@ -75,7 +77,7 @@ runtimeRequirements:
 python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 ```
 
-保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`upload` / `update` / `publish_final` / `update_template` 缺少 Trace Context 时必须停止发布。若中途使用 quant-buddy-skill 验证公式，其业务调用也显式传同一个 `task_id`，不要让另一个 session id 把链路拆开。
+保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`upload` / `update` / `publish_final` / `publish_verified` / `update_template` 缺少 Trace Context 时必须停止发布。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
 
 新会话被判定为可分享活页任务时，**第一步只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。
 
@@ -84,12 +86,15 @@ python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
   - 发出链接后只运行一次：`python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'`。该命令内部固定完成一次模板详情读取、一次 HTML 下载、每个当前 package/grant 一次查询和一次 `direct_finalize`；不要再单独调用 `template`、query 或 `direct_finalize`。
   - 不 `new_page`、不注册、不 fork、不研究脚本源码、不先跑 `--help`。`direct_deliver` 的公式结果固定为 summary；grant 完整结果只写 `%TEMP%`，最终回复不得暴露本地路径或凭证。
   - 只有返回 `agent_reply_contract.terminal=true` 且 `operation=direct_finalize` 才允许最终收口；失败时说明具体错误，不得用已发送的链接绕过终态门禁。回复模板和 `page_context` 沿用原页。
+  - `direct_deliver` 会返回真实 contract、草稿、校验参数的 `%TEMP%\qbv_<完整 task_id>_*` 文件路径及 `reply_validation_command`。只把 Markdown 写入返回的 `reply_draft_file`，执行返回的命令一次；`valid=true` 后立即最终回复，禁止再次校验、运行 `--help`、扫描临时目录或继续搜索 memory。成功校验会统一清理 contract、draft、params 和 grant 临时结果。
   - 用户之后说"要改这个页面内容" → 转 ② fork（官方/社区链接不能直接改，只能新建自己的链接后改）。
   - 边界：范式匹配但**标的/股票池/指数/市场范围不一致**（如命中的是茅台估值页、用户问的是宁德时代；命中沪深300异动页、用户问中证500）不算直接命中，落到 ②。只有资产无关且市场范围一致的全市场范式，才可不依赖具体标的直接命中。
 - **② fork**（范式命中但标的不符，或用户要改内容）：
   - `new_page` 先发首链进度页（此时才需要首链）→ 用同一 `task_id` 调 `fork_prepare` 下载该范式模板 HTML 并生成 `fork_manifest_v1`；脚本会把来源与 manifest 持久绑定到该任务，后续 `publish_final` 即使漏传来源字段也会自动恢复并强制校验。`source_template_id` 只继承回复 metadata，不会自动下载或克隆 HTML。
-  - 用 quant-buddy-skill 验证**本标的**公式/输出（硬门槛），批量公式使用 `output_mode:"summary"`；只有工具返回 `validation_receipt_file` 才算完成，`failed` / `deferred` 不得推进 → 注册**自己的**公式包或数据授权 → 换标的/文案/凭证 → 生成活页。
-  - 先调用 `fork_validate(task_id, html_file)` 复用发布门禁，再执行 `verify_page.mjs --require-browser`（来源有 Card Runtime 时加 `--card-runtime`）→ `publish_final(source_template_id, fork_manifest_file, require_agent_reply_template)`。
+  - 用 `scripts/qbs_bridge.py validate_package_set @params.json` 按最终 package 边界验证**本标的**公式/输出（每包 1..20 条，保持顺序，自动处理 deferred/resume 并汇总收据）；只有每包都返回 `validation_receipt_file` 才算完成。`failed` / 未完成 `deferred` 不得推进 → 注册**自己的**公式包或数据授权 → 换标的/文案/凭证 → 生成活页。
+  - 估值分位输出必须名实一致：`pe_pctile=排序水位("pe_ttm",250)`、`pb_pctile=排序水位("pb",250)`，并先通过上述 QBS 验证；禁止用 `pe_pctile="pe_ttm"` / `pb_pctile="pb"` 直接别名。
+  - 调用一次 `publish_verified(task_id, page_id, html_file, source_template_id, fork_manifest_file, validation_receipt_files)`；它固定执行 `fork_validate → 本地 fork-local → publish_final → 公网 public-smoke`，无需 Agent 分步拼接浏览器命令。
+  - package/grant 较多时，优先调用一次 `scripts/publish_workflow.py @params.json`，按 marker 将验证、注册、HTML 凭证替换和 `publish_verified` 串成确定性短路流程；格式见 [tools/publish_workflow.md](tools/publish_workflow.md)。
   - 回复 = 回复模板格式 + **自己的新链接**（数值同样用自己的包/grant query 填）。
 - **③ 未命中**（无匹配范式）：`new_page` 首链 → `build_dashboard` / bespoke 自建 → 其余同 ②。
 
@@ -111,15 +116,16 @@ python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 活页用同级 `page_context` 描述用途/模块/输出，用 `agent_reply_template.template_ref` 指向 [reply-templates/](reply-templates/) 的 Markdown 骨架。字段契约、hybrid 规则和发布继承见 [tools/static_page.md](tools/static_page.md)。
 
 - `page_context` 不得包含实时数值、api_key、signature、Bearer token 或本地路径；fork 后必须按最终页面重建，direct 才沿用原页。
-- 读取型命令返回 `agent_reply_hint.terminal=false`；`new_page/update_progress` 也不是终态。成功的 `direct_deliver/direct_finalize/upload/update/publish_final/update_template` 才可返回 `agent_reply_contract.terminal=true`。
+- 读取型命令返回 `agent_reply_hint.terminal=false`；`new_page/update_progress` 也不是终态。成功的 `direct_deliver/direct_finalize/upload/update/publish_final/publish_verified/update_template` 才可返回 `agent_reply_contract.terminal=true`。
 - fork/unmatched 遇到必须由用户决定的口径时，用同一 `task_id/page_id` 进入 `waiting_input`，用户回答后继续原任务；不要重新建 Trace 或首链。
 - fork 必须使用 `fork_prepare` 绑定来源和 manifest，最终 `publish_final` 保持首链 URL、移除来源凭证并保留必需栏目/输出/Card Runtime；详细门禁见 [workflows/new-session-paradigm-routing.md](workflows/new-session-paradigm-routing.md)。
 - prepared fork task 禁止 `build_dashboard`；脚本返回 `FORK_TASK_BOUND` 后只能继续编辑绑定的 `working_html_file` 并调用 `fork_validate`。
 - 带 `task_id` 的进度从 `package_register` 起必须传同任务的 `validation_receipt_files`，收据必须为 `completed + success=true + failures=[]`；静态页可传明确的 `validation_not_required_reason`。
-- 最终回复必须按回复模板输出并包含 contract 的公开 URL；缺字段写 `--` 或“本轮未返回”，不得暴露本地路径、凭证或内部日志。
-- 最终回复前运行 `scripts/validate_agent_reply.py`；参数只放 `%TEMP%/qbv_<task_id>_*.json`，成功后传 `cleanup_task_id` 清理。
+- 最终回复必须按回复模板输出并包含 contract 的公开 URL；依据 `reply_render_policy` 与 `reply_data_availability` 删除结构性不存在的字段、整列、整行和空可选章节，只有有效结构中的偶发缺值才写 `--`，不得暴露本地路径、凭证或内部日志。
+- 最终回复前只运行一次发布器返回的 `reply_validation_command`；validator 必须读取发布器生成的 `contract_file + contract_sha256`，不得手工重建精简 contract。direct 使用 `direct_deliver` 返回的完整 task ID 路径和命令，成功后自动清理。`valid=true` 后不再执行任何工具调用。
 - 没有 terminal contract 禁止完成任务。唯一例外是成功的 `waiting_input` checkpoint。
-- 用户可见进度间隔不超过 60 秒；逐指标声明最新可得日期和实际覆盖范围。未做浏览器验收时，只能声明公开 URL 和实时接口可访问。
+- 性能门槛：模板命中到 URL 不超过 5 秒，terminal 到最终回复不超过 45 秒，端到端不超过 120 秒，用户可见消息间隔不超过 60 秒。
+- 逐指标声明最新可得日期和实际覆盖范围。未做浏览器验收时，只能声明公开 URL 和实时接口可访问。
 
 ## 前置依赖：公式必须先验证
 
@@ -216,8 +222,11 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `scripts/build_dashboard.py` | （单命令） | spec → live 实时取数看板 HTML | [tools/build_dashboard.md](tools/build_dashboard.md) |
 | `scripts/compile_bespoke_page.py` | （单命令） | **【shell 处理脚本】** bespoke 主体 HTML → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
 | `scripts/retrofit_share_shell.py` | （单命令） | **【shell 处理脚本】** 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell（`assets/share-shell/`），可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
-| `scripts/static_page.py` | `templates` / `direct_deliver` / `new_page` / `update_progress` / `publish_final` / `upload` / `update` / `download` / `fork_prepare` / `fork_validate` / `update_template` / 其他管理命令 | 范式路由、direct 确定性交付、首链进度、fork 发布前门禁和页面发布管理 | [tools/static_page.md](tools/static_page.md) |
-| `scripts/validate_agent_reply.py` | （单命令） | 读取终态 contract 与 Markdown 草稿，校验公开 URL、模板章节顺序、缺失字段占位和敏感信息；可在成功后清理任务临时参数文件 | — |
+| `scripts/data_kernel_retrofit.py` | （单命令） | 按 `QB_DATA_KERNEL` marker 或严格旧内核指纹，只替换页面中的 data-kernel；零个/多个命中均拒绝写回 | [tools/data_grant.md](tools/data_grant.md) |
+| `scripts/static_page.py` | `templates` / `direct_deliver` / `new_page` / `update_progress` / `publish_final` / `publish_verified` / `upload` / `update` / `download` / `fork_prepare` / `fork_validate` / `update_template` / 其他管理命令 | 范式路由、direct 确定性交付、首链进度、分级浏览器门禁和页面发布管理 | [tools/static_page.md](tools/static_page.md) |
+| `scripts/qbs_bridge.py` | `<quant-buddy-skill tool> @params.json` / `validate_package_set @params.json` | QBV→QBS task_id 继承、并发 session 隔离和按最终 package 分批验证/续传/收据汇总 | 本节“新会话路由” |
+| `scripts/publish_workflow.py` | `@params.json` | 一次完成 package-set 验证、公式包/授权注册、marker 替换和单次 `publish_verified` | [tools/publish_workflow.md](tools/publish_workflow.md) |
+| `scripts/validate_agent_reply.py` | （单命令） | 校验发布器 SHA256 绑定的终态 contract 与 Markdown 草稿，并检查公开 URL、章节结构和敏感信息；可在成功后清理任务临时参数文件 | — |
 | `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误；发布前可加 `--require-browser` 强制浏览器验收；范式卡加 `--card-runtime` 连同整页验收 artifact，或 `--card-runtime-only` 跳过整页视口、只验收 artifact/manifest/required_outputs/独立 hydrate | — |
 | `scripts/render_cover.py` | （被 `build_dashboard` 调用） | 封面栅格化与合成兜底：`capture_page_cover` 用系统 Edge/Chrome 无头截"封面模式页"为整页 PNG；合成封面（全幅裸图/品牌海报）走 浏览器 → 纯 Python(cairosvg/svglib) → SVG 三层兜底。跨平台、零强依赖，不影响 HTML 发布 | — |
 | `scripts/render_existing_page_thumbnail.py` | （单命令） | 给已发布/官方精选 HTML 补封面：下载或读取 HTML → 解析内嵌公式包凭证 → 先取真实 outputs 并临时替换 `QB.query` → 再用系统 Edge/Chrome 截 1200×675 PNG；可带 `upload:true` 直接设置 `thumbnail_url` | [tools/static_page.md](tools/static_page.md) |

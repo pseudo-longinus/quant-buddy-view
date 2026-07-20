@@ -154,12 +154,21 @@ def _preflight_register_params(params):
             if not lefts:
                 errors.append(f"formulas[{i}] 左值为空：每条公式必须形如 `变量名 = 表达式`")
                 continue
+            assignment = _ASSIGN_RE.search(text)
+            right = text[assignment.end():].strip() if assignment else ""
             for left in lefts:
                 if left in seen:
                     errors.append(f"公式左值重复：`{left}` 同时出现在 formulas[{seen[left]}] 和 formulas[{i}]")
                 else:
                     seen[left] = i
                     left_values.append(left)
+                if left.lower().endswith("_pctile"):
+                    alias = re.fullmatch(r'["\']([^"\']+)["\']', right)
+                    if alias and not alias.group(1).lower().endswith("_pctile"):
+                        errors.append(
+                            f"`{left}` 是历史分位输出，不能直接别名到 `{alias.group(1)}`；"
+                            "请使用 `排序水位(数据,滚动天数)` 并先通过 QBS 验证"
+                        )
 
     if not isinstance(reads, list) or not reads:
         errors.append("reads 必须是非空数组")
