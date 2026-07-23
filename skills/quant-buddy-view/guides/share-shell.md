@@ -65,6 +65,8 @@ The template owns:
 - data loading and rendering;
 - dynamic poster headline, summary, metrics, sections, and `asof`.
 
+The poster preview is intentionally empty until the user opens the share modal. Any `<img>` whose `src` is assigned only at runtime must declare `data-qb-runtime-src`; ordinary content images still require a non-empty static `src`. Do not add a transparent placeholder image, because `shell.js` uses an empty `src` to decide whether poster generation must run before download.
+
 ## Theming
 
 公共页头和页尾的布局固定，模板或迁移脚本只能通过 CSS 变量换颜色：

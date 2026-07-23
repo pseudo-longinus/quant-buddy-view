@@ -15,7 +15,7 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
-> **首链进度页**：新会话先查官方精选+社区范式卡；direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize。fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护同一首链。
+> **首链进度页**：新会话先查官方精选+社区范式卡；普通渠道 direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize，fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护并发送同一首链。`config.json._channel=feishu-group` 时内部流程不变，但所有非终态链接都禁止发送，只交付 terminal contract 的 playground URL。
 > 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`，后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
@@ -44,7 +44,7 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 ## 调用方式
 
 ```bash
-# 首次会话先拿活页进度链接（返回 page_id + url + steps）
+# 首次会话创建活页进度页（返回 page_id + url + steps；普通渠道发送 url，feishu-group 只内部保留）
 python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
 
 # 阶段推进时只更新同一个 page_id 的进度 HTML；脚本会按 current_step 自动推导步骤状态
@@ -134,7 +134,7 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 - 带 `task_id` 推进到 `package_register` 或更后阶段时，必须传 quant-buddy-skill 成功返回的 `validation_receipt_files`；`failed/deferred` 收据不能作为完成证据。无需实时验证的静态页必须传非空 `validation_not_required_reason`。
 - 必须由用户决定口径时传 `page_status=waiting_input` 和 `required_input`；当前步骤标为 `waiting`，返回 `agent_reply_hint.interaction_required=true`。用户回复后必须复用原 `task_id/page_id`，以 `page_status=running` 恢复 `resume_step`。
 - 进度快照默认显式上传空 `scene_tags/paradigm_tags`，防止临时文案触发自动打标；正式 `publish_final` 不继承该抑制策略。
-- `message` 会直接展示给用户，应使用“活页内容 / 准备实时数据 / 检查展示效果”这类产品文案，避免 `HTML`、`公式包`、`本地浏览器验收`、`page_id`、`URL` 等工程词。
+- `message` 会直接展示给用户，应使用“活页内容 / 准备实时数据 / 检查展示效果”这类产品文案，避免 `HTML`、`公式包`、`本地浏览器验收`、`page_id`、`URL` 等工程词。`feishu-group` 仍创建和更新进度页，但不得把其 URL 写进用户消息。
 
 参数：
 
@@ -225,6 +225,18 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 
 返回会包含每张卡的 `artifact_text`、`required_outputs`、`problems`，并把逐项 HTML/JSON 和 `summary.json` 保存到 `output/card-runtime-verify/<timestamp>/`。长任务中途失败时，已完成项仍会留在该目录。
 
+完整重建已有页面的 artifact 时，`retrofit_card_runtime` 不再提供通用三指标兜底：
+
+```bash
+# 已有好看的 artifact：只升级 manifest/runtime/ready，逐字节保留 template/style
+python scripts/static_page.py retrofit_card_runtime '{"page_id":"page_xxx","preserve_visual":true,"update":false}'
+
+# artifact 缺失：必须命中内置页面视觉或显式给视觉合同
+python scripts/static_page.py retrofit_card_runtime '{"page_id":"page_xxx","visual_contract":{"kind":"numeric-focus","title":"风险温度","description":"一个主数字，两项解释指标。","metrics":[{"label":"风险分","output":"risk_score","format":"number1"},{"label":"波动率","output":"vol","format":"pct-smart"}]},"update":false}'
+```
+
+没有视觉方案时返回 `CARD_VISUAL_REQUIRED`；传入尚未实现的 kind 返回 `CARD_VISUAL_UNSUPPORTED`。完整重建会自动追加 `--require-card-visual-contract` 严格验收，`preserve_visual:true` 为兼容旧 artifact 不启用该门禁。
+
 ## 自动打标（`autotag`）
 
 上传/更新后，用 LLM 识别页面涉及的**场景标签**（从后台维护的固定场景里选，选不中留空）和**范式标签**（命中已有或按需新增），写入页面。独立旁路命令，**与上传本身互不影响**。
@@ -269,12 +281,12 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 
 ## Agent 回复协议：hint 与 terminal contract
 
-- `templates` / `template`：只返回 `agent_reply_hint`，`resource_role=source_template`。direct 精确命中时，列表 URL 必须在下一次工具调用前先发给用户；fork 的 `download_url` 只是来源输入。
+- `templates` / `template`：只返回 `agent_reply_hint`，`resource_role=source_template`。普通渠道 direct 精确命中时，列表 URL 必须在下一次工具调用前先发给用户；`feishu-group` 的 hint 带 `delivery_policy.emit_intermediate_url=false`，禁止发送列表 URL，并直接调用 `direct_deliver`。fork 的 `download_url` 只是来源输入。
 - direct 命中：运行一次 `direct_deliver`，由脚本读取一次模板、按当前 package/grant 各 query 一次并调用一次 `direct_finalize`；成功返回 `agent_reply_contract.terminal=true` 和 `delivery_trace_id`，且不改模板生成 Trace 字段。
 - `fork_prepare`：返回来源 HTML 与 `fork_manifest_v1` 文件路径，同时保持 `agent_reply_hint.terminal=false`；它是 fork 输入，不是完成证据。
 - `list` / 默认 `download`：只返回 `agent_reply_hint`，`resource_role=existing_page`。
-- `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。`waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`，只授权一次澄清停顿，不是业务完成证据。
-- 成功的 `upload` / `update` / `publish_final` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`direct_deliver` 还附加只含公式 output 名称与脱敏 grant 字段路径的 `reply_data_availability`。
+- `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。普通渠道的 `waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`；`feishu-group` 不返回 hint `public_url`，澄清消息也不得带链接。两者都只授权一次澄清停顿，不是业务完成证据。
+- 成功的 `upload` / `update` / `publish_final` / `publish_verified` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`feishu-group` 还包含 `delivery_policy:{channel:"feishu-group",emit_intermediate_url:false,terminal_url_format:"quantbuddy_playground"}`，并把 contract `public_url` 转为 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`；原始 pages URL 仅供内部发布与验收。`direct_deliver` 还附加只含公式 output 名称与脱敏 grant 字段路径的 `reply_data_availability`。
 - 只有终态 contract 可以触发最终回复；其中 `required=true` 时才要求读取 Markdown 回复骨架。任何 hint、来源模板 metadata 或 `terminal:false` 都表示必须继续工作。
 - `publish_final` 会 fail-closed 校验同一首链 `page_id` / URL、排除来源模板 URL；fork 还要求有效 manifest、禁止任一来源 package/grant 残留，并检查核心栏目、必需输出、Card Runtime 和用户自己的实时凭证。
 
@@ -377,12 +389,37 @@ python scripts/static_page.py templates '{"include_community":true}'
 python scripts/static_page.py templates '{"recommend":"社区"}'
 ```
 
-返回 items 每条含：`template_id`（兼容字段，等同 `page_id`）/ `page_id` / `title` / `description` / `thumbnail_url` / `category` /
-`is_template` / `template_status` / `download_url` /
-`scene_tags` / `paradigm_tags` / `recommend_tags` 等（具体以服务端为准）。
 不传 `recommend`/`include_community` 时仍限定 `recommend:官方精选`；`recommend:"all"` 或 `include_community:true` 合并官方精选 + 社区，
 `recommend:"社区"` 只看社区。`scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 仍作叠加标签过滤。
 > 说明：社区命中池依赖服务端接受 `recommend=社区` 的列表口径；若后台尚未放开，该项会退回官方精选并被去重，不影响官方精选命中。
+
+`templates` 需要 Trace Context（先 `trace_context.py begin` 拿到 `task_id` 并传入）。0.6.17 起顶层返回结构（不再原样打印完整候选）：
+
+```json
+{
+  "code": 0,
+  "item_count": 24,
+  "items_summary": [
+    {
+      "template_id": "tpl_xxx", "page_id": "page_xxx",
+      "title": "...", "category": "个股画像",
+      "description": "...(超过 80 字截断，完整文本见 full_result_file)",
+      "download_url": "https://...",
+      "is_template": true, "template_status": "published",
+      "scene_tags": ["个股"], "paradigm_tags": ["估值体检"], "recommend_tags": ["官方精选"],
+      "source_template_id": "tpl_xxx"
+    }
+  ],
+  "full_result_file": "<系统临时目录>/qbv_<task_id>_templates_full.json",
+  "full_result_sha256": "<sha256>",
+  "page": 1, "page_size": 20, "total": 15
+}
+```
+
+- `items_summary` 的长度**恒等于** `item_count`（不做 top-N 截断，只对单条字段做精简/description 截断）；两者不一致就是实现 bug，不能据此做路由判断。
+- `item_count` 是合并去重后的真实候选数，不等同于 `total`（`total` 只反映服务端单次分页元数据，`include_community`/`recommend:"all"` 合并场景下不会重新计算）。
+- `full_result_file` 存的是完整候选（含每条的 `agent_reply_hint`/`page_context`），正常路由判断不需要读它；只有在 `items_summary` 缺字段、需要 debug 时才读，且读取前应先用 `full_result_sha256` 校验文件未被截断/篡改。
+- 落盘失败返回 `{"code":1,"error":"TEMPLATES_PERSIST_FAILED","message":"..."}`；结构异常返回 `{"code":1,"error":"TEMPLATES_RESPONSE_SHAPE_UNEXPECTED","message":"..."}`；两种情况都不允许判定 `unmatched`，也不允许重复调用 `templates`。
 
 **2) 看详情 / 拿下载链接**：`template`
 
@@ -398,13 +435,13 @@ scene_tags, paradigm_tags, recommend_tags }`。其中：
 - `is_live` / `package_ids` / `packages` 说明该模板是否实时取数页、关联了哪些公式包（克隆后通常要
   换成你自己注册的公式包 signature 才能取你关心的标的数据）。
 
-**3) direct 命中**：范围一致时先发现成链接 → 一次性查询原页凭证并校验交付证据
+**3) direct 命中**：普通渠道先发现成链接；`feishu-group` 不发链接 → 一次性查询原页凭证并校验终态交付证据
 
 ```bash
 python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
 ```
 
-命中后不要先单独查询公式包或数据授权；`direct_deliver` 内部负责一次模板详情、每个数据源一次查询和一次 finalize。成功响应还会返回完整 task ID 命名的 `agent_reply_contract_file`、`reply_draft_file`、`reply_validation_params_file` 与 `reply_validation_command`。Agent 根据 contract 的字段可用性和裁剪策略删除结构性空内容，只写入返回的草稿路径并执行校验命令一次；`valid=true` 后临时文件已清理，应立即最终回复，不再运行工具。
+命中后不要先单独查询公式包或数据授权；`direct_deliver` 内部负责一次模板详情、每个数据源一次查询和一次 finalize。普通渠道在调用前已发送现成链接；`feishu-group` 必须等此命令生成 terminal contract 后再首次发送链接。成功响应还会返回完整 task ID 命名的 `agent_reply_contract_file`、`reply_draft_file`、`reply_validation_params_file` 与 `reply_validation_command`。Agent 根据 contract 的字段可用性和裁剪策略删除结构性空内容，只写入返回的草稿路径并执行校验命令一次；`valid=true` 后临时文件已清理，应立即使用 contract `public_url` 最终回复，不再运行工具。
 
 **4) fork 成自己的页**：`fork_prepare` → 改资产/文案/凭证 → `publish_final`
 
@@ -416,6 +453,10 @@ python scripts/static_page.py publish_final '{"page_id":"page_first","html_file"
 > fork 要点：模板里内嵌的是原作者凭证。必须用 quant-buddy-skill 验证目标公式/输出，注册自己的 package/grant 并替换；`publish_final` 会拒绝来源 package/grant/signature 残留、manifest 声明的核心栏目/必需输出缺失或 Card Runtime 丢失。
 
 `fork_prepare` 会写两份 HTML：`*.source.html` 是只读来源基线，用 SHA256 锁定；`*.fork.html` 是工作副本。传入 `task_id` 时，还会在 `output/fork_task_bindings/` 写入按 task 哈希命名的原子绑定文件；`build_dashboard` 读取到 prepared binding 会立即返回 `FORK_TASK_BOUND`，`publish_final` 则自动补齐来源与 manifest。`asset_replacements` 会自动扩展常见交易所代码写法（如 `SH600000`、`600000.SH`），并记录实际替换计数；公式包和数据授权凭证仍必须在验证/注册后由调用方替换。编辑完成后先用 `fork_validate` 复用完整 manifest 门禁，成功后再进入浏览器验收。manifest 默认要求目标页的 package/grant 数量不少于来源页；只有确实把多个来源凭证整合成更少目标凭证时，才可下调 `minimum_target_package_count` / `minimum_target_grant_count`，并必须同时填写非空 `credential_count_reduction_reason` 供审计。确需放弃已绑定范式时，新建 Trace Context 后重新判定路由，不要复用原 task。
+
+> **改写公式：看 `source_runtime_contract`，不要凭输出名反推**。`getStaticPage`/`getTemplate` 现在都会带回来源 package 的 `formulas` 原文（公式不是隐私内容），`fork_prepare` 会原样整理进 `manifest.source_runtime_contract.packages[]`（每个包的 `package_id/formulas/outputs/other_asset_formulas`），并同步在返回值里给出。改写目标资产的公式时，照着 `formulas` 里对应输出名的那一条原文替换资产名/代码即可，不要只看 `required_outputs` 的变量名去猜测函数调用和参数写法。
+>
+> `other_asset_formulas`（连带顶层 `cross_asset_formula_refs` / `cross_asset_formula_warning`）标出了引用了非主资产标的的公式——典型是同业对比、行业分组这类一个包里混了好几个不同标的的场景（如 `pe_hnsd = ... 取出(华能水电)`）。这类公式**不能**直接把旧标的换成新标的的名字照抄：要先判断目标资产自己的同业/行业范围（必要时问用户或用 `search_similar_cases` 找参照），再按对应产出名重新写公式；`asset_replacements` 的字符串替换只对"来源资产本身"安全，对这类公式会替换出错误的同业组合。改完同样要先过 `runMultiFormulaBatchStream` 验证再注册。
 
 ### 公共模板：安全改写（`update_template`）
 

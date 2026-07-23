@@ -192,6 +192,73 @@ def cleanup_task_temp_files(task_id):
     return deleted
 
 
+EXPIRED_TEMP_MAX_AGE_SECONDS = int(os.environ.get("QBV_EXPIRED_TEMP_MAX_AGE_SECONDS", str(24 * 3600)) or str(24 * 3600))
+EXPIRED_TEMP_CHECK_TTL_SECONDS = int(os.environ.get("QBV_EXPIRED_TEMP_CHECK_TTL_SECONDS", "3600") or "3600")
+EXPIRED_TEMP_CHECK_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".expired_temp_clean_state.json")
+
+
+def cleanup_expired_task_temp_files(max_age_seconds=None):
+    """Best-effort 清理系统临时目录根下超过 max_age_seconds 的 qbv_*.json/.md 残留文件。
+
+    只扫根目录（不递归）、只按前缀+后缀白名单匹配、realpath 校验不逃逸出 temp 根目录、
+    任何异常都吞掉不向上抛——这是给任务中断/异常退出兜底的最后一道清理，不依赖具体 task_id。
+    """
+    max_age = EXPIRED_TEMP_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds
+    deleted = []
+    try:
+        temp_root = os.path.realpath(tempfile.gettempdir())
+        now = time.time()
+        for name in os.listdir(temp_root):
+            if not name.startswith("qbv_"):
+                continue
+            if os.path.splitext(name)[1].lower() not in {".json", ".md"}:
+                continue
+            path = os.path.realpath(os.path.join(temp_root, name))
+            if os.path.dirname(path) != temp_root:
+                continue
+            try:
+                age = now - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age < max_age:
+                continue
+            try:
+                os.remove(path)
+                deleted.append(path)
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return deleted
+
+
+def _should_run_expired_temp_clean() -> bool:
+    if _truthy_env("QBV_FORCE_EXPIRED_TEMP_CLEAN"):
+        return True
+    st = _read_json_file(EXPIRED_TEMP_CHECK_STATE_FILE)
+    try:
+        age = time.time() - float(st.get("ts") or 0)
+    except Exception:
+        age = EXPIRED_TEMP_CHECK_TTL_SECONDS + 1
+    return age >= EXPIRED_TEMP_CHECK_TTL_SECONDS
+
+
+def maybe_cleanup_expired_task_temp_files() -> None:
+    """每次工具运行的入口钩子之一：节流后台扫描系统临时目录，清理超期 qbv_* 残留。
+
+    任何异常都吞掉，永不影响当前命令；用 TTL 状态文件节流，避免每条命令都全量 os.listdir。
+    """
+    try:
+        if _truthy_env("QBV_DISABLE_EXPIRED_TEMP_CLEAN"):
+            return
+        if not _should_run_expired_temp_clean():
+            return
+        _write_json_file(EXPIRED_TEMP_CHECK_STATE_FILE, {"ts": int(time.time())})
+        cleanup_expired_task_temp_files()
+    except Exception:
+        pass
+
+
 def require_trace_context():
     if _TRACE_TASK_ID:
         return None
@@ -482,6 +549,7 @@ def read_params(argv, env_var="VIEW_PARAMS"):
     命令行优先按 JSON 字符串解析；解析失败时兜底支持 `--key value` / `--key=value` 写法。
     """
     maybe_check_update()  # 每次工具运行时静默检查/触发自更新（best-effort，永不阻塞或报错）
+    maybe_cleanup_expired_task_temp_files()  # 节流清理系统临时目录里超期的 qbv_* 残留（best-effort）
     from_argv = False
     raw = os.environ.get(env_var, "").strip()
     if not raw and len(argv) >= 1:

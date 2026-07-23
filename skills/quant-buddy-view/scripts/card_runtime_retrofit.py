@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build standalone card-runtime artifacts for already published QBV pages."""
 
-import hashlib
 import html as _html
 import json
 import os
@@ -10,10 +9,13 @@ import urllib.error
 import urllib.request
 
 import common as C
-
-
-CARD_RUNTIME_KIND = "embedded-card-v1"
-CARD_RUNTIME_VERSION = "1.0.1"
+from card_runtime_contract import (
+    CARD_RUNTIME_KIND,
+    CARD_RUNTIME_VERSION,
+    artifact_hash,
+    validate_manifest,
+    validate_runtime_source,
+)
 START = "<!-- QB_CARD_RUNTIME_ARTIFACTS_START -->"
 END = "<!-- QB_CARD_RUNTIME_ARTIFACTS_END -->"
 
@@ -288,32 +290,11 @@ def _sort_keys(keys):
     return sorted(set(keys), key=lambda k: (k.lower(), k))
 
 
-def _generic_card_keys(keys):
-    def score(key):
-        low = key.lower()
-        if "proxy" in low:
-            return (80, low)
-        if "amount" in low or "volume" in low:
-            return (70, low)
-        groups = [
-            (("score", "signal", "strength", "health"), 0),
-            (("ret", "return", "pct", "mom"), 1),
-            (("nav", "px", "price", "close"), 2),
-            (("pe", "pb", "roe", "eps", "rev"), 3),
-            (("count", "hit", "win", "rank"), 4),
-        ]
-        for words, rank in groups:
-            if any(word in low for word in words):
-                return (rank, low)
-        return (20, low)
-    return sorted(set(keys), key=score)
-
-
-def _card(page_id, title, description, core, theme="orange"):
-    return """<section class="qb-card-artifact" data-qb-live-card data-theme="{theme}">
+def _card(page_id, title, description, core, theme="orange", visual_kind=""):
+    return """<section class="qb-card-artifact" data-qb-live-card data-theme="{theme}" data-qb-card-visual-kind="{visual_kind}">
   <div class="qb-card-meta">
     <span data-qb-live-card-brand></span>
-    <time data-qb-live-card-date data-qb-bind="date">2026-07-03</time>
+    <time data-qb-live-card-date data-qb-bind="date" datetime="">待更新</time>
   </div>
   <h1 data-qb-live-card-title>{title}</h1>
   <p data-qb-live-card-description>{description}</p>
@@ -322,6 +303,7 @@ def _card(page_id, title, description, core, theme="orange"):
   </section>
 </section>""".format(
         theme=_e(theme),
+        visual_kind=_e(visual_kind),
         page_id=_e(page_id),
         title=_e(title),
         description=_e(description),
@@ -336,10 +318,199 @@ def _metric(label, output, fmt="number", klass=""):
     </div>""".format(label=_e(label), output=_e(output), fmt=_e(fmt), klass=_e(klass))
 
 
-def _build_page_card(page_id, title, keys):
-    required = _generic_card_keys(keys)[:3]
-    core = "\n".join([_metric(k, k, "number1") for k in required])
-    return required, _card(page_id, title or "实时活卡", "核心输出实时刷新，打开即取最新。", core, "orange")
+PAGE_VISUAL_DEFAULTS = {
+    "page_13e5b862a47135363442bf54": {"kind": "event-flow"},
+    "page_1256a77743fab9aa39838ce9": {"kind": "basis-structure"},
+    "page_a130c11588ffb3e5e50787f1": {"kind": "event-pulse"},
+    "page_6325ee8277a2455c76f3a480": {"kind": "rotation-wheel"},
+}
+
+
+def _numeric_focus_card(page_id, title, contract):
+    metrics = contract.get("metrics")
+    if not isinstance(metrics, list) or not 1 <= len(metrics) <= 3:
+        raise ValueError("CARD_VISUAL_INVALID: numeric-focus 需要 1-3 个显式 metrics")
+    normalized = []
+    for index, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            raise ValueError("CARD_VISUAL_INVALID: metrics[%d] 必须是 object" % index)
+        label = str(metric.get("label") or "").strip()
+        output = str(metric.get("output") or "").strip()
+        if not label or not output:
+            raise ValueError("CARD_VISUAL_INVALID: metrics[%d] 缺少 label/output" % index)
+        normalized.append({
+            "label": label,
+            "output": output,
+            "format": str(metric.get("format") or "number1").strip(),
+        })
+    required = []
+    for metric in normalized:
+        if metric["output"] not in required:
+            required.append(metric["output"])
+    primary = normalized[0]
+    secondary = "\n".join(
+        """        <div><span>{label}</span><b data-qb-value data-output="{output}" data-format="{format}">待更新</b></div>""".format(
+            label=_e(metric["label"]),
+            output=_e(metric["output"]),
+            format=_e(metric["format"]),
+        )
+        for metric in normalized[1:]
+    )
+    solo_class = " is-solo" if len(normalized) == 1 else ""
+    core = """    <div class="qb-numeric-focus{solo_class}" data-qb-card-numeric-focus>
+      <div class="qb-numeric-hero">
+        <span>{primary_label}</span>
+        <b data-qb-value data-output="{primary_output}" data-format="{primary_format}">待更新</b>
+      </div>
+      <div class="qb-numeric-context">
+{secondary}
+      </div>
+    </div>""".format(
+        primary_label=_e(primary["label"]),
+        primary_output=_e(primary["output"]),
+        primary_format=_e(primary["format"]),
+        secondary=secondary,
+        solo_class=solo_class,
+    )
+    return required, _card(
+        page_id,
+        contract.get("title") or title or "实时指标",
+        contract.get("description") or "主指标实时刷新，解释项只服务于核心判断。",
+        core,
+        contract.get("theme") or "orange",
+        "numeric-focus",
+    ), "numeric-focus"
+
+
+def _build_page_card(page_id, title, keys, visual_contract=None):
+    contract = visual_contract or PAGE_VISUAL_DEFAULTS.get(page_id)
+    if not isinstance(contract, dict) or not str(contract.get("kind") or "").strip():
+        raise ValueError(
+            "CARD_VISUAL_REQUIRED: 页面 %s 没有显式视觉合同；禁止自动选择前三个 outputs 生成三指标卡"
+            % (page_id or "<unknown>")
+        )
+    visual_kind = str(contract.get("kind") or "").strip()
+
+    if visual_kind == "numeric-focus":
+        return _numeric_focus_card(page_id, title, contract)
+
+    if visual_kind == "event-flow" and page_id == "page_13e5b862a47135363442bf54":
+        required = ["VIX_px", "KWEB_ret", "GREATSTAR_ret"]
+        core = """    <div class="qb-taco-flow" data-qb-card-visual>
+      <div class="qb-taco-track" aria-label="TACO五步逻辑链">
+        <div class="qb-taco-stage"><b>威胁</b><span>Tariff</span></div>
+        <div class="qb-taco-stage"><b>抛售</b><span>Selloff</span></div>
+        <div class="qb-taco-stage"><b>施压</b><span>Pressure</span></div>
+        <div class="qb-taco-stage"><b>退路</b><span>Off-ramp</span></div>
+        <div class="qb-taco-stage"><b>反弹</b><span>Rebound</span></div>
+      </div>
+      <div class="qb-taco-metrics">
+        <div><b data-qb-value data-output="VIX_px" data-format="number1">待更新</b><span>VIX</span></div>
+        <div><b data-qb-value data-output="KWEB_ret" data-format="signed-pct">待更新</b><span>KWEB日涨跌</span></div>
+        <div><b data-qb-value data-output="GREATSTAR_ret" data-format="signed-pct">待更新</b><span>A股敏感资产</span></div>
+      </div>
+    </div>"""
+        return required, _card(
+            page_id,
+            contract.get("title") or "关税冲击是否正在走TACO剧本？",
+            contract.get("description") or "对照美股波动率与两地敏感资产，判断冲击、缓和还是分化。",
+            core,
+            contract.get("theme") or "orange",
+            "event-flow",
+        ), "event-flow"
+
+    if visual_kind == "basis-structure" and page_id == "page_1256a77743fab9aa39838ce9":
+        required = ["IC_C0_fut_px", "IC_C1_fut_px", "IC_spot_px"]
+        core = """    <div class="qb-basis-structure" data-qb-card-visual>
+      <div class="qb-basis-hero">
+        <span>主连基差</span>
+        <b data-qb-spread data-a="IC_C0_fut_px" data-b="IC_spot_px">待更新</b>
+        <small>负值为贴水 · 正值为升水</small>
+      </div>
+      <div class="qb-basis-axis" aria-label="主连与次主连相对现货的位置">
+        <div class="qb-basis-scale"><span>贴水</span><b>现货锚</b><span>升水</span></div>
+        <i class="qb-basis-zero"></i>
+        <div class="qb-basis-marker is-front" data-qb-spread-marker data-a="IC_C0_fut_px" data-b="IC_spot_px">
+          <b>主连</b><em></em>
+        </div>
+        <div class="qb-basis-marker is-next" data-qb-spread-marker data-a="IC_C1_fut_px" data-b="IC_spot_px">
+          <b>次主连</b><em></em>
+        </div>
+      </div>
+      <div class="qb-basis-anchor"><span>现货锚</span><b data-qb-value data-output="IC_spot_px" data-format="number1">待更新</b></div>
+    </div>"""
+        return required, _card(
+            page_id,
+            contract.get("title") or "股指期货基差监控",
+            contract.get("description") or "主连、次主连和现货同口径刷新，重点看贴水收敛。",
+            core,
+            contract.get("theme") or "blue",
+            "basis-structure",
+        ), "basis-structure"
+
+    if visual_kind == "event-pulse" and page_id == "page_a130c11588ffb3e5e50787f1":
+        required = ["bu_ret", "nh_bu_ret", "nh_energy_ret"]
+        core = """    <div class="qb-event-pulse" data-qb-card-visual>
+      <div class="qb-event-pulse__hero">
+        <span>AI 硬件</span>
+        <b data-qb-value data-output="bu_ret" data-format="signed-pct">待更新</b>
+        <small>板块涨幅</small>
+      </div>
+      <div class="qb-event-pulse__lanes">
+        <div class="qb-pulse-lane is-alpha">
+          <div><span>相对沪深300</span><b data-qb-value data-output="nh_bu_ret" data-format="signed-pct">待更新</b></div>
+          <i><em data-qb-bar data-output="nh_bu_ret"></em></i>
+        </div>
+        <div class="qb-pulse-lane is-market">
+          <div><span>沪深300</span><b data-qb-value data-output="nh_energy_ret" data-format="signed-pct">待更新</b></div>
+          <i><em data-qb-bar data-output="nh_energy_ret"></em></i>
+        </div>
+        <small class="qb-pulse-note">事件冲击 → 板块承接 → 超额扩散</small>
+      </div>
+    </div>"""
+        return required, _card(
+            page_id,
+            "WAIC 后，AI 硬件是否扩散？",
+            "对照沪深300，实时观察板块涨幅与超额收益。",
+            core,
+            contract.get("theme") or "red",
+            "event-pulse",
+        ), "event-pulse"
+
+    if visual_kind == "rotation-wheel" and page_id == "page_6325ee8277a2455c76f3a480":
+        required = ["HW_RET", "KC_RET", "HG_RET"]
+        core = """    <div class="qb-cycle-map" data-qb-card-visual>
+      <div class="qb-cycle-track" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="qb-cycle-node qb-cycle-node--hw">
+        <span>寒武纪</span>
+        <b data-qb-value data-output="HW_RET" data-format="number1">待更新</b>
+        <small>龙头</small>
+      </div>
+      <div class="qb-cycle-node qb-cycle-node--kc">
+        <span>科创50</span>
+        <b data-qb-value data-output="KC_RET" data-format="number1">待更新</b>
+        <small>周期中枢</small>
+      </div>
+      <div class="qb-cycle-node qb-cycle-node--hg">
+        <span>海光信息</span>
+        <b data-qb-value data-output="HG_RET" data-format="number1">待更新</b>
+        <small>龙头</small>
+      </div>
+      <div class="qb-cycle-caption">250 日表现 · 指数与龙头分层对照</div>
+    </div>"""
+        return required, _card(
+            page_id,
+            "科创50与龙头：周期坐标",
+            "以科创50为中枢，对照寒武纪与海光信息的长期表现。",
+            core,
+            contract.get("theme") or "blue",
+            "rotation-wheel",
+        ), "rotation-wheel"
+
+    raise ValueError(
+        "CARD_VISUAL_UNSUPPORTED: 页面 %s 不支持 visual_contract.kind=%s"
+        % (page_id or "<unknown>", visual_kind)
+    )
 
 
 STYLE = r"""
@@ -456,6 +627,71 @@ STYLE = r"""
 .qb-score-orbit span,.qb-alert-score span,.qb-basis-main span{color:var(--muted);font-size:clamp(10px,2.3cqw,12px);font-weight:850}
 .qb-alert-board,.qb-basis-board{grid-template-columns:.9fr 1.2fr;align-items:stretch}
 .qb-limit-structure{grid-template-columns:.7fr 1.3fr;align-items:stretch}
+.qb-numeric-focus{min-height:0;display:grid;grid-template-columns:minmax(104px,.9fr) minmax(0,1.1fr);gap:clamp(7px,2cqw,12px);align-items:stretch}
+.qb-numeric-hero{min-height:0;display:grid;place-content:center;justify-items:center;text-align:center;border:1px solid rgba(239,122,26,.24);border-radius:16px;background:radial-gradient(circle at 50% 38%,#fff,var(--soft));padding:clamp(7px,2cqw,12px)}
+.qb-numeric-hero span{color:var(--muted);font-size:clamp(9px,2.2cqw,12px);font-weight:900}
+.qb-numeric-hero b{margin-top:5px;color:var(--accent);font-size:clamp(31px,9.4cqw,56px);line-height:.92;font-weight:950;letter-spacing:-.04em}
+.qb-numeric-context{min-width:0;display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:clamp(6px,1.6cqw,9px)}
+.qb-numeric-focus.is-solo{grid-template-columns:1fr}.qb-numeric-focus.is-solo .qb-numeric-context{display:none}
+.qb-numeric-context>div{min-width:0;display:grid;align-content:center;border:1px solid var(--line);border-radius:10px;background:rgba(255,255,255,.78);padding:clamp(7px,2cqw,12px)}
+.qb-numeric-context span{color:var(--muted);font-size:clamp(9px,2.1cqw,12px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-numeric-context b{margin-top:5px;color:var(--ink);font-size:clamp(18px,5.2cqw,30px);line-height:1;font-weight:950}
+.qb-basis-structure{min-height:0;display:grid;grid-template-columns:minmax(100px,.72fr) minmax(0,1.28fr);grid-template-rows:minmax(0,1fr) auto;gap:clamp(7px,2cqw,12px);align-items:stretch}
+.qb-basis-hero{grid-row:1/3;min-height:0;display:grid;place-content:center;justify-items:center;text-align:center;border:1px solid #cadcf3;border-radius:15px;background:radial-gradient(circle at 50% 38%,#fff,#eef6ff);padding:clamp(8px,2.1cqw,13px)}
+.qb-basis-hero span{color:var(--muted);font-size:clamp(9px,2.2cqw,12px);font-weight:900}
+.qb-basis-hero b{margin-top:4px;color:var(--accent);font-size:clamp(28px,8.4cqw,50px);line-height:.95;font-weight:950;letter-spacing:-.04em}
+.qb-basis-hero small{margin-top:6px;color:#6e83a0;font-size:clamp(8px,1.85cqw,10px);font-weight:800}
+.qb-basis-axis{position:relative;min-height:84px;border:1px solid #d4e2f5;border-radius:12px;background:linear-gradient(90deg,#f0f6ff 0 49.8%,#fff4ed 50.2% 100%);overflow:hidden}
+.qb-basis-axis:before{content:"";position:absolute;left:8%;right:8%;top:54%;height:2px;background:linear-gradient(90deg,#6f8fb3,#9caabd 49.5%,#d46a3b 50.5%,#ef7a1a)}
+.qb-basis-scale{position:absolute;left:8%;right:8%;top:8px;display:flex;justify-content:space-between;align-items:center;color:#71839a;font-size:clamp(8px,1.9cqw,10px);font-weight:850}
+.qb-basis-scale b{color:#425a78;font-size:inherit}.qb-basis-zero{position:absolute;left:50%;top:28%;bottom:16%;width:2px;background:rgba(48,80,120,.25);transform:translateX(-50%)}
+.qb-basis-marker{position:absolute;left:50%;top:44%;display:grid;justify-items:center;gap:3px;transform:translate(-50%,-50%);transition:left .35s ease}
+.qb-basis-marker.is-next{top:70%}.qb-basis-marker b{border-radius:999px;background:#fff;border:1px solid #9fb8d8;color:#31557e;padding:3px 7px;font-size:clamp(8px,1.9cqw,10px);line-height:1;font-weight:900;white-space:nowrap;box-shadow:0 4px 10px rgba(31,95,191,.1)}
+.qb-basis-marker em{width:9px;height:9px;border:2px solid #fff;border-radius:50%;background:#1f5fbf;box-shadow:0 0 0 3px rgba(31,95,191,.15)}
+.qb-basis-marker.is-positive b{border-color:#e5a081;color:#a94a20}.qb-basis-marker.is-positive em{background:#ef7a1a;box-shadow:0 0 0 3px rgba(239,122,26,.16)}
+.qb-basis-anchor{display:flex;align-items:baseline;justify-content:space-between;gap:8px;border-top:1px dashed #c7d6e8;padding:clamp(5px,1.4cqw,8px) 3px 0;color:var(--muted);font-size:clamp(9px,2.1cqw,12px);font-weight:850}
+.qb-basis-anchor b{color:var(--ink);font-size:clamp(15px,4.2cqw,24px);line-height:1;font-weight:950}
+.qb-taco-flow{min-height:0;display:grid;grid-template-rows:minmax(0,1fr) auto;gap:clamp(6px,1.7cqw,10px)}
+.qb-taco-track{min-height:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-items:center;gap:clamp(3px,1.1cqw,8px)}
+.qb-taco-stage{position:relative;min-width:0;height:76%;display:grid;place-items:center;align-content:center;gap:4px;border:1px solid var(--line);border-radius:clamp(8px,2cqw,14px);background:rgba(255,255,255,.86);text-align:center;color:var(--muted);font-size:clamp(8px,1.9cqw,11px);font-weight:850;box-shadow:0 7px 18px rgba(120,66,24,.06)}
+.qb-taco-stage:after{content:"→";position:absolute;right:calc(clamp(3px,1.1cqw,8px) * -1 - .58em);color:#a39a91;font-weight:900}
+.qb-taco-stage:last-child:after{display:none}
+.qb-taco-stage b{color:var(--ink);font-size:clamp(12px,2.8cqw,18px);line-height:1;font-weight:950;white-space:nowrap}
+.qb-taco-stage:nth-child(1),.qb-taco-stage:nth-child(2){background:linear-gradient(180deg,#fff,#fff1e6)}
+.qb-taco-stage:nth-child(3){border-color:rgba(215,25,32,.25);background:linear-gradient(180deg,#fff,#ffe7e3)}
+.qb-taco-stage:nth-child(4),.qb-taco-stage:nth-child(5){border-color:#cfe5d9;background:linear-gradient(180deg,#fff,#effaf4)}
+.qb-taco-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(4px,1.2cqw,8px)}
+.qb-taco-metrics>div{min-width:0;border:1px solid var(--line);border-radius:clamp(7px,1.6cqw,12px);background:rgba(255,255,255,.78);padding:clamp(5px,1.2cqw,10px)}
+.qb-taco-metrics b{display:block;color:var(--ink);font-size:clamp(13px,3.1cqw,22px);line-height:1;font-weight:950;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-taco-metrics span{display:block;margin-top:3px;color:var(--muted);font-size:clamp(8px,1.9cqw,11px);font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-event-pulse{min-height:0;display:grid;grid-template-columns:minmax(112px,.8fr) minmax(0,1.2fr);gap:clamp(9px,2.6cqw,16px);align-items:stretch}
+.qb-event-pulse__hero{position:relative;isolation:isolate;display:grid;place-content:center;justify-items:center;text-align:center;min-height:0;border:1px solid rgba(215,25,32,.22);border-radius:50%;background:radial-gradient(circle,#fff 0 34%,#ffe9e1 35% 50%,#fff7f2 51% 64%,transparent 65%);overflow:hidden}
+.qb-event-pulse__hero:before,.qb-event-pulse__hero:after{content:"";position:absolute;z-index:-1;border:1px solid rgba(215,25,32,.18);border-radius:50%;animation:qb-pulse 3.2s ease-out infinite}
+.qb-event-pulse__hero:before{inset:18%}.qb-event-pulse__hero:after{inset:7%;animation-delay:1.1s}
+.qb-event-pulse__hero span{font-size:clamp(10px,2.45cqw,14px);font-weight:900;color:var(--muted)}
+.qb-event-pulse__hero b{margin-top:3px;font-size:clamp(26px,8.5cqw,50px);line-height:.95;font-weight:950;color:var(--accent);letter-spacing:-.04em}
+.qb-event-pulse__hero small{margin-top:5px;font-size:clamp(8px,1.9cqw,11px);font-weight:800;color:var(--muted)}
+.qb-event-pulse__lanes{min-width:0;display:grid;align-content:center;gap:clamp(8px,2.2cqw,13px)}
+.qb-pulse-lane{min-width:0}.qb-pulse-lane>div{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.qb-pulse-lane span{min-width:0;font-size:clamp(9px,2.2cqw,12px);font-weight:850;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qb-pulse-lane b{font-size:clamp(15px,4cqw,23px);font-weight:950;color:var(--ink)}
+.qb-pulse-lane i{display:block;height:clamp(8px,2.2cqw,12px);margin-top:5px;border-radius:999px;background:#f1e5dd;overflow:hidden}
+.qb-pulse-lane em{display:block;height:100%;min-width:8%;border-radius:999px;background:linear-gradient(90deg,#f5a166,var(--accent));box-shadow:0 0 12px rgba(215,25,32,.22)}
+.qb-pulse-lane.is-market em{background:#8da0b6;box-shadow:none}.qb-pulse-lane.is-market b{color:#596b80}
+.qb-pulse-note{padding-top:3px;border-top:1px dashed rgba(215,25,32,.24);font-size:clamp(8px,1.95cqw,11px);font-weight:800;color:var(--accent);letter-spacing:.02em}
+@keyframes qb-pulse{0%{transform:scale(.82);opacity:.7}70%,100%{transform:scale(1.12);opacity:0}}
+@media (prefers-reduced-motion:reduce){.qb-event-pulse__hero:before,.qb-event-pulse__hero:after{animation:none}}
+.qb-cycle-map{position:relative;min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:minmax(0,1fr) auto;gap:clamp(7px,1.8cqw,11px);align-items:center;padding:clamp(5px,1.2cqw,8px) 0 0}
+.qb-cycle-map:before{content:"";position:absolute;inset:0 0 24px;background-image:linear-gradient(rgba(31,95,191,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(31,95,191,.06) 1px,transparent 1px);background-size:18px 18px;border-radius:10px;mask-image:linear-gradient(to bottom,transparent,black 28%,black)}
+.qb-cycle-track{position:absolute;z-index:0;left:10%;right:10%;top:47%;height:2px;background:linear-gradient(90deg,#7aa5df,#1f5fbf,#7aa5df)}
+.qb-cycle-track i{position:absolute;top:50%;width:8px;height:8px;border:2px solid #fff;border-radius:50%;background:#1f5fbf;transform:translate(-50%,-50%);box-shadow:0 0 0 3px rgba(31,95,191,.14)}
+.qb-cycle-track i:nth-child(1){left:0}.qb-cycle-track i:nth-child(2){left:50%}.qb-cycle-track i:nth-child(3){left:100%}
+.qb-cycle-node{position:relative;z-index:1;min-width:0;display:grid;justify-items:center;text-align:center;padding:clamp(8px,2cqw,12px) clamp(4px,1.2cqw,8px);border:1px solid #cbdcf3;border-radius:12px;background:rgba(255,255,255,.9);box-shadow:0 9px 24px rgba(31,95,191,.08)}
+.qb-cycle-node--kc{transform:translateY(-9px);border:2px solid #1f5fbf;background:linear-gradient(160deg,#fff,#eaf3ff)}
+.qb-cycle-node span{font-size:clamp(9px,2.3cqw,13px);font-weight:900;color:var(--muted);white-space:nowrap}
+.qb-cycle-node b{margin-top:4px;font-size:clamp(22px,6.7cqw,39px);line-height:.95;font-weight:950;color:#173b72;letter-spacing:-.04em}
+.qb-cycle-node--kc b{color:#1f5fbf}.qb-cycle-node small{margin-top:5px;font-size:clamp(8px,1.85cqw,10px);font-weight:800;color:#6b83a4}
+.qb-cycle-caption{position:relative;z-index:1;grid-column:1/4;text-align:center;font-size:clamp(8px,2cqw,11px);font-weight:800;color:#5e7596;letter-spacing:.025em}
 @container (max-width: 340px){
   .qb-card-artifact[data-qb-live-card]{gap:3px;padding:8px;border-top-width:4px}
   .qb-card-meta{min-height:12px;font-size:9px}
@@ -469,6 +705,22 @@ STYLE = r"""
   .qb-tier-grid i{margin-top:2px;font-size:8px}
   .qb-hero-split{gap:6px;grid-template-columns:minmax(54px,.64fr) 1fr}
   .qb-signal-mark{min-height:48px;font-size:25px}
+  .qb-taco-flow{gap:4px}
+  .qb-taco-stage{gap:2px;border-radius:6px}
+  .qb-taco-stage b{font-size:10px}
+  .qb-taco-stage span{font-size:7px}
+  .qb-taco-metrics>div{padding:4px}
+  .qb-taco-metrics b{font-size:12px}
+  .qb-taco-metrics span{font-size:7px}
+  .qb-numeric-focus{grid-template-columns:minmax(80px,.82fr) minmax(0,1.18fr);gap:5px}
+  .qb-numeric-hero,.qb-numeric-context>div{padding:5px;border-radius:7px}
+  .qb-basis-structure{grid-template-columns:minmax(78px,.7fr) minmax(0,1.3fr);gap:5px}
+  .qb-basis-hero{padding:5px;border-radius:8px}.qb-basis-axis{min-height:62px;border-radius:7px}
+  .qb-basis-marker b{padding:2px 5px}.qb-basis-marker em{width:7px;height:7px}
+  .qb-event-pulse{grid-template-columns:minmax(82px,.72fr) minmax(0,1.28fr);gap:7px}
+  .qb-pulse-note{display:none}
+  .qb-cycle-node{padding:6px 3px;border-radius:8px}
+  .qb-cycle-node--kc{transform:translateY(-5px)}
 }
 """
 
@@ -620,10 +872,34 @@ RUNTIME = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
   }
   function outputDate(output){
     var data = output && output.data != null ? output.data : output;
-    if (isObj(data) && data.last_value && data.last_value.date) return data.last_value.date;
+    var best = "";
+    var bestNum = -1;
+    function consider(date){
+      var digits = dateDigits(date);
+      var n = digits ? Number(digits) : -1;
+      if (n > bestNum) {
+        bestNum = n;
+        best = digits;
+      }
+    }
+    function walk(value, depth){
+      if (depth > 8 || value == null) return;
+      if (Array.isArray(value)) {
+        value.forEach(function(item){ walk(item, depth + 1); });
+        return;
+      }
+      if (!isObj(value)) return;
+      consider(value.date || value.trade_date || value.data_date || value.as_of_date);
+      Object.keys(value).forEach(function(key){
+        if (/^(dates?|begin_date|end_date|start_date)$/i.test(key)) return;
+        var child = value[key];
+        if (isObj(child) || Array.isArray(child)) walk(child, depth + 1);
+      });
+    }
     var r = range(output);
-    for (var i=r.dates.length-1;i>=0;i--) if (r.values[i] != null && r.dates[i]) return r.dates[i];
-    return "";
+    for (var i=0;i<r.dates.length;i++) if (r.values[i] != null && r.dates[i]) consider(r.dates[i]);
+    walk(data, 0);
+    return best;
   }
   function dateDigits(date){
     var digits = String(date || "").replace(/\D/g, "");
@@ -686,6 +962,23 @@ RUNTIME = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
   function setBar(el, value){
     var width = Math.max(6, Math.min(100, Math.abs(value == null ? 0 : Number(value)) * 4));
     el.style.width = width.toFixed(0) + "%";
+  }
+  function positionSpreadMarkers(root, outputs){
+    var markers = Array.prototype.slice.call(root.querySelectorAll("[data-qb-spread-marker]"));
+    if (!markers.length) return;
+    var values = markers.map(function(el){
+      return spread(outputs, el.getAttribute("data-a"), el.getAttribute("data-b"));
+    });
+    var finite = values.filter(function(value){ return value != null && isFinite(Number(value)); }).map(function(value){ return Math.abs(Number(value)); });
+    var maxAbs = Math.max.apply(null, finite.concat([1]));
+    markers.forEach(function(el, index){
+      var value = values[index];
+      var numeric = value == null || !isFinite(Number(value)) ? 0 : Number(value);
+      var left = 50 + Math.max(-1, Math.min(1, numeric / maxAbs)) * 38;
+      el.style.left = left.toFixed(1) + "%";
+      el.classList.toggle("is-positive", numeric > 0);
+      el.setAttribute("aria-label", (el.textContent || "合约").trim() + " " + fmt(numeric, "number1"));
+    });
   }
   function percentForBar(value, format){
     if (value == null || !isFinite(Number(value))) return 0;
@@ -825,6 +1118,7 @@ RUNTIME = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
     Array.prototype.forEach.call(root.querySelectorAll("[data-qb-spread-bar]"), function(el){
       setBar(el, spread(outputs, el.getAttribute("data-a"), el.getAttribute("data-b")));
     });
+    positionSpreadMarkers(root, outputs);
     Array.prototype.forEach.call(root.querySelectorAll("[data-qb-relative-return]"), function(el){
       el.textContent = fmt(relativeReturn(outputs, el.getAttribute("data-output"), el.getAttribute("data-base")), "return");
     });
@@ -848,8 +1142,10 @@ RUNTIME = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
     Array.prototype.forEach.call(root.querySelectorAll("[data-qb-best]"), function(el){
       var list = (el.getAttribute("data-outputs") || "").split(/\s+/).filter(Boolean);
       var best = list.map(function(k){ return { k:k, v:ret(outputs,k) }; }).filter(function(x){ return x.v != null; }).sort(function(a,b){ return b.v-a.v; })[0];
-      el.textContent = best ? best.k.replace(/_px$/,"") + " " + fmt(best.v, "return") : "0%";
+      el.textContent = best ? best.k.replace(/_px$/,'') + ' ' + fmt(best.v, 'return') : '0%';
     });
+    var card = root.querySelector("[data-qb-live-card]");
+    if (card) card.setAttribute("data-qb-card-ready", "true");
   }
   window.QBCardRuntimeV1 = {
     hydrate: function(root, outputs){ hydrate(root, outputs); },
@@ -866,8 +1162,13 @@ RUNTIME = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
 </script>"""
 
 
-def build_artifacts(page_id, title, manifest, output_keys):
-    required, card = _build_page_card(page_id, title, _sort_keys(output_keys))
+def build_artifacts(page_id, title, manifest, output_keys, visual_contract=None):
+    required, card, visual_kind = _build_page_card(
+        page_id,
+        title,
+        _sort_keys(output_keys),
+        visual_contract=visual_contract,
+    )
     missing = [k for k in required if k not in output_keys]
     if missing:
         raise ValueError("生成器引用了不存在的 outputs: %s" % ", ".join(missing))
@@ -899,19 +1200,120 @@ def build_artifacts(page_id, title, manifest, output_keys):
         "packages": package_blocks,
         "required_outputs": required,
         "aspect_ratio": "4/3",
+        "visual_kind": visual_kind,
     }
+    validate_manifest(manifest2)
     manifest_text = json.dumps(manifest2, ensure_ascii=False, indent=2).replace("</", "<\\/")
     template = "<template data-qb-card-template>\n%s\n</template>" % card
     style = "<style data-qb-card-style>\n%s\n</style>" % STYLE.strip()
     manifest_block = "<script type=\"application/json\" data-qb-card-manifest>\n%s\n</script>" % manifest_text
     block = "\n".join([START, template, style, manifest_block, RUNTIME, END])
-    digest = hashlib.sha256((template + style + manifest_block + RUNTIME).encode("utf-8")).hexdigest()
+    runtime_text = first_tagged_block(RUNTIME, "script", "data-qb-card-runtime")
+    validate_runtime_source(runtime_text)
+    digest = artifact_hash(card, STYLE, manifest_text, runtime_text)
     return block, {
         "card_runtime_supported": True,
         "card_runtime_version": CARD_RUNTIME_VERSION,
         "card_runtime_kind": CARD_RUNTIME_KIND,
         "card_required_outputs": required,
+        "card_visual_kind": visual_kind,
         "card_artifact_hash": digest,
+    }
+
+
+READY_COMPAT_BRIDGE = r"""
+;(function(){
+  var runtime = window.QBCardRuntimeV1;
+  if (!runtime || runtime.__qbReadyCompatV110) return;
+  function markReady(root){
+    if (!root || !root.querySelector) return;
+    var card = root.querySelector("[data-qb-live-card]");
+    if (card) card.setAttribute("data-qb-card-ready", "true");
+  }
+  var originalHydrate = runtime.hydrate;
+  if (typeof originalHydrate === "function") {
+    runtime.hydrate = function(root, outputs){
+      var result = originalHydrate.call(runtime, root, outputs);
+      markReady(root);
+      return result;
+    };
+  }
+  var originalMount = runtime.mount;
+  if (typeof originalMount === "function") {
+    runtime.mount = function(root, options){
+      var mounted = originalMount.call(runtime, root, options);
+      markReady(root);
+      if (mounted && typeof mounted.hydrate === "function") {
+        var mountedHydrate = mounted.hydrate;
+        mounted.hydrate = function(outputs){
+          var result = mountedHydrate.call(mounted, outputs);
+          markReady(root);
+          return result;
+        };
+      }
+      return mounted;
+    };
+  }
+  runtime.__qbReadyCompatV110 = true;
+})();
+""".strip()
+
+
+def upgrade_artifact_protocol(html):
+    """Upgrade an existing artifact without changing its template or style."""
+    text = html or ""
+    artifact = {
+        "template": first_tagged_block(text, "template", "data-qb-card-template"),
+        "style": first_tagged_block(text, "style", "data-qb-card-style"),
+        "manifest": first_tagged_block(text, "script", "data-qb-card-manifest"),
+        "runtime": first_tagged_block(text, "script", "data-qb-card-runtime"),
+    }
+    missing = [name for name, value in artifact.items() if not value]
+    if missing:
+        raise ValueError("页面缺少完整 Card Runtime artifact: %s" % ", ".join(missing))
+
+    manifest = json.loads(artifact["manifest"])
+    manifest["version"] = CARD_RUNTIME_VERSION
+    validate_manifest(manifest)
+    manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2).replace("</", "<\\/")
+    manifest_pattern = re.compile(
+        r"(<script\b(?=[^>]*\bdata-qb-card-manifest\b)[^>]*>)[\s\S]*?(</script>)",
+        re.I,
+    )
+    next_html, manifest_count = manifest_pattern.subn(
+        lambda match: match.group(1) + "\n" + manifest_text + "\n" + match.group(2),
+        text,
+        count=1,
+    )
+    if manifest_count != 1:
+        raise ValueError("无法精确升级 card manifest")
+
+    runtime_text = artifact["runtime"]
+    if "data-qb-card-ready" not in runtime_text:
+        runtime_text = runtime_text.rstrip() + "\n" + READY_COMPAT_BRIDGE
+    validate_runtime_source(runtime_text)
+    runtime_pattern = re.compile(
+        r"(<script\b(?=[^>]*\bdata-qb-card-runtime\b)[^>]*>)[\s\S]*?(</script>)",
+        re.I,
+    )
+    next_html, runtime_count = runtime_pattern.subn(
+        lambda match: match.group(1) + "\n" + runtime_text + "\n" + match.group(2),
+        next_html,
+        count=1,
+    )
+    if runtime_count != 1:
+        raise ValueError("无法精确升级 card runtime")
+
+    digest = artifact_hash(artifact["template"], artifact["style"], manifest_text, runtime_text)
+    return next_html, {
+        "mode": "protocol_only",
+        "card_runtime_supported": True,
+        "card_runtime_version": CARD_RUNTIME_VERSION,
+        "card_runtime_kind": manifest.get("kind") or CARD_RUNTIME_KIND,
+        "card_required_outputs": list(manifest.get("required_outputs") or []),
+        "card_artifact_hash": digest,
+        "template_preserved": first_tagged_block(next_html, "template", "data-qb-card-template") == artifact["template"],
+        "style_preserved": first_tagged_block(next_html, "style", "data-qb-card-style") == artifact["style"],
     }
 
 
@@ -919,16 +1321,39 @@ def replace_artifact_block(html, block):
     pattern = re.compile(re.escape(START) + r"[\s\S]*?" + re.escape(END), re.I)
     if pattern.search(html or ""):
         return pattern.sub(lambda _m: block, html, count=1), "replace"
-    if "</body>" in html.lower():
-        return re.sub(r"</body\s*>", lambda _m: block + "\n</body>", html, count=1, flags=re.I), "append"
-    return html + "\n" + block, "append"
+
+    # Early Card Runtime pages predate the marker-delimited artifact block.
+    # Appending a new block leaves the legacy template/manifest first in DOM
+    # order, so both the verifier and snapshot worker keep hydrating v1.0.x.
+    # Remove every unmarked artifact tag before inserting the current block.
+    legacy_patterns = [
+        r"<template\b(?=[^>]*\bdata-qb-card-template\b)[^>]*>[\s\S]*?</template>",
+        r"<style\b(?=[^>]*\bdata-qb-card-style\b)[^>]*>[\s\S]*?</style>",
+        r"<script\b(?=[^>]*\bdata-qb-card-manifest\b)[^>]*>[\s\S]*?</script>",
+        r"<script\b(?=[^>]*\bdata-qb-card-runtime\b)[^>]*>[\s\S]*?</script>",
+    ]
+    next_html = html or ""
+    removed = 0
+    for legacy_pattern in legacy_patterns:
+        next_html, count = re.subn(legacy_pattern, "", next_html, flags=re.I)
+        removed += count
+    mode = "replace_legacy" if removed else "append"
+    if "</body>" in next_html.lower():
+        return re.sub(r"</body\s*>", lambda _m: block + "\n</body>", next_html, count=1, flags=re.I), mode
+    return next_html + "\n" + block, mode
 
 
-def retrofit_html(html, *, page_id="", title=""):
+def retrofit_html(html, *, page_id="", title="", visual_contract=None):
     manifest = parse_manifest(html)
     outputs = query_all_outputs(manifest)
     output_keys = _sort_keys(outputs.keys())
-    block, meta = build_artifacts(page_id, title or _title_from_html(html), manifest, output_keys)
+    block, meta = build_artifacts(
+        page_id,
+        title or _title_from_html(html),
+        manifest,
+        output_keys,
+        visual_contract=visual_contract,
+    )
     next_html, mode = replace_artifact_block(html, block)
     return next_html, {
         "mode": mode,

@@ -2,17 +2,17 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.15
+version: 0.6.20
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, thumbnails, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
   配合 quant-buddy-skill 使用：固定页面请求先用 static_page.py templates/template 选择带 recommend:官方精选 标签的在线精选页；实时取数页必须先在 quant-buddy-skill 验证公式并确认其 api_key 可用，再用本技能注册自有公式包、替换凭证/文案、浏览器验收，并通过 static_page.py upload/update 发布或更新 pages.quantbuddy.cn 链接。默认不从本地历史样板目录或低质 HTML 骨架起步。
-  用户显式唤起 /quant-buddy-view、/qbv、qbv 或 QBV，且请求不是纯咨询/代码维护/文档解释时，默认视为可分享活页任务：读完本技能约束后先查官方精选+社区范式卡判定 direct/fork/unmatched；direct 直接交付现成页，fork/unmatched 才 new_page 返回首链并继续推进。
+  用户显式唤起 /quant-buddy-view、/qbv、qbv 或 QBV，且请求不是纯咨询/代码维护/文档解释时，默认视为可分享活页任务：读完本技能约束后先查官方精选+社区范式卡判定 direct/fork/unmatched；默认 direct 先交付现成链接、fork/unmatched 用 new_page 返回首链；当 config.json._channel=feishu-group 时，所有分支都禁止提前发送链接，只在终态交付 playground 链接。
   Do not use this skill for one-off 行情查询、普通股票涨跌幅/估值问答、选股/回测探索；those belong to quant-buddy-skill unless the user explicitly wants a reusable/shareable page.
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.15
+  version: 0.6.20
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -58,14 +58,28 @@ runtimeRequirements:
 
 把「已验证的量化数据与公式」沉淀成一个**公开可分享、实时取数**的网页看板/落地页。本技能不做一次性行情查询或回测探索；默认执行路线是：
 
+> **0.6.20 变更**：分享海报预览新增 `data-qb-runtime-src` 合同，允许用户点击分享前保持空 `src`；静态预检与浏览器图片门禁只豁免显式声明且尚未赋值的运行时图片，普通正文图片仍必须提供非空 `src`，不再要求每个任务临时塞透明占位图。Card Runtime 完整重建同时改为显式视觉合同并 fail-closed：未命中页面专属视觉、也未传 `visual_contract` 时返回 `CARD_VISUAL_REQUIRED`，不再自动挑前三个 outputs 生成三行指标卡；新建 artifact 必须声明 `data-qb-card-visual-kind` / manifest `visual_kind` 并通过 `--require-card-visual-contract`。`numeric-focus` 只在显式选择时可用，且必须是“一个主数字 + 最多两个解释项”，不能退化为三个等权矩形；新增 `basis-structure` 基差轴视觉作为首个合同化示例。
+>
+> **0.6.19 变更**：已发布范式卡的 Card Runtime 协议升级新增 `preserve_visual` 路径，只更新 manifest/runtime 与 ready 契约，逐字节保留原 template/style；`retrofit_card_runtime` 的独立验收固定使用 `--card-runtime-only`。禁止用通用三指标重建路径覆盖已有视觉 artifact；只有 artifact 缺失且明确选择 numeric-focus 时才允许生成数字主导卡片。
+>
+> **0.6.18 变更**：`publish_workflow.py` 在 QBS 验证、注册和上传等网络写入前，先以假凭证运行 Card Runtime 结构预检，提前拦截空 manifest 凭证、缺少/空 `src` 的图片等结构错误；package/grant 的 `markers.package_id`、`markers.grant_id`、`markers.signature` 现在兼容单个字符串或非空字符串数组，同一次注册可扇出替换页面正文与 Card Runtime 中的多个唯一 marker，避免为同一数据合同重复注册公式包。
+>
+> **0.6.17 变更**：`templates` 不再把完整候选池原样打到 stdout——响应改为 `item_count` + 覆盖全部候选的 `items_summary`（不是 top-N）+ 完整结果落盘产生的 `full_result_file`/`full_result_sha256`；完整候选（含 `agent_reply_hint`/`page_context`）落盘到系统临时目录，交由既有 `cleanup_task_temp_files` 自动回收。落盘失败（`TEMPLATES_PERSIST_FAILED`）或响应结构异常（`TEMPLATES_RESPONSE_SHAPE_UNEXPECTED`）时直接返回错误，不再退化为把完整结果打印到 stdout——这是为了修复"候选池被外层工具输出预算截断、又没有另存一份，导致误判 unmatched 走自建"的事故根因。`templates` 现在也需要 Trace Context（task_id）。
+>
+> **0.6.16 变更**：`getStaticPage`/`getTemplate` 现在都会带回来源公式包的 `formulas` 原文（公式不是隐私内容）；`fork_prepare` 据此在 `fork_manifest.source_runtime_contract.packages[]` 里整理出每个包的 `formulas/outputs`，并用 `cross_asset_formula_refs` 标出引用了非主资产标的的公式（同业对比、行业分组一类）。fork 改公式时改为对照原文改写，不再凭 `required_outputs` 的变量名反推语法；跨资产公式必须先重新判断目标资产自己的同业/行业范围，不能直接照抄原资产的同业列表。
+
+> **Fork 数据通道继承硬规则**：fork 的目标是替换标的并保持来源范式运行合同，不是重新设计数据层。来源模板某一角色使用公式包，目标页同一角色继续使用公式包；来源使用 `fast_query` / `stock_profile` / `composition_select` 数据授权，目标页继续使用同 kind、同 query_type、同响应形状的数据授权。禁止仅因“财务数据通常可走 fast_query(report)”就在 fork 中把来源财务公式包改成 grant，也禁止反向把来源 grant 改成公式包。只有 `unmatched` / 明确从零重建时才重新做通道选择；此时平台白名单报告期财务优先 `fast_query(query_type="report")`。
+>
 > **0.6.15 变更**：新增活页正文图片上传/列表、可在当前页面点击放大的声明式 image panel、publish_workflow 图片 marker、fork 同页复制和浏览器图片门禁；PNG/JPEG/WebP 由服务端统一转为同域 WebP，发布必须保持图片与目标 `page_id` 同属。
 >
 > **0.6.14 变更**：`data-kernel` 可在浏览器实时下载并解析 FastQuery `mode:"csv"`，自动 hydrate 为兼容的 `results[].fields[].series`；标准看板和构建期体检共用同口径，发布门禁等待 `QB_DATA_RUNTIME` 完成后再验收。
+>
+> **feishu-group 渠道**：打包渠道为 `feishu-group` 时，direct/fork/unmatched/update 等所有分支禁止发送非终态链接；终态 contract 统一把 `pages.quantbuddy.cn/pages/<owner>/<page_id>.html` 转成 `www.quantbuddy.cn/playground/<owner>/<page_id>`，内部发布与验收仍使用原始托管 URL。
 
 0. 在任何后端请求前运行 `scripts/trace_context.py begin`，保存唯一 `task_id` 并在后续命令中复用。
 1. 运行一次 `scripts/static_page.py templates`，传 `recommend:"all"`，查询官方精选+社区命中池。
-2. direct 命中后先把列表返回的现成 URL 发给用户，再运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
-3. fork/unmatched 才创建 `new_page` 首链；验证目标公式后注册当前用户凭证、替换页面内容，并用 `publish_verified` 完成分级浏览器门禁和同链接发布。
+2. direct 命中后，普通渠道先把列表返回的现成 URL 发给用户；`feishu-group` 不发链接，直接运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
+3. fork/unmatched 创建 `new_page` 并保留同一 `page_id`；普通渠道立即发送首链，`feishu-group` 仅内部持有该链接，验证目标公式后继续注册、替换与 `publish_verified`。
 4. 所有分支最终按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
 
 ## 何时用本技能 vs quant-buddy-skill
@@ -81,37 +95,39 @@ runtimeRequirements:
 python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 ```
 
-保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`upload` / `update` / `publish_final` / `publish_verified` / `update_template` 缺少 Trace Context 时必须停止发布。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
+保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`templates` / `upload` / `update` / `publish_final` / `publish_verified` / `update_template` 缺少 Trace Context 时必须停止执行。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
 
-新会话被判定为可分享活页任务时，**第一步只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。
+新会话被判定为可分享活页任务时，**第一步只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。返回值是 `item_count` + 覆盖全部候选的 `items_summary`（不再是原始 items 全量打印），完整候选落盘在 `full_result_file`；正常路由判断只需要读 `items_summary`，不需要也不应该去读 `full_result_file`。
 
 - **① 直接命中**（范式匹配，且标的/股票池/指数/市场范围一致）：
-  - `templates` 一旦给出精确命中，**下一条用户可见消息必须立即发送现成 `download_url/public_url`，中间不允许任何工具调用**。推荐文案：`已直接命中现成活页：[标题](URL)。我继续核对实时数据并补充分析。`
-  - 发出链接后只运行一次：`python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'`。该命令内部固定完成一次模板详情读取、一次 HTML 下载、每个当前 package/grant 一次查询和一次 `direct_finalize`；不要再单独调用 `template`、query 或 `direct_finalize`。
+  - `templates` 一旦给出精确命中，普通渠道的**下一条用户可见消息必须立即发送现成 `download_url/public_url`，中间不允许任何工具调用**。推荐文案：`已直接命中现成活页：[标题](URL)。我继续核对实时数据并补充分析。`；若 `agent_reply_hint.delivery_policy.emit_intermediate_url=false`（即 `feishu-group`），禁止发送该 URL，直接继续。
+  - 普通渠道发出链接后、`feishu-group` 不发链接而是立即运行一次：`python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'`。该命令内部固定完成一次模板详情读取、一次 HTML 下载、每个当前 package/grant 一次查询和一次 `direct_finalize`；不要再单独调用 `template`、query 或 `direct_finalize`。
   - 不 `new_page`、不注册、不 fork、不研究脚本源码、不先跑 `--help`。`direct_deliver` 的公式结果固定为 summary；grant 完整结果只写 `%TEMP%`，最终回复不得暴露本地路径或凭证。
   - 只有返回 `agent_reply_contract.terminal=true` 且 `operation=direct_finalize` 才允许最终收口；失败时说明具体错误，不得用已发送的链接绕过终态门禁。回复模板和 `page_context` 沿用原页。
   - `direct_deliver` 会返回真实 contract、草稿、校验参数的 `%TEMP%\qbv_<完整 task_id>_*` 文件路径及 `reply_validation_command`。只把 Markdown 写入返回的 `reply_draft_file`，执行返回的命令一次；`valid=true` 后立即最终回复，禁止再次校验、运行 `--help`、扫描临时目录或继续搜索 memory。成功校验会统一清理 contract、draft、params 和 grant 临时结果。
   - 用户之后说"要改这个页面内容" → 转 ② fork（官方/社区链接不能直接改，只能新建自己的链接后改）。
   - 边界：范式匹配但**标的/股票池/指数/市场范围不一致**（如命中的是茅台估值页、用户问的是宁德时代；命中沪深300异动页、用户问中证500）不算直接命中，落到 ②。只有资产无关且市场范围一致的全市场范式，才可不依赖具体标的直接命中。
 - **② fork**（范式命中但标的不符，或用户要改内容）：
-  - `new_page` 先发首链进度页（此时才需要首链）→ 用同一 `task_id` 调 `fork_prepare` 下载该范式模板 HTML 并生成 `fork_manifest_v1`；脚本会把来源与 manifest 持久绑定到该任务，后续 `publish_final` 即使漏传来源字段也会自动恢复并强制校验。`source_template_id` 只继承回复 metadata，不会自动下载或克隆 HTML。
-  - 用 `scripts/qbs_bridge.py validate_package_set @params.json` 按最终 package 边界验证**本标的**公式/输出（每包 1..20 条，保持顺序，自动处理 deferred/resume 并汇总收据）；只有每包都返回 `validation_receipt_file` 才算完成。`failed` / 未完成 `deferred` 不得推进 → 注册**自己的**公式包或数据授权 → 换标的/文案/凭证 → 生成活页。
+  - 先运行 `new_page` 创建进度页并取得 `page_id`：普通渠道立即发送首链；`feishu-group` 只内部保留 URL，不向用户发送。随后用同一 `task_id` 调 `fork_prepare` 下载该范式模板 HTML 并生成 `fork_manifest_v1`；脚本会把来源与 manifest 持久绑定到该任务，后续 `publish_final` 即使漏传来源字段也会自动恢复并强制校验。`source_template_id` 只继承回复 metadata，不会自动下载或克隆 HTML。
+  - 用 `scripts/qbs_bridge.py validate_package_set @params.json` 按最终 package 边界验证**本标的**公式/输出（每包 1..20 条，保持顺序，自动处理 deferred/resume 并汇总收据）；harness 会把每包 `begin_date` 透传给 QBS，未提供时固定使用 `20150101`，避免滚动水位/长窗口公式因默认短区间出现假空值。validation 与 registration 必须使用同一个 `begin_date`。只有每包都返回 `validation_receipt_file` 才算完成。`failed` / 未完成 `deferred` 不得推进 → 注册**自己的**公式包或数据授权 → 换标的/文案/凭证 → 生成活页。
   - 估值分位输出必须名实一致：`pe_pctile=排序水位("pe_ttm",250)`、`pb_pctile=排序水位("pb",250)`，并先通过上述 QBS 验证；禁止用 `pe_pctile="pe_ttm"` / `pb_pctile="pb"` 直接别名。
-  - 调用一次 `publish_verified(task_id, page_id, html_file, source_template_id, fork_manifest_file, validation_receipt_files)`；它固定执行 `fork_validate → 本地 fork-local → publish_final → 公网 public-smoke`，无需 Agent 分步拼接浏览器命令。
-  - package/grant 较多时，优先调用一次 `scripts/publish_workflow.py @params.json`，按 marker 将验证、注册、HTML 凭证替换和 `publish_verified` 串成确定性短路流程；格式见 [tools/publish_workflow.md](tools/publish_workflow.md)。
+  - **只要 fork 涉及至少 1 个 package/grant，就必须用 `scripts/publish_workflow.py @params.json`**（不是"较多时优先"）：按 marker 将验证、注册、HTML 凭证替换和 `publish_verified` 串成确定性短路流程；格式见 [tools/publish_workflow.md](tools/publish_workflow.md)。低于这个数量没有第二个"替换 marker/凭证"的工具，不要自己写脚本做这件事。
+  - 页面正文与 Card Runtime 共用同一 package/grant 时，必须在同一注册项的 `markers` 字段中使用 marker 数组，把一个注册结果替换到多个全局唯一位置；禁止把 Card manifest 凭证留空，也禁止为了填 Card Runtime 再注册一个公式和读取合同等价的重复 package/grant。
+
+  - 这不是建议——`publish_verified` 服务端会按 fork manifest 里的凭证数量强制核验：手工分步调用 `publish_verified(task_id, page_id, html_file, source_template_id, fork_manifest_file, validation_receipt_files)` 只有在这个页面**零凭证**（纯静态改造）时才会放行，否则直接拒绝并返回 `error:"PUBLISH_WORKFLOW_REQUIRED"`；出现该错误时改走 `publish_workflow.py`，不要绕过。
   - 回复 = 回复模板格式 + **自己的新链接**（数值同样用自己的包/grant query 填）。
-- **③ 未命中**（无匹配范式）：`new_page` 首链 → `build_dashboard` / bespoke 自建 → 其余同 ②。
+- **③ 未命中**（无匹配范式）：`new_page` 创建进度页 → `build_dashboard` / bespoke 自建 → 其余同 ②；`feishu-group` 同样不发送进度链接。
 
 > 后续追问：自己的链接 → `update` 同 `page_id`；命中的官方/社区链接要改 → 只能转 ② fork 成自己的链接后再改。
 
 ## 默认路由
 
 - **固定页面形态**（个股速览、估值体检、成分股异动榜、多因子选股看板、商品日报等）：先 `templates` 查询官方精选+社区命中池；direct 直接用列表 URL + revision，fork 才读取和改写模板详情。
-- **宽宝活卡 / 精华卡 / 封面卡（范式卡 artifact）**：把页面精华做成独立 **card runtime artifact**（`embedded-card-v1`：页面内嵌 `<template data-qb-card-template>` + `data-qb-card-manifest` + `QBCardRuntimeV1` runtime），供官网卡片流 / 缩略图 / 封面在空白宿主中**独立 hydrate**。按 [guides/essence-cover-card.md](guides/essence-cover-card.md) 生成；已发布页可用 `static_page.py retrofit_card_runtime` 补 artifact，用 `verify_card_runtime` / `verify_page.mjs --card-runtime-only` 验收。卡片必须官网浅色系、固定信息骨架、可变核心可视化；不再用旧的 `?cover=1` URL 模式。
+- **宽宝活卡 / 精华卡 / 封面卡（范式卡 artifact）**：把页面精华做成独立 **card runtime artifact**（`embedded-card-v1`：页面内嵌 `<template data-qb-card-template>` + `data-qb-card-manifest` + `QBCardRuntimeV1` runtime），供官网卡片流在空白宿主中**独立 hydrate**。静态首帧 `card_snapshot_url` 由 `skill_server` 按 artifact hash 生成，整页 `thumbnail_url` 与本契约独立。按 [guides/essence-cover-card.md](guides/essence-cover-card.md) 生成；已发布页优先用 `preserve_visual:true` 只升级协议。完整重建必须命中页面专属视觉或显式传 `visual_contract`，否则 `CARD_VISUAL_REQUIRED` 停止；用 `verify_page.mjs --card-runtime-only --require-card-visual-contract` 验收新 artifact。卡片必须官网浅色系、固定信息骨架、可变核心可视化；不再用旧的 `?cover=1` URL 模式。
 - **没有合适在线模板**：再走 `workflows/dashboard-end-to-end.md`，用 `build_dashboard` 生成声明式实时看板。
 - **声明式看板也不够**：才走 `guides/bespoke-page.md` 写 bespoke 主体 HTML，并用公共 shell 编译成自包含页面。
 - **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL。
-- **用户可见首链**：direct 在 `templates` 命中后、下一次工具调用前发现成 URL；fork/unmatched 在 `new_page` 返回后立即发首链。不要等公式验证、长文档读取、记忆搜索或实现研究完成才给链接。进度页后续用 `update_progress` 和 `publish_final` 更新同一 `page_id`。
+- **用户可见链接策略**：普通渠道 direct 在 `templates` 命中后、下一次工具调用前发现成 URL，fork/unmatched 在 `new_page` 返回后立即发首链；`feishu-group` 看到 `delivery_policy.emit_intermediate_url=false` 后禁止发送任何非终态 URL，只在 validator 通过后发送 terminal contract 的 playground `public_url`。进度页仍用 `update_progress` 和 `publish_final` 更新同一 `page_id`。
 - **Agent 回复模板**：活页 metadata 可带 `agent_reply_template` 指向本技能 `reply-templates/` 下的回复骨架。`reply-templates/` 是 Agent 最终回复格式，不是活页 HTML 页面模板；不要和在线 `templates` / `template` API 混用。
 - 本 skill 不再内置本地页面样板，不能从本地历史样板目录或低质 HTML 骨架起步。
 
@@ -121,14 +137,14 @@ python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 
 - `page_context` 不得包含实时数值、api_key、signature、Bearer token 或本地路径；fork 后必须按最终页面重建，direct 才沿用原页。
 - 读取型命令返回 `agent_reply_hint.terminal=false`；`new_page/update_progress` 也不是终态。成功的 `direct_deliver/direct_finalize/upload/update/publish_final/publish_verified/update_template` 才可返回 `agent_reply_contract.terminal=true`。
-- fork/unmatched 遇到必须由用户决定的口径时，用同一 `task_id/page_id` 进入 `waiting_input`，用户回答后继续原任务；不要重新建 Trace 或首链。
+- fork/unmatched 遇到必须由用户决定的口径时，用同一 `task_id/page_id` 进入 `waiting_input`，用户回答后继续原任务；不要重新建 Trace 或首链。`feishu-group` 的 waiting hint 不含 `public_url`，提问时也不得附带进度链接。
 - fork 必须使用 `fork_prepare` 绑定来源和 manifest，最终 `publish_final` 保持首链 URL、移除来源凭证并保留必需栏目/输出/Card Runtime；详细门禁见 [workflows/new-session-paradigm-routing.md](workflows/new-session-paradigm-routing.md)。
 - prepared fork task 禁止 `build_dashboard`；脚本返回 `FORK_TASK_BOUND` 后只能继续编辑绑定的 `working_html_file` 并调用 `fork_validate`。
 - 带 `task_id` 的进度从 `package_register` 起必须传同任务的 `validation_receipt_files`，收据必须为 `completed + success=true + failures=[]`；静态页可传明确的 `validation_not_required_reason`。
-- 最终回复必须按回复模板输出并包含 contract 的公开 URL；依据 `reply_render_policy` 与 `reply_data_availability` 删除结构性不存在的字段、整列、整行和空可选章节，只有有效结构中的偶发缺值才写 `--`，不得暴露本地路径、凭证或内部日志。
+- 最终回复必须按回复模板输出并且只能使用 contract 的 `public_url`；`feishu-group` 下该字段必须是 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`。依据 `reply_render_policy` 与 `reply_data_availability` 删除结构性不存在的字段、整列、整行和空可选章节，只有有效结构中的偶发缺值才写 `--`，不得暴露原始托管 URL、本地路径、凭证或内部日志。
 - 最终回复前只运行一次发布器返回的 `reply_validation_command`；validator 必须读取发布器生成的 `contract_file + contract_sha256`，不得手工重建精简 contract。direct 使用 `direct_deliver` 返回的完整 task ID 路径和命令，成功后自动清理。`valid=true` 后不再执行任何工具调用。
 - 没有 terminal contract 禁止完成任务。唯一例外是成功的 `waiting_input` checkpoint。
-- 性能门槛：模板命中到 URL 不超过 5 秒，terminal 到最终回复不超过 45 秒，端到端不超过 120 秒，用户可见消息间隔不超过 60 秒。
+- 性能门槛：普通渠道模板命中到首链不超过 5 秒；所有渠道 terminal 到最终回复不超过 45 秒、端到端不超过 120 秒、用户可见消息间隔不超过 60 秒。
 - 逐指标声明最新可得日期和实际覆盖范围。未做浏览器验收时，只能声明公开 URL 和实时接口可访问。
 
 ## 前置依赖：公式必须先验证
@@ -209,12 +225,15 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 ## 硬规则
 
 1. **中文参数走 @file 或环境变量**：Windows PowerShell 命令行直接传中文会被 GBK 截断。注册公式、写 spec 一律用 `@params.json`（UTF-8）或 `FP_PARAMS/BD_PARAMS/SP_PARAMS` 环境变量。
-2. **公式必须先验证再注册（硬门槛）**：提交注册的每一组公式，**必须先在 quant-buddy-skill 里用 `runMultiFormulaBatchStream` 跑一遍并确认出数**（公式语法两边一致，可原样验证），跑成功才允许 `register`。不要凭空发明未验证的表达式，也不要"直接注册、错了再说"——注册时的服务端试读只是兜底，不替代这一步。
+2. **公式必须先验证再注册（硬门槛）**：提交注册的每一组公式，**必须先在 quant-buddy-skill 里用 `runMultiFormulaBatchStream` 跑一遍并确认出数**（公式语法两边一致，可原样验证），跑成功才允许 `register`。不要凭空发明未验证的表达式，也不要"直接注册、错了再说"——注册时的服务端试读只是兜底，不替代这一步。fork 场景下同样适用：`fork_prepare` 会把来源公式包的 `formulas` 原文带回 `source_runtime_contract`（公式不是隐私），改写目标资产公式时照着原文替换，**不要只凭 `required_outputs` 的变量名反推语法**；公式里引用了非主资产标的的部分（`cross_asset_formula_refs` 标出的同业/行业对比类），要先判断目标资产自己的同业/行业范围再改写，不能把原资产的同业列表直接照抄——改完仍必须过 `runMultiFormulaBatchStream` 这一步，不因为"抄了模板"就可以跳过验证。
 3. **验证参数也要换干净**：调用 `runMultiFormulaBatchStream` 时，`user_query` 必须反映当前用户请求和当前资产；若传 `task_id` 必须为本次新任务。复制示例时不能只替换 `formulas`，却留下“贵州茅台 factsheet”等旧 `user_query`，否则后台审计和回放会被污染。
 4. **signature 是凭证**：不要打印到面向最终用户的对话里；看板会把它写进公开 HTML 供实时取数，发布前确认可接受。
 5. **标签来源不要写 Agent**：显式传 `scene_tags` / `paradigm_tags` 时，`tagging_method` 用 `manual` / `migration` / `unknown`；需要 LLM 自动识别就调用 `scripts/static_page.py autotag`。不要再传 `tagging_method:"agent"`，也不要在 `tagging_meta.method` 里写 `agent`。
 6. **失败要说清**：脚本返回 `code != 0` 时，向用户复述「卡在哪一步（命令名）+ 错误摘要」，不要以空白或纯日志结束。
 7. **正文图片先上传后引用**：先用 `static_page.py image_upload` 获得目标 `page_id` 下的绝对 `https://pages.quantbuddy.cn/pages/assets/...webp` URL，再写入 HTML；禁止跨页复用托管 URL。图片必须带明确 `alt` 与 `width/height`；首屏和海报目标内不得 lazy，正文下方才可 `loading="lazy"`。标准 image panel 默认启用当前页大图预览，装饰图才设 `zoomable:false`；不要用新窗口打开图片 URL。fork 必须按 manifest 的 `images[]` 上传到目标页并替换 marker，不能保留来源图片 URL。
+8. **`templates` 摘要必须覆盖全部候选，落盘失败不能裸奔**：`items_summary` 的条目数量必须等于 `item_count`（完整候选去重后的真实数量，不是服务端可能未重算的 `total`），不允许只看其中一部分候选就判定 `unmatched`；一旦返回 `error:"TEMPLATES_PERSIST_FAILED"` 或 `error:"TEMPLATES_RESPONSE_SHAPE_UNEXPECTED"`（落盘失败或响应结构异常），必须先向用户说明「范式候选未能完整确认，暂缓路由判断」，禁止在这种不完整信息下判定为 `unmatched` 走自建，也**不得通过重复调用 `templates` 来补救**（每个任务仍然只能调用一次这条硬规则不变）；确需重试仅限明确的瞬时网络失败，且只重试一次。
+9. **Card Runtime 先做零副作用结构预检**：含 Card Runtime artifact 的 HTML 必须由 `publish_workflow.py` 在 QBS 验证、注册、图片上传和发布前用假凭证执行 `verify_page.mjs --card-runtime-structure-only`。正文与 Card 共用凭证时用 marker 数组扇出；每个数组元素仍须全局唯一并在 HTML 中恰好出现一次。禁止空 manifest 凭证、缺少/空 `src` 的 `<img>`，也禁止注册等价的重复 Card package/grant。
+
 
 ## 工具一览
 
@@ -230,7 +249,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `scripts/data_kernel_retrofit.py` | （单命令） | 按 `QB_DATA_KERNEL` marker 或严格旧内核指纹，只替换页面中的 data-kernel；零个/多个命中均拒绝写回 | [tools/data_grant.md](tools/data_grant.md) |
 | `scripts/static_page.py` | `templates` / `direct_deliver` / `new_page` / `update_progress` / `publish_final` / `publish_verified` / `upload` / `update` / `download` / `image_upload` / `image_list` / `fork_prepare` / `fork_validate` / `update_template` / 其他管理命令 | 范式路由、正文图片、direct 确定性交付、首链进度、分级浏览器门禁和页面发布管理 | [tools/static_page.md](tools/static_page.md) |
 | `scripts/qbs_bridge.py` | `<quant-buddy-skill tool> @params.json` / `validate_package_set @params.json` | QBV→QBS task_id 继承、并发 session 隔离和按最终 package 分批验证/续传/收据汇总 | 本节“新会话路由” |
-| `scripts/publish_workflow.py` | `@params.json` | 一次完成 package-set 验证、公式包/授权注册、marker 替换和单次 `publish_verified` | [tools/publish_workflow.md](tools/publish_workflow.md) |
+| `scripts/publish_workflow.py` | `@params.json` | 先做 Card Runtime 零副作用结构预检，再一次完成 package-set 验证、公式包/授权注册、多 marker 扇出替换和单次 `publish_verified` | [tools/publish_workflow.md](tools/publish_workflow.md) |
 | `scripts/validate_agent_reply.py` | （单命令） | 校验发布器 SHA256 绑定的终态 contract 与 Markdown 草稿，并检查公开 URL、章节结构和敏感信息；可在成功后清理任务临时参数文件 | — |
 | `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：1440px、390px、320px 视口，h1、占位符、横向溢出、控制台核心错误；发布前可加 `--require-browser` 强制浏览器验收；范式卡加 `--card-runtime` 连同整页验收 artifact，或 `--card-runtime-only` 跳过整页视口、只验收 artifact/manifest/required_outputs/独立 hydrate | — |
 | `scripts/render_cover.py` | （被 `build_dashboard` 调用） | 封面栅格化与合成兜底：`capture_page_cover` 用系统 Edge/Chrome 无头截"封面模式页"为整页 PNG；合成封面（全幅裸图/品牌海报）走 浏览器 → 纯 Python(cairosvg/svglib) → SVG 三层兜底。跨平台、零强依赖，不影响 HTML 发布 | — |
@@ -239,7 +258,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `assets/share-shell/` | （公共组件） | 所有落地页共用的页头、页尾、刷新按钮、分享海报弹层、海报 canvas、复制链接与复制/下载行为 | [guides/share-shell.md](guides/share-shell.md) |
 | `assets/live-card.css` | （公共组件） | 范式卡 artifact 的浅色卡片样式源；由 `build_dashboard.py` 作为 `data-qb-card-style` 内嵌进 card runtime artifact | [guides/essence-cover-card.md](guides/essence-cover-card.md) |
 | `scripts/card_runtime_retrofit.py` | （被 static_page 调用） | 为已发布/官方精选页重建独立 card runtime artifact（`embedded-card-v1`），可原链接写回 | [tools/static_page.md](tools/static_page.md) |
-| `guides/essence-cover-card.md` | （开发指南） | 页面精华浓缩为独立 4:3 card runtime artifact（`embedded-card-v1`，空白宿主独立 hydrate），适合作为官网卡片流、缩略图或封面源 | — |
+| `guides/essence-cover-card.md` | （开发指南） | 页面精华浓缩为独立 4:3 card runtime artifact（`embedded-card-v1`，空白宿主独立 hydrate），并明确 artifact、范式卡快照与整页封面的职责边界 | — |
 
 > **三条生产路**：固定页面先复用在线模板；标准看板走 `build_dashboard`（声明式快路）；要自定义版式/SVG 的设计页才写 bespoke 主体 HTML。
 > 数据层统一调 `assets/data-kernel.js`（`QB.query` 取数、`QB.series/lastValue/topValues` 解包清洗），别再每页各抄 `fetch`/解包、各踩"假 0/缺口"的坑。见 [guides/bespoke-page.md](guides/bespoke-page.md)。

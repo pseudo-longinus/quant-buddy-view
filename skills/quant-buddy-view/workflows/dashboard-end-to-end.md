@@ -1,6 +1,6 @@
 # Workflow · 需求 → 看板分享链接（端到端）
 
-> 前置分诊：新会话先走 [new-session-paradigm-routing.md](new-session-paradigm-routing.md) 查范式卡判命中。**① 直接命中**直接返回现成链接，不走本流程；本流程覆盖 **② fork**（换标的注册自己的公式包）和 **③ 未命中自建**。
+> 前置分诊：新会话先走 [new-session-paradigm-routing.md](new-session-paradigm-routing.md) 查范式卡判命中。**① 直接命中**不走本流程：普通渠道先返回现成链接，`feishu-group` 等 `direct_deliver` 终态后才返回 playground 链接；本流程覆盖 **② fork**（换标的注册自己的公式包）和 **③ 未命中自建**。
 
 把 quant-buddy-skill 里探索好的指标，做成一个公开可分享、数据自动更新的网页看板。
 
@@ -69,7 +69,7 @@ python scripts/build_dashboard.py @<(jq '. + {upload:true}' spec.json)   # bash
 python scripts/static_page.py upload '{"html_file":"output/pages/沪深300监控-xxxx.html","title":"沪深300监控"}'
 ```
 
-返回 `url` 即对外分享链接：`https://pages.quantbuddy.cn/pages/<user>/page_xxx.html`。
+返回的原始 `url` 是内部托管链接：`https://pages.quantbuddy.cn/pages/<user>/page_xxx.html`。普通渠道可直接对外分享；`feishu-group` 不发送该 URL，只在终态使用 `agent_reply_contract.public_url` 返回 `https://www.quantbuddy.cn/playground/<user>/page_xxx`。
 
 ## 4. 后续维护
 

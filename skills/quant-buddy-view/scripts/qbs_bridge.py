@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 QBV_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_FORMULA_BEGIN_DATE = 20150101
 
 
 def _read_params(argv):
@@ -92,6 +93,20 @@ def _payload_status(payload):
     return str(payload.get("status") or data.get("status") or "").strip().lower()
 
 
+def _begin_date(value, label):
+    if value is None or str(value).strip() == "":
+        return DEFAULT_FORMULA_BEGIN_DATE
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须是 YYYYMMDD 整数")
+    try:
+        normalized = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} 必须是 YYYYMMDD 整数") from exc
+    if normalized < 20050104 or normalized > 20991231 or len(str(normalized)) != 8:
+        raise ValueError(f"{label} 必须是 20050104..20991231 的 YYYYMMDD 整数")
+    return normalized
+
+
 def _validate_package_set(call_script, params, env):
     packages = params.get("packages")
     if not isinstance(packages, list) or not packages:
@@ -99,6 +114,10 @@ def _validate_package_set(call_script, params, env):
 
     task_id = str(params.get("task_id") or "").strip()
     user_query = str(params.get("user_query") or "").strip()
+    try:
+        default_begin_date = _begin_date(params.get("begin_date"), "begin_date")
+    except ValueError as exc:
+        return {"code": 1, "error": "INVALID_BEGIN_DATE", "message": str(exc)}
     names = set()
     normalized = []
     for index, item in enumerate(packages):
@@ -116,11 +135,19 @@ def _validate_package_set(call_script, params, env):
             or not all(isinstance(value, str) and value.strip() for value in force_reusable)
         ):
             return {"code": 1, "error": "INVALID_FORCE_REUSABLE", "message": f"packages[{index}].force_reusable_array 必须是字符串数组"}
+        try:
+            begin_date = _begin_date(
+                item.get("begin_date", default_begin_date),
+                f"packages[{index}].begin_date",
+            )
+        except ValueError as exc:
+            return {"code": 1, "error": "INVALID_BEGIN_DATE", "message": str(exc)}
         names.add(name)
         normalized.append({
             "name": name,
             "formulas": formulas,
             "force_reusable_array": force_reusable,
+            "begin_date": begin_date,
         })
 
     results = []
@@ -130,6 +157,7 @@ def _validate_package_set(call_script, params, env):
             "task_id": task_id,
             "user_query": user_query,
             "formulas": item["formulas"],
+            "begin_date": item["begin_date"],
             "output_mode": "summary",
         }
         if item["force_reusable_array"] is not None:
@@ -171,6 +199,7 @@ def _validate_package_set(call_script, params, env):
             "name": item["name"],
             "status": _payload_status(payload) or "completed",
             "formula_count": len(item["formulas"]),
+            "begin_date": item["begin_date"],
             "trace_id": trace_id or None,
             "job_id": job_id or None,
             "validation_receipt_file": receipt,

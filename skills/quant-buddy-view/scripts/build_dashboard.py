@@ -295,7 +295,7 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
     )
     live_card_config = LC.dashboard_config(spec, panels)
     live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
-    card_runtime_artifacts = LC.card_runtime_artifacts(
+    card_runtime_bundle = LC.card_runtime_bundle(
         live_card_config,
         endpoint=endpoint,
         package_id=package_id,
@@ -303,8 +303,9 @@ def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signatu
         style=live_card_css,
         fallback_title=title or "",
         fallback_description=subtitle or "",
-    ) if live_card_config else ""
-    card_runtime_js = LC.card_runtime_script() if live_card_config else ""
+    ) if live_card_config else None
+    card_runtime_artifacts = card_runtime_bundle["artifacts"] if card_runtime_bundle else ""
+    card_runtime_js = card_runtime_bundle["runtime"] if card_runtime_bundle else ""
 
     # 渲染脚本：把任意 data 形态归一为 {columns, rows}，再按 panel.type 出图/表
     render_js = r"""

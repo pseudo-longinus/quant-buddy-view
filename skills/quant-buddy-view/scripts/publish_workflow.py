@@ -17,10 +17,33 @@ import static_page as SP
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BRIDGE = SCRIPT_DIR / "qbs_bridge.py"
+VERIFY_PAGE = SCRIPT_DIR / "verify_page.mjs"
+DEFAULT_FORMULA_BEGIN_DATE = 20150101
+CARD_RUNTIME_MARKERS = (
+    "data-qb-card-template",
+    "data-qb-card-style",
+    "data-qb-card-manifest",
+    "data-qb-card-runtime",
+)
+PREFLIGHT_IMAGE_DATA_URI = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
 
 def _failure(error, message, **extra):
     return {"code": 1, "error": error, "message": message, **extra}
+
+
+def _marker_values(value, label):
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        raise ValueError(f"{label} 必须是非空 marker 或非空 marker 数组")
+    normalized = []
+    for index, item in enumerate(values):
+        marker = str(item or "").strip()
+        item_label = f"{label}[{index}]" if isinstance(value, list) else label
+        if not marker:
+            raise ValueError(f"{item_label} 缺失")
+        normalized.append((item_label, marker))
+    return normalized
 
 
 def _marker_specs(packages, grants, images=None):
@@ -29,18 +52,14 @@ def _marker_specs(packages, grants, images=None):
         markers = item.get("markers") if isinstance(item, dict) else None
         if not isinstance(markers, dict):
             raise ValueError(f"packages[{index}].markers 必须是对象")
-        specs.extend([
-            (f"packages[{index}].markers.package_id", markers.get("package_id")),
-            (f"packages[{index}].markers.signature", markers.get("signature")),
-        ])
+        specs.extend(_marker_values(markers.get("package_id"), f"packages[{index}].markers.package_id"))
+        specs.extend(_marker_values(markers.get("signature"), f"packages[{index}].markers.signature"))
     for index, item in enumerate(grants):
         markers = item.get("markers") if isinstance(item, dict) else None
         if not isinstance(markers, dict):
             raise ValueError(f"grants[{index}].markers 必须是对象")
-        specs.extend([
-            (f"grants[{index}].markers.grant_id", markers.get("grant_id")),
-            (f"grants[{index}].markers.signature", markers.get("signature")),
-        ])
+        specs.extend(_marker_values(markers.get("grant_id"), f"grants[{index}].markers.grant_id"))
+        specs.extend(_marker_values(markers.get("signature"), f"grants[{index}].markers.signature"))
     for index, item in enumerate(images or []):
         if not isinstance(item, dict):
             raise ValueError(f"images[{index}] 必须是对象")
@@ -100,6 +119,136 @@ def _replace_once(html, marker, value, label):
     return html.replace(marker, str(value), 1)
 
 
+def _replace_marker_field(html, marker_value, replacement, label):
+    for marker_label, marker in _marker_values(marker_value, label):
+        html = _replace_once(html, marker, replacement, marker_label)
+    return html
+
+
+def _has_card_runtime_artifact(html):
+    return any(marker in html for marker in CARD_RUNTIME_MARKERS)
+
+
+def _card_runtime_preview_html(html, packages, grants, images):
+    preview = html
+    for index, item in enumerate(packages):
+        markers = item["markers"]
+        preview = _replace_marker_field(
+            preview,
+            markers.get("package_id"),
+            f"pkg_qbv_preflight_{index}",
+            f"packages[{index}].markers.package_id",
+        )
+        preview = _replace_marker_field(
+            preview,
+            markers.get("signature"),
+            f"sig_qbv_preflight_{index}",
+            f"packages[{index}].markers.signature",
+        )
+    for index, item in enumerate(grants):
+        markers = item["markers"]
+        preview = _replace_marker_field(
+            preview,
+            markers.get("grant_id"),
+            f"grant_qbv_preflight_{index}",
+            f"grants[{index}].markers.grant_id",
+        )
+        preview = _replace_marker_field(
+            preview,
+            markers.get("signature"),
+            f"grant_sig_qbv_preflight_{index}",
+            f"grants[{index}].markers.signature",
+        )
+    for index, item in enumerate(images or []):
+        preview = _replace_once(
+            preview,
+            str(item.get("marker") or "").strip(),
+            PREFLIGHT_IMAGE_DATA_URI,
+            f"images[{index}].marker",
+        )
+    return preview
+
+
+def _run_card_runtime_preflight(html):
+    if not _has_card_runtime_artifact(html):
+        return {"code": 0, "skipped": True, "reason": "HTML 未包含 Card Runtime artifact"}
+    fd, preview_file = tempfile.mkstemp(prefix="qbv_card_runtime_preflight_", suffix=".html")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(html)
+        try:
+            completed = subprocess.run(
+                ["node", str(VERIFY_PAGE), preview_file, "--card-runtime-structure-only"],
+                cwd=SCRIPT_DIR.parent,
+                env=dict(os.environ),
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            return _failure("NODE_REQUIRED", "Card Runtime 发布前结构预检需要 Node.js")
+        except subprocess.TimeoutExpired:
+            return _failure("CARD_RUNTIME_PREFLIGHT_TIMEOUT", "Card Runtime 发布前结构预检超时")
+        try:
+            result = json.loads(completed.stdout.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return _failure("CARD_RUNTIME_PREFLIGHT_INVALID_RESPONSE", f"结构预检未返回合法 JSON: {exc}")
+        if completed.returncode != 0 or not isinstance(result, dict) or result.get("code") != 0:
+            return result if isinstance(result, dict) else _failure("CARD_RUNTIME_PREFLIGHT_FAILED", "Card Runtime 结构预检失败")
+        return result
+    finally:
+        try:
+            os.unlink(preview_file)
+        except OSError:
+            pass
+
+
+def _begin_date(value, label):
+    if value is None or str(value).strip() == "":
+        return DEFAULT_FORMULA_BEGIN_DATE
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须是 YYYYMMDD 整数")
+    try:
+        normalized = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} 必须是 YYYYMMDD 整数") from exc
+    if normalized < 20050104 or normalized > 20991231 or len(str(normalized)) != 8:
+        raise ValueError(f"{label} 必须是 20050104..20991231 的 YYYYMMDD 整数")
+    return normalized
+
+
+def _normalize_package_begin_dates(packages, workflow_begin_date=None):
+    default_begin_date = _begin_date(workflow_begin_date, "begin_date")
+    normalized = []
+    for index, item in enumerate(packages):
+        if not isinstance(item, dict):
+            raise ValueError(f"packages[{index}] 必须是对象")
+        package = dict(item)
+        validation = dict(package.get("validation") or {})
+        registration = dict(package.get("registration") or {})
+        validation_raw = validation.get("begin_date")
+        registration_raw = registration.get("begin_date")
+        if validation_raw is not None and registration_raw is not None:
+            validation_date = _begin_date(validation_raw, f"packages[{index}].validation.begin_date")
+            registration_date = _begin_date(registration_raw, f"packages[{index}].registration.begin_date")
+            if validation_date != registration_date:
+                raise ValueError(
+                    f"packages[{index}] validation.begin_date 与 registration.begin_date 必须一致"
+                )
+            begin_date = validation_date
+        else:
+            begin_date = _begin_date(
+                validation_raw if validation_raw is not None else registration_raw,
+                f"packages[{index}].begin_date",
+            ) if validation_raw is not None or registration_raw is not None else default_begin_date
+        validation["begin_date"] = begin_date
+        registration["begin_date"] = begin_date
+        package["validation"] = validation
+        package["registration"] = registration
+        normalized.append(package)
+    return normalized
+
+
 def run_workflow(params):
     params = dict(params or {})
     task_id = str(params.get("task_id") or "").strip()
@@ -118,6 +267,11 @@ def run_workflow(params):
         return _failure("INVALID_IMAGES", "images 必须是数组")
     if not isinstance(publish_params, dict) or not publish_params.get("page_id"):
         return _failure("PUBLISH_PARAMS_REQUIRED", "publish_verified.page_id 必填")
+
+    try:
+        packages = _normalize_package_begin_dates(packages, params.get("begin_date"))
+    except ValueError as exc:
+        return _failure("PACKAGE_BEGIN_DATE_INVALID", str(exc))
 
     template_file = Path(str(params.get("html_template_file") or "")).resolve()
     prepared_file = Path(str(params.get("prepared_html_file") or "")).resolve()
@@ -141,6 +295,14 @@ def run_workflow(params):
             if image_error:
                 return _failure("IMAGE_PREFLIGHT_FAILED", image_error.get("message") or f"images[{index}] 图片预检失败", failed_index=index)
             prepared_images.append({**item, "logical_name": logical_name, "resolved_image_file": path})
+        preview_html = _card_runtime_preview_html(html, packages, grants, images)
+        card_runtime_preflight = _run_card_runtime_preflight(preview_html)
+        if not isinstance(card_runtime_preflight, dict) or card_runtime_preflight.get("code") != 0:
+            return _failure(
+                "CARD_RUNTIME_PREFLIGHT_FAILED",
+                "Card Runtime 发布前结构预检失败；尚未执行公式验证或任何注册",
+                card_runtime_preflight=card_runtime_preflight,
+            )
     except (OSError, ValueError) as exc:
         return _failure("WORKFLOW_PREFLIGHT_FAILED", str(exc))
 
@@ -160,8 +322,8 @@ def run_workflow(params):
         if not (isinstance(result, dict) and result.get("code") == 0 and result.get("package_id") and result.get("signature")):
             return _failure("PACKAGE_REGISTER_FAILED", f"公式包注册失败: {item.get('name') or index}", failed_index=index, registered_packages=registered_packages)
         markers = item["markers"]
-        html = _replace_once(html, markers["package_id"], result["package_id"], f"packages[{index}].package_id")
-        html = _replace_once(html, markers["signature"], result["signature"], f"packages[{index}].signature")
+        html = _replace_marker_field(html, markers["package_id"], result["package_id"], f"packages[{index}].package_id")
+        html = _replace_marker_field(html, markers["signature"], result["signature"], f"packages[{index}].signature")
         registered_packages.append({"name": str(item.get("name") or index), "package_id": result["package_id"]})
 
     registered_grants = []
@@ -172,8 +334,8 @@ def run_workflow(params):
         if not (isinstance(result, dict) and result.get("code") == 0 and result.get("grant_id") and result.get("signature")):
             return _failure("GRANT_REGISTER_FAILED", f"数据授权注册失败: {item.get('name') or index}", failed_index=index, registered_packages=registered_packages, registered_grants=registered_grants)
         markers = item["markers"]
-        html = _replace_once(html, markers["grant_id"], result["grant_id"], f"grants[{index}].grant_id")
-        html = _replace_once(html, markers["signature"], result["signature"], f"grants[{index}].signature")
+        html = _replace_marker_field(html, markers["grant_id"], result["grant_id"], f"grants[{index}].grant_id")
+        html = _replace_marker_field(html, markers["signature"], result["signature"], f"grants[{index}].signature")
         registered_grants.append({"name": str(item.get("name") or index), "grant_id": result["grant_id"]})
 
     uploaded_images = []
@@ -212,6 +374,7 @@ def run_workflow(params):
         "user_query": user_query,
         "html_file": str(prepared_file),
         "validation_receipt_files": receipts,
+        "_via_publish_workflow": SP._VIA_PUBLISH_WORKFLOW_SENTINEL,
     })
     published = SP.cmd_publish_verified(verified_params)
     return {
@@ -224,6 +387,7 @@ def run_workflow(params):
         "registered_packages": registered_packages,
         "registered_grants": registered_grants,
         "uploaded_images": uploaded_images,
+        "card_runtime_preflight": card_runtime_preflight,
         "validation_receipt_files": receipts,
         "prepared_html_file": str(prepared_file),
         "publish_verified": published,

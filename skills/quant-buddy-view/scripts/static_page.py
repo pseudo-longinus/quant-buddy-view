@@ -192,6 +192,10 @@ _SHARE_SHELL_VERSION = "copy-link-v1"
 _FORK_MANIFEST_VERSION = "fork_manifest_v1"
 _FORK_TASK_BINDING_VERSION = "fork_task_binding_v1"
 _FORK_PREFLIGHT_SENTINEL = object()
+_VIA_PUBLISH_WORKFLOW_SENTINEL = object()
+# 只要 fork 涉及至少 1 个 package/grant 就必须走 publish_workflow.py：
+# 低于这个数量时仓库里没有第二个"替换 marker/凭证"的工具，留豁免区间等于逼 Agent 自己写替换脚本。
+_PUBLISH_WORKFLOW_REQUIRED_THRESHOLD = 1
 _MANAGED_IMAGE_RE = re.compile(
     r"(?:https://pages\.quantbuddy\.cn)?/pages/assets/([^/\s\"')]+)/(asset_[0-9a-f]{24})\.webp",
     re.IGNORECASE,
@@ -220,6 +224,9 @@ _REPLY_TEMPLATE_VERSIONS = {"reply_template_v1", "reply_template_v2"}
 _REPLY_SCOPES = {"full_answer", "hybrid"}
 _HYBRID_COMPOSITION_VERSION = "hybrid_composition_v1"
 _PAGE_CONTEXT_VERSION = "page_context_v1"
+_FEISHU_GROUP_CHANNEL = "feishu-group"
+_PAGES_PUBLIC_HOST = "pages.quantbuddy.cn"
+_PLAYGROUND_PUBLIC_HOST = "www.quantbuddy.cn"
 _MAX_REPLY_METADATA_BYTES = 8 * 1024
 _MAX_PAGE_CONTEXT_BYTES = 8 * 1024
 _MAX_PAGE_CONTEXT_TEXT = 1000
@@ -271,6 +278,56 @@ def _record_url(record):
     if not isinstance(record, dict):
         return ""
     return record.get("download_url") or record.get("public_url") or record.get("url") or ""
+
+
+def _delivery_policy():
+    if str(C.SKILL_CHANNEL or "").strip().lower() != _FEISHU_GROUP_CHANNEL:
+        return None
+    return {
+        "channel": _FEISHU_GROUP_CHANNEL,
+        "emit_intermediate_url": False,
+        "terminal_url_format": "quantbuddy_playground",
+    }
+
+
+def _delivery_public_url(value):
+    """Return the user-facing URL without changing the internal hosting URL."""
+    url = str(value or "").strip()
+    if not url or not _delivery_policy():
+        return url
+    try:
+        parsed = _up.urlsplit(url)
+    except ValueError:
+        return url
+
+    host = str(parsed.hostname or "").lower()
+    if host == _PLAYGROUND_PUBLIC_HOST and parsed.path.startswith("/playground/"):
+        return url
+    if parsed.scheme.lower() != "https" or host != _PAGES_PUBLIC_HOST:
+        return url
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 3 or parts[0] != "pages" or not parts[1] or not parts[2].endswith(".html"):
+        return url
+    page_id = parts[2][:-5]
+    if not page_id:
+        return url
+    return _up.urlunsplit((
+        "https",
+        _PLAYGROUND_PUBLIC_HOST,
+        f"/playground/{parts[1]}/{page_id}",
+        parsed.query,
+        parsed.fragment,
+    ))
+
+
+def _apply_delivery_policy(payload):
+    if not isinstance(payload, dict):
+        return payload
+    policy = _delivery_policy()
+    if policy:
+        payload["delivery_policy"] = policy
+    return payload
 
 
 def _agent_reply_template_metadata(value):
@@ -677,8 +734,9 @@ def _agent_reply_template_contract(record, *, operation=None):
         "page_id": record.get("page_id") or "",
         "required": bool(template_ref),
         "page_context": page_context,
-        "public_url": public_url,
+        "public_url": _delivery_public_url(public_url),
     }
+    _apply_delivery_policy(contract)
     if template_ref:
         reply_render_policy = RTR.get_reply_render_policy(template_ref)
         contract.update({
@@ -714,6 +772,7 @@ def _agent_reply_template_hint(record, *, resource_role):
         "resource_role": resource_role,
         "page_context": _normalize_page_context(record.get("page_context"))[0],
     }
+    _apply_delivery_policy(hint)
     if not meta_error and isinstance(meta, dict) and meta.get("template_ref"):
         hint.update({
             "template_ref": meta.get("template_ref"),
@@ -1473,6 +1532,68 @@ def _template_required_outputs(record):
     return outputs
 
 
+# 公式里"引用具体标的"的常见函数：函数名(资产名/资产代码) 这种调用形态。
+# getStaticPage/getTemplate 都会带回 formulas 原文（公式非隐私），fork 时不必再凭输出变量名反推——
+# 但公式里可能混着"同业/行业对比"这类引用了别的资产的公式，不能被当成主资产公式直接照抄替换。
+_ASSET_ARG_FORMULA_RE = re.compile(
+    r"(?:取出|收盘价|开盘价|最高价|最低价|涨跌幅|成交额|成交量|换手率|总市值|流通市值)\(\s*([^()]{1,40}?)\s*\)"
+)
+
+
+def _template_formula_contract(record, primary_markers=None):
+    """把模板 packages[].formulas 原样整理出来，供 fork 时参考改写（而不是凭输出名反推）。
+    同时标出每条公式里引用了非主资产的标的（同业/行业对比一类），提醒 Agent 不能直接照抄。"""
+    markers = {str(m).strip() for m in (primary_markers or []) if str(m).strip()}
+    packages = []
+    for package in record.get("packages") or []:
+        if not isinstance(package, dict):
+            continue
+        package_id = str(package.get("package_id") or "").strip()
+        if not package_id:
+            continue
+        formulas = [f for f in (package.get("formulas") or []) if isinstance(f, str) and f.strip()]
+        other_asset_formulas = []
+        for formula in formulas:
+            refs = _unique_strings([
+                arg.strip().strip('"\'')
+                for arg in _ASSET_ARG_FORMULA_RE.findall(formula)
+                if arg.strip().strip('"\'') and arg.strip().strip('"\'') not in markers
+            ])
+            if refs:
+                other_asset_formulas.append({"formula": formula, "asset_refs": refs})
+        packages.append({
+            "package_id": package_id,
+            "found": bool(package.get("found", True)),
+            "status": package.get("status"),
+            "formulas": formulas,
+            "outputs": _unique_strings([
+                f.split("=", 1)[0].strip().strip('"\'')
+                for f in formulas if "=" in f
+            ]),
+            "other_asset_formulas": other_asset_formulas,
+        })
+    return packages
+
+
+def _template_grant_contract(record):
+    """把模板 grants[] 整理为 fork 可直接继承的数据授权合同。"""
+    grants = []
+    for grant in record.get("grants") or []:
+        if not isinstance(grant, dict):
+            continue
+        grant_id = str(grant.get("grant_id") or "").strip()
+        if not grant_id:
+            continue
+        grants.append({
+            "source_grant_id": grant_id,
+            "found": bool(grant.get("found", True)),
+            "status": grant.get("status"),
+            "kind": grant.get("kind"),
+            "payload": grant.get("payload") if isinstance(grant.get("payload"), dict) else None,
+        })
+    return grants
+
+
 def _fork_path(value, *, base=None):
     path = str(value or "").strip()
     if not path:
@@ -2190,13 +2311,15 @@ def _attach_progress_result(out, state, params=None):
             if waiting:
                 required_input = state.get("required_input") or {}
                 trace_context = C.current_trace_context()
-                hint.update({
+                waiting_context = {
                     "required_input": required_input,
                     "task_id": (params or {}).get("task_id") or trace_context.get("task_id") or "",
                     "page_id": (params or {}).get("page_id") or out.get("page_id") or "",
-                    "public_url": out.get("url") or out.get("public_url") or "",
                     "resume_step": required_input.get("resume_step") or state.get("current_step") or "",
-                })
+                }
+                if not _delivery_policy():
+                    waiting_context["public_url"] = out.get("url") or out.get("public_url") or ""
+                hint.update(waiting_context)
         out["progress"] = state
         out["steps"] = state.get("steps") or []
         out["progress_page"] = {
@@ -2494,6 +2617,19 @@ def cmd_publish_verified(params):
             return {"code": 1, "published": False, "verified": False, "stages": stages, "timing": timings}
 
         fork_validation = stages["fork_validate"].get("fork_manifest_validation") or {}
+        via_publish_workflow = params.pop("_via_publish_workflow", None) is _VIA_PUBLISH_WORKFLOW_SENTINEL
+        credential_count = len(fork_validation.get("source_package_ids") or []) + len(fork_validation.get("source_grant_ids") or [])
+        if credential_count >= _PUBLISH_WORKFLOW_REQUIRED_THRESHOLD and not via_publish_workflow:
+            return {
+                "code": 1,
+                "error": "PUBLISH_WORKFLOW_REQUIRED",
+                "message": (
+                    f"该 fork 页面涉及 {credential_count} 个 package/grant（>= {_PUBLISH_WORKFLOW_REQUIRED_THRESHOLD}），"
+                    "禁止手工分步调用 publish_verified；必须改用一次 scripts/publish_workflow.py 完成验证/注册/marker替换/发布。"
+                ),
+                "credential_count": credential_count,
+                "stages": stages,
+            }
         card_runtime = bool(params.get("card_runtime_required") or fork_validation.get("card_runtime_required"))
         started = time.perf_counter()
         stages["local_browser"] = _run_page_verifier(target, "fork-local", card_runtime=card_runtime)
@@ -2525,14 +2661,20 @@ def cmd_publish_verified(params):
             "published": True,
             "verified": verified,
             "page_id": params.get("page_id"),
-            "public_url": public_url,
+            "public_url": _delivery_public_url(public_url),
             "stages": stages,
             "timing": timings,
         }
         if verified:
             contract = stages["publish_final"].get("agent_reply_contract")
             if isinstance(contract, dict):
-                result["agent_reply_contract"] = {**contract, "operation": "publish_verified"}
+                result_contract = {**contract, "operation": "publish_verified"}
+                if _delivery_policy():
+                    result_contract["public_url"] = _delivery_public_url(
+                        result_contract.get("public_url") or public_url
+                    )
+                    _apply_delivery_policy(result_contract)
+                result["agent_reply_contract"] = result_contract
             if stages["publish_final"].get("agent_reply_template_file"):
                 result["agent_reply_template_file"] = stages["publish_final"]["agent_reply_template_file"]
             if isinstance(result.get("agent_reply_contract"), dict):
@@ -2551,6 +2693,26 @@ def cmd_publish_verified(params):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def _atomic_write_bytes(path, data_bytes):
+    """把 data_bytes 原子写入 path：同目录 mkstemp + os.replace，避免半写被读到。
+    写入/替换失败时清理临时文件并把异常原样抛出，交由调用方 fail-closed。"""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".qbv-tmp-", suffix=".part", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _publish_verified_cli_result(result, task_id):
@@ -3198,6 +3360,70 @@ def _merge_template_items(base, extra):
     return base
 
 
+_TEMPLATES_FULL_RESULT_VERSION = "templates_full_result_v1"
+_TEMPLATE_SUMMARY_DESCRIPTION_LIMIT = 80
+
+
+def _write_templates_full_result(task_id, normalized, item_count):
+    """把 templates 完整候选（含 agent_reply_hint/page_context）原子落盘到 task-scoped 临时文件。
+    文件名匹配 qbv_<safe_task>_*.json，可被 common.cleanup_task_temp_files 自动清理。
+    返回 (full_path, sha256, byte_len)；task_id 缺失或写入失败时抛异常，调用方负责 fail-closed。"""
+    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
+    if not safe_task:
+        raise ValueError("templates 完整候选落盘需要非空 task_id（先调用 trace_context.py begin）")
+    envelope = {
+        "version": _TEMPLATES_FULL_RESULT_VERSION,
+        "task_id": str(task_id),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "item_count": item_count,
+        "result": normalized,
+    }
+    payload = json.dumps(envelope, ensure_ascii=False, indent=2).encode("utf-8")
+    sha256 = hashlib.sha256(payload).hexdigest()
+    final_path = os.path.join(tempfile.gettempdir(), f"qbv_{safe_task}_templates_full.json")
+    _atomic_write_bytes(final_path, payload)
+    return final_path, sha256, len(payload)
+
+
+def _compact_template_item(item):
+    """把单条候选精简成路由判断所需的最小字段集：字段可裁剪/description 可截断，
+    但调用方必须保证每条候选都产出一条摘要（不允许按 top-N 丢条目）。
+    标签复用既有 _tag_names（约532行，返回去重 set），排序后转 list 以便 JSON 序列化。"""
+    if not isinstance(item, dict):
+        return {}
+    description = item.get("description") or ""
+    if len(description) > _TEMPLATE_SUMMARY_DESCRIPTION_LIMIT:
+        description = description[:_TEMPLATE_SUMMARY_DESCRIPTION_LIMIT] + "…(完整文本见 full_result_file)"
+    hint = item.get("agent_reply_hint") if isinstance(item.get("agent_reply_hint"), dict) else {}
+    return {
+        "template_id": item.get("template_id"),
+        "page_id": item.get("page_id"),
+        "title": item.get("title"),
+        "category": item.get("category"),
+        "description": description,
+        "download_url": item.get("download_url"),
+        "is_template": item.get("is_template"),
+        "template_status": item.get("template_status"),
+        "scene_tags": sorted(_tag_names(item.get("scene_tags"))),
+        "paradigm_tags": sorted(_tag_names(item.get("paradigm_tags"))),
+        "recommend_tags": sorted(_tag_names(item.get("recommend_tags"))),
+        "source_template_id": hint.get("source_template_id") or item.get("template_id") or item.get("page_id") or "",
+    }
+
+
+def _extract_template_items(normalized):
+    """从 _normalize_cover_response 处理后的响应里取出 items 列表；结构不符合预期时返回 None（调用方 fail-closed）。"""
+    if not isinstance(normalized, dict):
+        return None
+    data = normalized.get("data")
+    if not isinstance(data, dict):
+        return None
+    items = data.get("items")
+    if not isinstance(items, list):
+        return None
+    return items
+
+
 def cmd_templates(params):
     cfg = C.load_config_require_key()
     endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
@@ -3210,9 +3436,45 @@ def cmd_templates(params):
         base = _templates_query(endpoint, api_key, params)                       # 官方精选
         community = _templates_query(endpoint, api_key, params, recommend="社区")  # 社区
         merged = _merge_template_items(base, community)
-        return _normalize_cover_response(merged, reply_mode="hint", resource_role="source_template")
-    out = _templates_query(endpoint, api_key, params, recommend=(recommend if recommend else None))
-    return _normalize_cover_response(out, reply_mode="hint", resource_role="source_template")
+        normalized = _normalize_cover_response(merged, reply_mode="hint", resource_role="source_template")
+    else:
+        out = _templates_query(endpoint, api_key, params, recommend=(recommend if recommend else None))
+        normalized = _normalize_cover_response(out, reply_mode="hint", resource_role="source_template")
+
+    # 查询本身失败（网络错误/后端非 0）：原样透传，不进入落盘改造，保持既有失败语义。
+    if not (isinstance(normalized, dict) and normalized.get("code") == 0):
+        return normalized
+
+    items = _extract_template_items(normalized)
+    if items is None:
+        return {
+            "code": 1,
+            "error": "TEMPLATES_RESPONSE_SHAPE_UNEXPECTED",
+            "message": "templates 返回结构不含预期的 data.items 列表，无法安全生成摘要，禁止据此判断 unmatched",
+        }
+
+    task_id = str(params.get("task_id") or C.current_trace_context().get("task_id") or "").strip()
+    try:
+        full_path, sha256, _byte_len = _write_templates_full_result(task_id, normalized, len(items))
+    except Exception as exc:
+        return {
+            "code": 1,
+            "error": "TEMPLATES_PERSIST_FAILED",
+            "message": f"范式候选完整结果落盘失败：{exc}；未落盘前禁止继续路由判断，也不要把完整结果直接打印",
+        }
+
+    items_summary = [_compact_template_item(it) for it in items]
+    data = normalized.get("data") or {}
+    return {
+        "code": 0,
+        "item_count": len(items),
+        "items_summary": items_summary,
+        "full_result_file": full_path,
+        "full_result_sha256": sha256,
+        "page": data.get("page"),
+        "page_size": data.get("page_size"),
+        "total": data.get("total"),
+    }
 
 
 def cmd_template(params):
@@ -3271,7 +3533,11 @@ def cmd_direct_finalize(params):
             "missing": missing,
         }
     out["operation"] = "direct_finalize"
-    return _attach_agent_reply_contract(out, operation="direct_finalize")
+    _attach_agent_reply_contract(out, operation="direct_finalize")
+    contract = out.get("agent_reply_contract") if isinstance(out.get("agent_reply_contract"), dict) else None
+    if contract and _delivery_policy():
+        out["public_url"] = contract.get("public_url") or out.get("public_url") or out.get("url") or ""
+    return out
 
 
 def _direct_credential_map(items, id_key):
@@ -3518,7 +3784,9 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
 def cmd_direct_deliver(params):
     """Execute the evidence-producing portion of a direct delivery exactly once.
 
-    The caller must already have emitted the selected template URL to the user.
+    Except for feishu-group, the caller must already have emitted the selected
+    template URL to the user. The feishu-group channel waits for the terminal
+    contract and emits only its playground URL.
     This command intentionally owns template detail loading, credential extraction,
     one query per current package/grant, and the single terminal finalize call.
     """
@@ -3633,6 +3901,23 @@ def cmd_fork_prepare(params):
     required_outputs = _unique_strings(params.get("required_outputs") or _template_required_outputs(record))
     image_markers = [item["marker"] for item in source_managed_images]
     source_markers = _unique_strings(list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()) + image_markers)
+    formula_contract_packages = _template_formula_contract(
+        record,
+        primary_markers=list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()),
+    )
+    grant_contracts = _template_grant_contract(record)
+    cross_asset_formula_refs = [
+        {"package_id": p["package_id"], "asset_refs": _unique_strings(
+            ref for item in p["other_asset_formulas"] for ref in item["asset_refs"]
+        )}
+        for p in formula_contract_packages if p["other_asset_formulas"]
+    ]
+    cross_asset_formula_warning = (
+        "以下公式包里存在引用了非主资产标的的公式（例如同业对比、行业分组），"
+        "不能直接照抄替换成目标资产：先判断目标资产自己的同业/行业范围，"
+        "拿不准就在 source_runtime_contract 里对照原公式逐条改写，或向用户确认同业/行业池后再注册。"
+        if cross_asset_formula_refs else ""
+    )
     card_runtime_required = bool(
         params.get("card_runtime_required")
         if "card_runtime_required" in params
@@ -3681,6 +3966,12 @@ def cmd_fork_prepare(params):
         "agent_reply_template": record.get("agent_reply_template"),
         "page_context_reference": context or None,
         "source_managed_images": source_managed_images,
+        "source_runtime_contract": {
+            "packages": formula_contract_packages,
+            "grants": grant_contracts,
+        },
+        "cross_asset_formula_refs": cross_asset_formula_refs,
+        "cross_asset_formula_warning": cross_asset_formula_warning,
     }
     with open(manifest_file, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
@@ -3712,7 +4003,17 @@ def cmd_fork_prepare(params):
         "page_context": context or None,
         "agent_reply_template": record.get("agent_reply_template"),
         "fork_task_binding": fork_task_binding,
-        "next_step": "基于 working_html_file 替换自己的凭证与目标文案；同 task 的 publish_final 会自动恢复绑定，仍应显式传 source_template_id 与 fork_manifest_file",
+        "source_runtime_contract": manifest["source_runtime_contract"],
+        "cross_asset_formula_refs": cross_asset_formula_refs,
+        "cross_asset_formula_warning": cross_asset_formula_warning,
+        "next_step": (
+            "先读 source_runtime_contract.packages[].formulas：这是模板当初注册的公式原文，"
+            "照着它的写法把资产替换成目标资产改写新公式，不要凭 required_outputs 的变量名反推语法。"
+            "cross_asset_formula_refs 非空时，对应公式引用了非主资产标的（同业/行业对比一类），"
+            "必须先判断目标资产自己的同业/行业范围再改写，不能把原资产的同业列表直接照抄。"
+            "改完先用 quant-buddy-skill 的 runMultiFormulaBatchStream 验证出数，再注册自己的 package/grant 并替换 working_html_file 里的凭证；"
+            "同 task 的 publish_final 会自动恢复绑定，仍应显式传 source_template_id 与 fork_manifest_file"
+        ),
     }
     return _attach_agent_reply_hint(out, resource_role="source_template")
 
@@ -3851,13 +4152,22 @@ def _default_retrofit_out_file(page_id):
     return os.path.join(base, "%s.html" % (page_id or "page"))
 
 
-def _run_card_runtime_verify(html_file, *, artifact_only=False, require_browser=True, timeout_sec=180):
+def _run_card_runtime_verify(
+    html_file,
+    *,
+    artifact_only=False,
+    require_browser=True,
+    require_visual_contract=False,
+    timeout_sec=180
+):
     target = html_file
     cmd = ["node", os.path.join(C.SKILL_ROOT, "scripts", "verify_page.mjs"), target, "--card-runtime"]
     if require_browser:
         cmd.append("--require-browser")
     if artifact_only:
         cmd.append("--card-runtime-only")
+    if require_visual_contract:
+        cmd.append("--require-card-visual-contract")
     try:
         proc = subprocess.run(
             cmd,
@@ -4138,12 +4448,22 @@ def cmd_retrofit_card_runtime(params):
             url = url or record.get("download_url") or record.get("public_url") or record.get("url")
             tid = record.get("template_id") or record.get("page_id") or tid
 
-    html = _fetch_public_html(url)
-    next_html, info = CRT.retrofit_html(
-        html,
-        page_id=tid or params.get("page_id") or "",
-        title=params.get("title") or record.get("title") or "",
-    )
+    source_html_file = params.get("source_html_file")
+    if source_html_file:
+        source_path = source_html_file if os.path.isabs(source_html_file) else os.path.join(C.SKILL_ROOT, source_html_file)
+        with open(source_path, "r", encoding="utf-8") as f:
+            html = f.read()
+    else:
+        html = _fetch_public_html(url)
+    if params.get("preserve_visual"):
+        next_html, info = CRT.upgrade_artifact_protocol(html)
+    else:
+        next_html, info = CRT.retrofit_html(
+            html,
+            page_id=tid or params.get("page_id") or "",
+            title=params.get("title") or record.get("title") or "",
+            visual_contract=params.get("visual_contract"),
+        )
 
     out_file = params.get("out_file") or _default_retrofit_out_file(tid or params.get("page_id") or "page")
     if not os.path.isabs(out_file):
@@ -4152,7 +4472,15 @@ def cmd_retrofit_card_runtime(params):
     with open(out_file, "w", encoding="utf-8", newline="\n") as f:
         f.write(next_html)
 
-    verify_default = _run_card_runtime_verify(out_file) if params.get("verify", True) else None
+    verify_default = (
+        _run_card_runtime_verify(
+            out_file,
+            artifact_only=True,
+            require_visual_contract=not bool(params.get("preserve_visual")),
+        )
+        if params.get("verify", True)
+        else None
+    )
     if verify_default and verify_default.get("code") != 0:
         return {"code": 1, "message": "card runtime 独立验收未通过", "html_file": out_file, "retrofit": info, "verification": verify_default}
 
@@ -4230,6 +4558,7 @@ _COMMANDS = {
 
 _TRACE_REQUIRED_COMMANDS = {
     "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate", "image_upload",
+    "templates",
 }
 
 

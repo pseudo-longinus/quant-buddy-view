@@ -6,9 +6,13 @@ from html import escape as html_escape
 import json
 import re
 
-
-CARD_RUNTIME_KIND = "embedded-card-v1"
-CARD_RUNTIME_VERSION = "1.0.0"
+from card_runtime_contract import (
+    CARD_RUNTIME_KIND,
+    CARD_RUNTIME_VERSION,
+    artifact_hash,
+    validate_manifest,
+    validate_runtime_source,
+)
 
 
 def _clean_text(value, fallback=""):
@@ -169,6 +173,7 @@ def card_runtime_artifacts(config=None, *, endpoint="", package_id="", signature
         "required_outputs": required_outputs(cfg),
         "aspect_ratio": "4/3",
     }
+    validate_manifest(manifest)
     manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2).replace("</", "<\\/")
     return """
 <template data-qb-card-template>
@@ -183,7 +188,7 @@ def card_runtime_artifacts(config=None, *, endpoint="", package_id="", signature
 
 
 def card_runtime_script():
-    return r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
+    runtime = r"""<script id="qb-card-runtime-v1" data-qb-card-runtime>
 (function(){
   function text(value, fallback){
     var raw = value == null ? "" : String(value).trim();
@@ -264,6 +269,8 @@ def card_runtime_script():
       var value = outputValue(outputs, item.getAttribute("data-qb-live-card-output"), item.getAttribute("data-qb-live-card-field"));
       valueEl.textContent = fmt(value, item.getAttribute("data-qb-live-card-unit") || "");
     });
+    var card = root.querySelector("[data-qb-live-card]");
+    if (card) card.setAttribute("data-qb-card-ready", "true");
   }
   window.QBCardRuntimeV1 = {
     mount: function(root, options){
@@ -281,6 +288,49 @@ def card_runtime_script():
   };
 })();
 </script>"""
+    validate_runtime_source(runtime)
+    return runtime
+
+
+def _artifact_block(source, tag, marker):
+    match = re.search(
+        r"<%s\b(?=[^>]*\b%s\b)[^>]*>([\s\S]*?)</%s>" % (tag, marker, tag),
+        source or "",
+        re.I,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def card_runtime_bundle(config=None, *, endpoint="", package_id="", signature="", style="", fallback_title="", fallback_description=""):
+    """Build the standard artifact and expose the same canonical metadata as retrofit."""
+    artifacts = card_runtime_artifacts(
+        config,
+        endpoint=endpoint,
+        package_id=package_id,
+        signature=signature,
+        style=style,
+        fallback_title=fallback_title,
+        fallback_description=fallback_description,
+    )
+    runtime = card_runtime_script()
+    template_text = _artifact_block(artifacts, "template", "data-qb-card-template")
+    style_text = _artifact_block(artifacts, "style", "data-qb-card-style")
+    manifest_text = _artifact_block(artifacts, "script", "data-qb-card-manifest")
+    runtime_text = _artifact_block(runtime, "script", "data-qb-card-runtime")
+    if not all((template_text, style_text, manifest_text, runtime_text)):
+        raise ValueError("标准生成器产出的 card runtime artifact 不完整")
+    manifest = json.loads(manifest_text)
+    return {
+        "artifacts": artifacts,
+        "runtime": runtime,
+        "metadata": {
+            "card_runtime_supported": True,
+            "card_runtime_version": CARD_RUNTIME_VERSION,
+            "card_runtime_kind": CARD_RUNTIME_KIND,
+            "card_required_outputs": manifest["required_outputs"],
+            "card_artifact_hash": artifact_hash(template_text, style_text, manifest_text, runtime_text),
+        },
+    }
 
 
 def dashboard_config(spec, panels):

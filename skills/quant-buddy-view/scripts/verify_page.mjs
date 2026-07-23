@@ -8,6 +8,7 @@
  *   node scripts/verify_page.mjs output/pages/demo.html --manifest output/pages/demo.manifest.json
  *   node scripts/verify_page.mjs output/pages/demo.html --require-browser
  *   node scripts/verify_page.mjs output/pages/demo.html --card-runtime-only
+ *   node scripts/verify_page.mjs output/pages/demo.html --card-runtime-structure-only
  */
 
 import fs from 'node:fs';
@@ -20,6 +21,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { resolveVerificationProfile } from './verification_profiles.mjs';
 import { staticImageProblems } from './image_verification.mjs';
+import { cardVisualContractProblems } from './card_visual_contract.mjs';
 
 const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
@@ -32,11 +34,15 @@ try {
   fs.writeSync(1, JSON.stringify({ code: 1, error: err.code || 'UNKNOWN_VERIFICATION_PROFILE', message: err.message }) + '\n');
   process.exit(1);
 }
-const cardRuntimeOnly = args.includes('--card-runtime-only') || verificationProfile.cardRuntimeOnly;
-const cardRuntime = args.includes('--card-runtime') || cardRuntimeOnly;
+const cardRuntimeStructureOnly = args.includes('--card-runtime-structure-only');
+const cardRuntimeOnly = !cardRuntimeStructureOnly && (args.includes('--card-runtime-only') || verificationProfile.cardRuntimeOnly);
+const cardRuntime = args.includes('--card-runtime') || cardRuntimeOnly || cardRuntimeStructureOnly;
+const requireCardVisualContract = args.includes('--require-card-visual-contract');
+const cardScreenshotIdx = args.indexOf('--card-screenshot');
+const cardScreenshotPath = cardScreenshotIdx >= 0 ? args[cardScreenshotIdx + 1] : '';
 const manifestIdx = args.indexOf('--manifest');
 const manifestPath = manifestIdx >= 0 ? args[manifestIdx + 1] : '';
-const valueFlags = new Set(['--manifest', '--profile']);
+const valueFlags = new Set(['--manifest', '--profile', '--card-screenshot']);
 const positionals = [];
 for (let i = 0; i < args.length; i += 1) {
   const arg = args[i];
@@ -68,7 +74,7 @@ function fail(message) {
 }
 
 if (!target) {
-  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--profile full|fork-local|public-smoke|live-only] [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only]');
+  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--profile full|fork-local|public-smoke|live-only] [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only] [--card-runtime-structure-only] [--require-card-visual-contract] [--card-screenshot output.png]');
 }
 
 function delay(ms) {
@@ -212,10 +218,6 @@ async function parseSseOutputs(resp, expectedOutputs = []) {
   return outputs;
 }
 
-function countStandaloneZeroPct(text) {
-  return ((text || '').match(/(^|[^0-9])0\.0%/g) || []).length;
-}
-
 function countLongDash(text) {
   return ((text || '').match(/—/g) || []).length;
 }
@@ -286,6 +288,7 @@ async function artifactHydrateChecks(template, style, runtimeScript, outputs, op
       return {
         runtimePresent: !!(runtime && typeof runtime.hydrate === 'function'),
         rootHasCard: !!card,
+        ready: card?.getAttribute('data-qb-card-ready') === 'true',
         text: visibleText(root),
         rect: rect ? { width: rect.width, height: rect.height } : null,
         overflow: card ? {
@@ -298,6 +301,14 @@ async function artifactHydrateChecks(template, style, runtimeScript, outputs, op
       }, outputs || {});
       hydrated.label = size.label;
       hydratedSizes.push(hydrated);
+      if (options.screenshotPath && size.label === '720x540' && hydrated.rootHasCard) {
+        const screenshotAbs = path.isAbsolute(options.screenshotPath)
+          ? options.screenshotPath
+          : path.resolve(process.cwd(), options.screenshotPath);
+        fs.mkdirSync(path.dirname(screenshotAbs), { recursive: true });
+        await page.locator('#root [data-qb-live-card]').screenshot({ path: screenshotAbs, type: 'png' });
+        result.screenshot = screenshotAbs;
+      }
     }
     const hydrated = hydratedSizes[0] || {};
     result.checked = true;
@@ -311,8 +322,11 @@ async function artifactHydrateChecks(template, style, runtimeScript, outputs, op
     for (const item of hydratedSizes) {
       if (!item.runtimePresent) result.problems.push(`card runtime 独立 hydrate 未暴露 hydrate(root, outputs) (${item.label})`);
       if (!item.rootHasCard) result.problems.push(`card artifact 独立 hydrate 后缺少 data-qb-live-card 根节点 (${item.label})`);
+      if (!item.ready) result.problems.push(`card artifact 独立 hydrate 后未进入 ready 状态 (${item.label})`);
       if (!item.text || item.text.length < 6) result.problems.push(`card artifact 独立 hydrate 后内容疑似空白 (${item.label})`);
-      if (/待更新|取数中|判断生成中/.test(item.text) || countStandaloneZeroPct(item.text) || countLongDash(item.text) >= 3) {
+      // A real strategy position can legitimately be 0.0%. Only explicit
+      // loading copy or repeated em-dash placeholders indicate stale hydrate.
+      if (/待更新|取数中|判断生成中/.test(item.text) || countLongDash(item.text) >= 3) {
         result.problems.push(`card artifact 独立 hydrate 后仍含长期占位态 (${item.label})`);
       }
       if (item.overflow) {
@@ -348,7 +362,13 @@ async function cardRuntimeChecks(html, options = {}) {
   const runtimeScript = firstTaggedBlock(html, 'script', 'data-qb-card-runtime');
   let manifest = null;
   let sampledOutputs = null;
-  let artifactHydrate = { checked: false, skipped: true, reason: 'card artifact 不完整，跳过独立 hydrate', text: '', problems: [] };
+  let artifactHydrate = {
+    checked: false,
+    skipped: true,
+    reason: options.structureOnly ? 'structure-only 预检不取数、不执行 hydrate' : 'card artifact 不完整，跳过独立 hydrate',
+    text: '',
+    problems: [],
+  };
 
   if (!template) problems.push('缺少 template[data-qb-card-template]');
   else if (!/\bdata-qb-live-card\b/i.test(template)) problems.push('card template 缺少 data-qb-live-card 根标记');
@@ -366,6 +386,7 @@ async function cardRuntimeChecks(html, options = {}) {
     problems.push('缺少 script[data-qb-card-runtime]');
   } else {
     if (!/window\.QBCardRuntimeV1\b/.test(runtimeScript)) problems.push('card runtime 未暴露 window.QBCardRuntimeV1');
+    if (!/data-qb-card-ready/.test(runtimeScript)) problems.push('card runtime 未声明 hydrate ready 标记');
     if (/\b(fetch|XMLHttpRequest|EventSource)\b|queryFormulaPackage/i.test(runtimeScript)) {
       problems.push('card runtime 不应自动发起取数请求');
     }
@@ -382,10 +403,22 @@ async function cardRuntimeChecks(html, options = {}) {
     const packages = manifestPackages(manifest);
     if (!packages.length) problems.push('card manifest 缺少 package_id/signature/endpoint 或 packages[]');
     if (manifest.kind !== 'embedded-card-v1') problems.push(`card manifest kind 不支持: ${manifest.kind}`);
+    if (manifest.version !== '1.1.0') problems.push(`card manifest version 不支持: ${manifest.version}`);
+    if (manifest.aspect_ratio !== '4/3') problems.push(`card manifest aspect_ratio 不支持: ${manifest.aspect_ratio}`);
+    for (const imageField of ['card_snapshot_url', 'thumbnail_url']) {
+      if (Object.prototype.hasOwnProperty.call(manifest, imageField)) {
+        problems.push(`card manifest 不得包含服务端图片字段: ${imageField}`);
+      }
+    }
     if (!Array.isArray(manifest.required_outputs) || manifest.required_outputs.length === 0) {
       problems.push('card manifest required_outputs 必须是非空数组');
+    } else {
+      const normalizedOutputs = manifest.required_outputs.map(value => String(value || '').trim());
+      if (normalizedOutputs.some(value => !value) || new Set(normalizedOutputs).size !== normalizedOutputs.length) {
+        problems.push('card manifest required_outputs 必须是非空且不重复的字符串');
+      }
     }
-    if (Array.isArray(manifest.required_outputs) && manifest.required_outputs.length > 0 && packages.length) {
+    if (!options.structureOnly && Array.isArray(manifest.required_outputs) && manifest.required_outputs.length > 0 && packages.length) {
       sampledOutputs = {};
       for (const pkg of packages) {
         const expected = (pkg.outputs && pkg.outputs.length ? pkg.outputs : manifest.required_outputs)
@@ -421,19 +454,10 @@ async function cardRuntimeChecks(html, options = {}) {
         problems.push(`card manifest required_outputs 不存在或未返回: ${missing.slice(0, 12).join(', ')}`);
       }
     }
+    problems.push(...cardVisualContractProblems(template, manifest, { strict: options.requireVisualContract }));
   }
 
-  if (template) {
-    const compactText = template.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, '').replace(/\s+/g, '');
-    const pendingCount = (compactText.match(/待更新/g) || []).length;
-    const zeroPctCount = countStandaloneZeroPct(compactText);
-    const dashCount = countLongDash(compactText);
-    if (pendingCount || zeroPctCount || dashCount >= 3) {
-      problems.push(`card template 含长期占位态: 待更新 x${pendingCount}, 0.0% x${zeroPctCount}, — x${dashCount}`);
-    }
-  }
-
-  if (template && style && runtimeScript && sampledOutputs) {
+  if (!options.structureOnly && template && style && runtimeScript && sampledOutputs) {
     artifactHydrate = await artifactHydrateChecks(template, style, runtimeScript, sampledOutputs, options);
     if (artifactHydrate.problems.length) problems.push(...artifactHydrate.problems);
   }
@@ -505,17 +529,22 @@ async function launchPlaywrightBrowser(pw) {
 
 async function prepareImagesExpression() {
   const images = Array.from(document.images || []);
-  for (const img of images) {
+  const isPendingRuntimeImage = img => (
+    img.hasAttribute('data-qb-runtime-src')
+    && !String(img.getAttribute('src') || '').trim()
+  );
+  const verifiableImages = images.filter(img => !isPendingRuntimeImage(img));
+  for (const img of verifiableImages) {
     if (/^data:image\//i.test(img.currentSrc || img.src || '')) continue;
     img.loading = 'eager';
     try { img.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
   }
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  await Promise.all(images.map(async img => {
+  await Promise.all(verifiableImages.map(async img => {
     if (/^data:image\//i.test(img.currentSrc || img.src || '')) return;
     try { if (typeof img.decode === 'function') await img.decode(); } catch {}
   }));
-  const managed = images.filter(img => /^https:\/\/pages\.quantbuddy\.cn\/pages\/assets\/[^/]+\/asset_[0-9a-f]{24}\.webp(?:[?#].*)?$/i.test(img.currentSrc || img.src || ''));
+  const managed = verifiableImages.filter(img => /^https:\/\/pages\.quantbuddy\.cn\/pages\/assets\/[^/]+\/asset_[0-9a-f]{24}\.webp(?:[?#].*)?$/i.test(img.currentSrc || img.src || ''));
   const posterTarget = document.querySelector('[data-qb-poster-target]');
   let posterCanvasExportable = managed.length === 0;
   if (managed.length && document.getElementById('shareBtn')) {
@@ -537,8 +566,9 @@ async function prepareImagesExpression() {
   }
   return {
     total: images.length,
-    checked: images.filter(img => !/^data:image\//i.test(img.currentSrc || img.src || '')).length,
-    broken: images
+    runtimePending: images.length - verifiableImages.length,
+    checked: verifiableImages.filter(img => !/^data:image\//i.test(img.currentSrc || img.src || '')).length,
+    broken: verifiableImages
       .filter(img => !/^data:image\//i.test(img.currentSrc || img.src || '') && (!img.complete || Number(img.naturalWidth || 0) <= 0))
       .map(img => ({ src: img.currentSrc || img.src || '', complete: !!img.complete, naturalWidth: Number(img.naturalWidth || 0) })),
     managedTotal: managed.length,
@@ -1348,7 +1378,39 @@ function fontSizeProblem(label, info, min, max) {
 try {
   const html = await readHtml(target);
   const staticResult = staticChecks(html);
-  const cardRuntimeResult = cardRuntime ? await cardRuntimeChecks(html, { requireBrowser: requireBrowser || cardRuntimeOnly }) : { ok: true, problems: [] };
+  const cardRuntimeResult = cardRuntime ? await cardRuntimeChecks(html, {
+    requireBrowser: requireBrowser || cardRuntimeOnly,
+    structureOnly: cardRuntimeStructureOnly,
+    requireVisualContract: requireCardVisualContract,
+    screenshotPath: cardScreenshotPath,
+  }) : { ok: true, problems: [] };
+  if (cardRuntimeStructureOnly) {
+    const problems = [...(staticResult.problems || []), ...(cardRuntimeResult.problems || [])];
+    const result = {
+      code: problems.length ? 1 : 0,
+      target,
+      verification_profile: verificationProfile.name,
+      verification_level: 'card-runtime-structure',
+      require_browser: false,
+      card_runtime: true,
+      card_runtime_only: false,
+      card_runtime_structure_only: true,
+      static: staticResult,
+      card_runtime_check: cardRuntimeResult,
+      browser: {
+        checked: false,
+        skipped: true,
+        reason: '--card-runtime-structure-only 在任何取数和浏览器启动前完成',
+        viewports: [],
+        consoleErrors: [],
+      },
+      warnings: [],
+      problems,
+    };
+    updateManifest(manifestPath, result);
+    emit(result);
+    process.exit(problems.length ? 1 : 0);
+  }
   if (cardRuntimeOnly) {
     const artifactHydrate = cardRuntimeResult.artifact_hydrate || {};
     const result = {
