@@ -6,10 +6,11 @@
 
 ## -1. 建立 Trace Context
 
-在任何模板、公式、数据或发布请求前，先记录用户原始问题：
+在任何模板、公式、数据或发布请求前，先记录用户原始问题。这一步会真的写后端审计记录，所以必须带上本次任务的身份，且与后续所有命令保持同一个 key：
 
 ```bash
-python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
+# key 走环境变量：exec 日志里 env 会脱敏，命令串是原样记录的，不要拼进命令
+QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 ```
 
 保存返回的 `task_id`。本工作流后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 命令都必须在参数中复用它；调用 quant-buddy-skill 验证公式时，使用 `qbs_bridge.py` 并显式传该 `task_id + user_query`，由 task-scoped session 防止并发拆链。
@@ -34,6 +35,8 @@ python scripts/static_page.py templates '{"task_id":"task_xxx","recommend":"all"
 
 > 判据边界：单标的范式要求标的一致；固定指数/股票池范式要求指数或股票池一致；资产无关的全市场范式要求市场范围与分析场景一致。范式相同但具体范围不同一律 fork。
 
+fork/unmatched 都必须由 Agent 在 `new_page.routing_decision` 中显式记录判断；脚本校验候选确实来自本次 `items_summary`、补齐候选快照并与新 `page_id` 绑定，但不替 Agent 做语义匹配。常用 fork reason 为 `same_paradigm_different_asset` / `same_paradigm_different_scope` / `user_requests_template_changes`；unmatched reason 为 `no_relevant_candidate` / `paradigm_mismatch` / `page_shape_mismatch` / `required_capability_missing` / `user_requires_bespoke`。
+
 ## ① 直接命中：返回现成链接（不建页、不注册）
 
 1. `templates` 一旦精确命中：普通渠道的下一条用户可见消息立即返回列表项的 `download_url/public_url`，且**命中与这条消息之间禁止任何工具调用**；`feishu-group` 禁止发送该链接，直接进入下一步。不 `new_page`、不注册、不 fork。
@@ -48,20 +51,52 @@ python scripts/static_page.py templates '{"task_id":"task_xxx","recommend":"all"
 
 ## ② fork：范式命中但要改 → 换标的注册自己的公式包
 
-1. 运行 `new_page` 创建进度页并取得 `page_id + url`。普通渠道立刻把首链发给用户/承接方；`feishu-group` 只内部保留 `page_id/url`，不得向用户发送。
-2. 用同一 `task_id` 调 `fork_prepare`：下载命中的范式 HTML，生成记录来源 SHA、凭证、核心栏目、必需输出和 Card Runtime 要求的 `fork_manifest_v1`，同时写入 `fork_task_binding_v1`。后续发布不能通过省略来源字段绕过该绑定。
-3. **先继承通道，再改通道内参数**：来源模板某个角色是公式包，fork 后同一角色仍是公式包；来源是 `fast_query` / `stock_profile` / `composition_select` grant，fork 后仍使用同 kind、同 query_type、同响应形状的 grant。fork 不是重新评估“财务走公式还是 report grant”的时机，禁止 package↔grant 擅自迁移。只有 unmatched/从零重建才重新选通道，白名单报告期财务此时优先 `fast_query(report)`。改公式前再读 `source_runtime_contract`，不要凭 `required_outputs` 的变量名反推：`fork_prepare` 会把来源 package 的 `formulas` 原文整理进 `manifest.source_runtime_contract.packages[]`（公式不是隐私内容，`getStaticPage`/`getTemplate` 都会带回）。对着每个产出名对应的原公式，把资产名/代码替换成目标资产改写，语法和函数调用照抄原文，不要自己猜。若返回的 `cross_asset_formula_refs` 非空，说明有公式引用了非主资产标的（同业对比、行业分组一类，如公式里出现的其他公司名/代码）——这类公式**不能**用字符串替换直接套到目标资产上，要先判断目标资产自己的同业/行业范围（拿不准就用 `search_similar_cases` 或直接问用户），再按对应产出名重写。
-4. 按最终 package 边界调用一次 `python scripts/qbs_bridge.py validate_package_set @params.json` 验证**本标的**公式/输出；每包 1..20 条、顺序执行，bridge 自动处理 deferred/resume 并汇总 `validation_receipt_files`。`failed` 或没有完成收据时禁止推进。
-5. 历史分位必须使用真实排序水位：`pe_pctile=排序水位("pe_ttm",250)`、`pb_pctile=排序水位("pb",250)`；禁止把 pctile 输出直接别名到原始 PE/PB。
-6. 注册**自己的**公式包或数据授权 → 换标的/文案/凭证 → 生成活页。manifest 的 `required_outputs` 会查询最终页面真实公式包，并在输出 union 上检查；HTML 中未使用的同名字符串数组无效。
-7. 准备 `publish_verified` 参数；它会自动选择 `fork-local` 发布前门禁和 `public-smoke` 发布后冒烟。
-8. 调用一次 `publish_verified`，显式传 `source_template_id`、`fork_manifest_file` 和 `validation_receipt_files`。脚本会执行 fork 门禁、分级浏览器检查、同链接发布和公网冒烟；来源绑定冲突时直接拒绝。**manifest 里 source package+grant 总数 ≥1 时，直接手工调用 `publish_verified` 会被拒绝**（`error:"PUBLISH_WORKFLOW_REQUIRED"`），必须走第 9 步；只有零凭证的纯静态改造才能直接调这一步。
-9. 只要 package/grant 总数 ≥1 就**必须**改用一次 `python scripts/publish_workflow.py @params.json`。它先以假凭证执行 Card Runtime structure-only 预检，再按 marker 串联第 4、6、8 步（验证/注册/凭证替换/发布一次完成），详见 [publish_workflow.md](../tools/publish_workflow.md)。正文与 Card Runtime 共用同一凭证时，把同一注册项的 marker 字段写成数组，由一次注册扇出到多个全局唯一 marker；禁止空置 Card manifest，也禁止为等价公式/读取合同重复注册 package/grant。不要为了"只有一两个凭证"就自己写替换脚本。
-10. 发布器返回 SHA256 绑定的完整 contract、draft 路径和唯一校验命令；禁止手工重建精简 contract。校验成功后，回复 = 回复模板格式 + contract 的 `public_url`（数值用自己的包/grant query 填）；`feishu-group` 只允许发送该 playground 链接。
+1. 运行 `new_page` 创建进度页并取得 `page_id + url`，同时引用本次候选并记录 fork 决定：
+   ```bash
+   python scripts/static_page.py new_page '{"task_id":"task_xxx","user_query":"分析下彩虹股份","title":"彩虹股份分析活页","routing_decision":{"mode":"fork","source_template_id":"page_template_xxx","reason_code":"same_paradigm_different_asset"}}'
+   ```
+   普通渠道立刻把首链发给用户/承接方；`feishu-group` 只内部保留 `page_id/url`，不得向用户发送。
+2. 用同一 `task_id` 调 `fork_prepare`，同时传 `source_template_id + target_page_id`，**并且必须传 `target_asset`**，推荐给全 `{"name":"中国中车","code":"601766"}`（只给代码时脚本会先反查资产库补名字，反查不到才报 `TARGET_ASSET_NAME_REQUIRED`）。
+
+   **职责分工**：Agent 负责说清楚"换成哪只标的"，脚本负责"这只标的在页面里写成什么样"。来源模板的主资产由脚本从模板公式（`取出(...)`/`收盘价(...)` 等）词频 + 标题自动推导，代码的实际书写形态（`SH600900` / `600900.SH` / 裸 `600900`）由脚本扫描来源 HTML 得出，**只替换页面里真实存在的写法**。不要去猜来源 HTML 里代码写成什么样——你看不到那个文件，猜错会直接让 fork 失败。
+
+   - **多资产/指数类范式**（没有唯一主资产）推导会失败并返回 `FORK_SOURCE_ASSET_AMBIGUOUS`，报错里带 `detected_source_asset.candidates`（候选资产名）和 `example_params`（可照抄的调用）。此时用 `source_asset` 显式指明来源模板主资产再重试。为避免这一轮往返，这类范式建议一开始就传 `source_asset`。
+   - `asset_replacements` 现在是**可选覆盖**：只在需要额外文案替换、或要覆盖脚本推导结果时才传，同名 key 以你传的为准。
+   - 替换完成后、写出工作 HTML **之前**，脚本会做残留检查：主资产名或其代码写法若仍留在页面里，直接返回 `FORK_SOURCE_ASSET_RESIDUAL`，不会等到发布成功后才发现文案还是源模板原样。
+
+   脚本生成 `fork_manifest_v2`、脱敏 `*.fork.html`、credential-free `*.fork-review.json`、`*.publish-plan.json` 和任务绑定；原始来源 HTML 仅供内部 SHA/凭证校验。
+3. Agent只编辑脱敏 HTML 和 review。来源 package/grant 通道、Grant kind/query_type/fields/dimensions/window/result mode及CSV/inline合同默认继承；主资产的公式/文案替换已由上一步的 `target_asset` 推导完成，同业矩阵填写 `target_slots`，复杂跨资产公式填写完整 `target_formulas`。**同业资产不在主资产替换范围内**（残留检查也会跳过它们），必须由你在 review 阶段选定目标同业——系统不替 Agent 选。
+4. 运行 `fork_prepare` 返回的 `publish_command`，不要手写 package/grant、Marker、reads、Grant payload 或完整 workflow JSON。
+5. 发布器在第一次网络写入前依次检查 review完整性、来源凭证残留、Marker唯一性、required outputs/公式左值/reads、PE/PB 水位公式的明确算法与正整数窗口、Grant合同差异和Card Runtime假凭证结构；fork 默认继承来源模板已验证的水位口径。
+6. Package验证和注册从同一 `{formulas,reads,begin_date}` 合同派生；Grant验证和注册使用同一 `kind + payload` fingerprint。`validate_grant_set`支持 `fast_query`、`stockProfile` 和 `selectByComposition`。
+7. 每个runtime role只注册一次；正文与Card共享合同由发布器自动向全部Marker扇出替换，然后上传图片、写prepared HTML并单次调用`publish_verified`。
+8. `fork_manifest_v2` 手工传runtime bindings返回 `MANUAL_RUNTIME_BINDINGS_FORBIDDEN`。已准备的v1任务仍可按旧接口发布；不要混搭v1/v2。
+9. 发布器返回SHA256绑定的完整contract、draft路径和唯一校验命令；禁止手工重建精简contract。校验成功后，回复=回复模板格式+contract的`public_url`；`feishu-group`只发送该playground链接。
 
 ## ③ 未命中：自建
 
-无匹配范式时走 [dashboard-end-to-end.md](dashboard-end-to-end.md)：`new_page` 创建进度页 → `build_dashboard` / bespoke 自建 → 验证 → 注册 → 生成 → verify → `publish_final`。普通渠道发送首链，`feishu-group` 不发送；其余收口同 ②。
+无匹配范式时，由 Agent 指出最接近候选及实质能力缺口，再走 [dashboard-end-to-end.md](dashboard-end-to-end.md)：
+
+```bash
+python scripts/static_page.py new_page '{"task_id":"task_xxx","user_query":"制作事件时间线页面","title":"事件分析活页","routing_decision":{"mode":"unmatched","closest_template_id":"page_template_xxx","reason_code":"required_capability_missing","reason":"候选模板缺少用户要求的事件时间线与情景推演能力"}}'
+```
+
+记录成功后继续 `build_dashboard` / bespoke 自建 → 验证 → 注册 → 生成 → verify → `publish_final`。普通渠道发送首链，`feishu-group` 不发送；其余收口同 ②。`build_dashboard` 不读取也不限制 routing；只有最终发布与已记录决定矛盾时才要求复核。
+
+若 `new_page` 已记录 fork，但在 `fork_prepare` 前确认模板确有实质能力缺口，直接 `publish_final` 会在网络写入前返回 `ROUTING_RECONFIRM_REQUIRED`。此时要么继续返回的 fork 路径，要么在同次发布参数中显式改判：
+
+```json
+{
+  "routing_override": {
+    "from_mode": "fork",
+    "to_mode": "unmatched",
+    "reason_code": "required_capability_missing",
+    "reason": "审核后确认模板缺少用户要求的核心能力"
+  }
+}
+```
+
+已经执行 `fork_prepare` 后不得在 `publish_final` 改判；此时继续标准 fork 工作流。
 
 ## 后续追问
 

@@ -19,7 +19,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { resolveVerificationProfile } from './verification_profiles.mjs';
+import { parseExtraViewport, resolveVerificationProfile, CORE_ERROR_RE, TRACKER_NOISE_RE, isCoreConsoleError } from './verification_profiles.mjs';
 import { staticImageProblems } from './image_verification.mjs';
 import { cardVisualContractProblems } from './card_visual_contract.mjs';
 
@@ -27,6 +27,12 @@ const args = process.argv.slice(2);
 const requireBrowser = args.includes('--require-browser');
 const profileIdx = args.indexOf('--profile');
 const profileName = profileIdx >= 0 ? args[profileIdx + 1] : 'full';
+const minVisibleFontIdx = args.indexOf('--min-visible-font-px');
+const minVisibleFontPx = minVisibleFontIdx >= 0 ? Number(args[minVisibleFontIdx + 1]) : 0;
+if (minVisibleFontIdx >= 0 && (!Number.isFinite(minVisibleFontPx) || minVisibleFontPx <= 0)) {
+  fs.writeSync(1, JSON.stringify({ code: 1, error: 'INVALID_MIN_VISIBLE_FONT', message: '--min-visible-font-px 必须是正数' }) + '\n');
+  process.exit(1);
+}
 let verificationProfile;
 try {
   verificationProfile = resolveVerificationProfile(profileName);
@@ -42,7 +48,16 @@ const cardScreenshotIdx = args.indexOf('--card-screenshot');
 const cardScreenshotPath = cardScreenshotIdx >= 0 ? args[cardScreenshotIdx + 1] : '';
 const manifestIdx = args.indexOf('--manifest');
 const manifestPath = manifestIdx >= 0 ? args[manifestIdx + 1] : '';
-const valueFlags = new Set(['--manifest', '--profile', '--card-screenshot']);
+const extraViewports = [];
+try {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '--extra-viewport') extraViewports.push(parseExtraViewport(args[i + 1], extraViewports.length + 1));
+  }
+} catch (err) {
+  fs.writeSync(1, JSON.stringify({ code: 1, error: err.code || 'INVALID_EXTRA_VIEWPORT', message: err.message }) + '\n');
+  process.exit(1);
+}
+const valueFlags = new Set(['--manifest', '--profile', '--card-screenshot', '--extra-viewport', '--min-visible-font-px']);
 const positionals = [];
 for (let i = 0; i < args.length; i += 1) {
   const arg = args[i];
@@ -55,8 +70,7 @@ for (let i = 0; i < args.length; i += 1) {
 }
 const target = positionals[0];
 
-const VIEWPORTS = verificationProfile.viewports;
-const CORE_ERROR_RE = /queryFormulaPackage|CORS|mixed-content|Failed to fetch|ReferenceError|TypeError/i;
+const VIEWPORTS = [...verificationProfile.viewports, ...extraViewports];
 
 function sanitizeBrowserText(value) {
   return String(value || '')
@@ -74,7 +88,7 @@ function fail(message) {
 }
 
 if (!target) {
-  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--profile full|fork-local|public-smoke|live-only] [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only] [--card-runtime-structure-only] [--require-card-visual-contract] [--card-screenshot output.png]');
+  fail('用法: node scripts/verify_page.mjs <html_file_or_url> [--profile full|fork-local|public-smoke|ui-refinement|live-only] [--extra-viewport [name:]WIDTHxHEIGHT] [--min-visible-font-px N] [--manifest manifest.json] [--require-browser] [--card-runtime] [--card-runtime-only] [--card-runtime-structure-only] [--require-card-visual-contract] [--card-screenshot output.png]');
 }
 
 function delay(ms) {
@@ -405,6 +419,7 @@ async function cardRuntimeChecks(html, options = {}) {
     if (manifest.kind !== 'embedded-card-v1') problems.push(`card manifest kind 不支持: ${manifest.kind}`);
     if (manifest.version !== '1.1.0') problems.push(`card manifest version 不支持: ${manifest.version}`);
     if (manifest.aspect_ratio !== '4/3') problems.push(`card manifest aspect_ratio 不支持: ${manifest.aspect_ratio}`);
+    // thumbnail_url 的整页缩略图能力已下线，但历史脏 manifest 仍可能带它，继续拒绝
     for (const imageField of ['card_snapshot_url', 'thumbnail_url']) {
       if (Object.prototype.hasOwnProperty.call(manifest, imageField)) {
         problems.push(`card manifest 不得包含服务端图片字段: ${imageField}`);
@@ -510,11 +525,16 @@ async function loadPlaywright() {
   return null;
 }
 
-async function launchPlaywrightBrowser(pw) {
+async function launchPlaywrightBrowser(pw, relaxSecurity = false) {
+  // fork-local 本地 file://(origin=null) 专用：放开同源策略让真实 package/grant 取数能跑完渲染。
+  // 仅在 relaxSecurity(fork-local) 时启用，public-smoke 仍用浏览器默认安全策略。
+  const relaxArgs = relaxSecurity
+    ? ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
+    : [];
   const attempts = [
-    { channel: 'chrome', headless: true },
-    { channel: 'msedge', headless: true },
-    { headless: true },
+    { channel: 'chrome', headless: true, args: relaxArgs },
+    { channel: 'msedge', headless: true, args: relaxArgs },
+    { headless: true, args: relaxArgs },
   ];
   const errors = [];
   for (const options of attempts) {
@@ -577,10 +597,105 @@ async function prepareImagesExpression() {
   };
 }
 
+async function shareModalChecksExpression() {
+  const ids = ['shareBtn', 'sharePosterModal', 'copyLink', 'copyPoster', 'downloadPoster', 'closePoster'];
+  const missing = ids.filter(id => !document.getElementById(id));
+  if (missing.length) return { checked: true, present: false, missing };
+
+  const byId = id => document.getElementById(id);
+  const statusText = () => String(byId('sharePosterStatus')?.textContent || '').trim();
+  const waitUntil = async (predicate, timeoutMs = 10000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return false;
+  };
+  const visible = el => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0
+      && rect.width > 1 && rect.height > 1;
+  };
+  const controlInfo = el => {
+    const rect = el.getBoundingClientRect();
+    const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+    const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+    const hit = document.elementFromPoint(x, y);
+    return {
+      id: el.id,
+      width: Number(rect.width.toFixed(2)),
+      height: Number(rect.height.toFixed(2)),
+      left: Number(rect.left.toFixed(2)),
+      top: Number(rect.top.toFixed(2)),
+      visible: visible(el),
+      withinViewport: rect.left >= -1 && rect.top >= -1 && rect.right <= window.innerWidth + 1 && rect.bottom <= window.innerHeight + 1,
+      reachable: !!hit && (hit === el || el.contains(hit)),
+    };
+  };
+
+  const initialScrollY = window.scrollY;
+  byId('shareBtn').click();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  await waitUntil(() => !byId('copyPoster').disabled && !byId('downloadPoster').disabled, 10000);
+
+  const modal = byId('sharePosterModal');
+  const posterImage = byId('sharePosterImage');
+  const posterCanvas = byId('sharePosterCanvas');
+  const posterReady = /^data:image\/png/i.test(String(posterImage?.src || ''))
+    && Number(posterCanvas?.width || 0) > 0
+    && Number(posterCanvas?.height || 0) > 0;
+  const dialog = modal.querySelector('.share-dialog');
+  const dialogRect = dialog?.getBoundingClientRect();
+  const opened = modal.getAttribute('aria-hidden') === 'false' && modal.classList.contains('open');
+  const buttons = ['copyLink', 'copyPoster', 'downloadPoster', 'closePoster'].map(id => controlInfo(byId(id)));
+  const columnCount = new Set(buttons.map(item => Math.round(item.left))).size;
+  const outcomes = {};
+
+  byId('copyLink').click();
+  await waitUntil(() => /复制|地址栏/.test(statusText()), 1000);
+  outcomes.copyLink = /复制|地址栏/.test(statusText());
+
+  byId('copyPoster').click();
+  await waitUntil(() => /复制图片|右键预览图|下载 PNG/.test(statusText()), 2000);
+  outcomes.copyPoster = /复制图片|右键预览图|下载 PNG/.test(statusText());
+
+  let downloadTriggered = false;
+  const captureDownload = event => {
+    const anchor = event.target?.closest?.('a[download]');
+    if (anchor) downloadTriggered = true;
+  };
+  document.addEventListener('click', captureDownload, true);
+  byId('downloadPoster').click();
+  await waitUntil(() => /下载 PNG/.test(statusText()), 1000);
+  document.removeEventListener('click', captureDownload, true);
+  outcomes.downloadPoster = downloadTriggered && /下载 PNG/.test(statusText());
+
+  byId('closePoster').click();
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  outcomes.closePoster = modal.getAttribute('aria-hidden') === 'true' && !modal.classList.contains('open');
+
+  return {
+    checked: true,
+    present: true,
+    opened,
+    posterReady,
+    dialogWithinViewport: !!dialogRect && dialogRect.left >= -1 && dialogRect.top >= -1
+      && dialogRect.right <= window.innerWidth + 1 && dialogRect.bottom <= window.innerHeight + 1,
+    pageScrollStable: Math.abs(window.scrollY - initialScrollY) <= 1,
+    buttons,
+    columnCount,
+    outcomes,
+  };
+}
+
 async function playwrightBrowserChecks(pw, url, options = {}) {
-  const browser = await launchPlaywrightBrowser(pw);
+  const browser = await launchPlaywrightBrowser(pw, options.relaxSecurity);
   const results = [];
   const consoleErrors = [];
+  const nonCoreWarnings = [];
   const imageNetworkErrors = [];
   const viewports = VIEWPORTS;
   const settleMs = 1200;
@@ -588,12 +703,12 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
     for (const viewport of viewports) {
       const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } });
       page.on('console', msg => {
-        if (['error', 'warning'].includes(msg.type())) {
-          const text = msg.text();
-          if (CORE_ERROR_RE.test(text)) {
-            consoleErrors.push({ viewport: viewport.name, type: msg.type(), text: sanitizeBrowserText(text) });
-          }
-        }
+        if (!['error', 'warning'].includes(msg.type())) return;
+        const text = msg.text();
+        if (!CORE_ERROR_RE.test(text)) return;
+        const entry = { viewport: viewport.name, type: msg.type(), text: sanitizeBrowserText(text) };
+        if (TRACKER_NOISE_RE.test(text)) nonCoreWarnings.push(entry);
+        else consoleErrors.push(entry);
       });
       page.on('requestfailed', request => {
         if (request.resourceType() === 'image') {
@@ -618,15 +733,17 @@ async function playwrightBrowserChecks(pw, url, options = {}) {
       const hasRuntime = await page.evaluate(() => !!window.QB_DATA_RUNTIME);
       await page.waitForTimeout(hasRuntime ? 250 : Math.max(settleMs, 3000));
       const imageMetrics = await page.evaluate(prepareImagesExpression);
+      const shareModalMetrics = options.checkShareModal ? await page.evaluate(shareModalChecksExpression) : null;
       const metrics = await page.evaluate(pageMetricsExpression);
       metrics.images = imageMetrics;
+      metrics.shareModal = shareModalMetrics;
       results.push(viewportResult(viewport, metrics, options));
       await page.close();
     }
   } finally {
     await browser.close();
   }
-  return { checked: true, engine: 'playwright', viewports: results, consoleErrors, imageNetworkErrors };
+  return { checked: true, engine: 'playwright', viewports: results, consoleErrors, nonCoreWarnings, imageNetworkErrors };
 }
 
 function pageMetricsExpression() {
@@ -693,6 +810,18 @@ function pageMetricsExpression() {
       && rect.width > 1
       && rect.height > 1;
   }
+
+  const visibleFontSamples = Array.from(document.body?.querySelectorAll('*') || [])
+    .filter(el => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH'].includes(el.tagName))
+    .filter(isVisible)
+    .filter(el => Array.from(el.childNodes || []).some(node => node.nodeType === Node.TEXT_NODE && String(node.textContent || '').trim()))
+    .map(el => ({
+      size: Number.parseFloat(getComputedStyle(el).fontSize || '0') || 0,
+      label: elementLabel(el, ''),
+      text: String(el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+    }))
+    .filter(item => item.size > 0)
+    .sort((a, b) => a.size - b.size);
 
   function parseCssColor(value) {
     const text = String(value || '').trim();
@@ -864,6 +993,11 @@ function pageMetricsExpression() {
     runtime,
     failureTextHits,
     loadingTextHits,
+    visibleFonts: {
+      minimumPx: visibleFontSamples.length ? visibleFontSamples[0].size : null,
+      smallest: visibleFontSamples.slice(0, 8),
+    },
+    shareModal: null,
     cover: {
       rootFound: !!coverRoot,
       selector: elementLabel(coverRoot, coverSource),
@@ -915,6 +1049,8 @@ function viewportResult(viewport, metrics, options = {}) {
     runtime: metrics.runtime,
     failureTextHits: metrics.failureTextHits || [],
     loadingTextHits: metrics.loadingTextHits || [],
+    visibleFonts: metrics.visibleFonts || { minimumPx: null, smallest: [] },
+    shareModal: metrics.shareModal || null,
     images: {
       ...(metrics.images || {}),
       broken: (metrics.images?.broken || []).map(item => ({ ...item, src: sanitizeBrowserText(item.src) })),
@@ -1196,15 +1332,21 @@ async function cdpBrowserChecks(url, options = {}) {
   if (!browserPath) return { checked: false, skipped: true, reason: 'system Chrome/Edge browser not found' };
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qbv-verify-'));
-  const proc = spawn(browserPath, [
+  const browserArgs = [
     '--headless=new',
     '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ];
+  if (options.relaxSecurity) {
+    // fork-local 本地 file://(origin=null) 专用：放开同源策略让真实 package/grant 取数能跑完渲染。
+    // 仅限本地 fork-local，不影响 public-smoke 的正常安全策略。
+    browserArgs.push('--disable-web-security', '--disable-features=IsolateOrigins,site-per-process');
+  }
+  browserArgs.push('about:blank');
+  const proc = spawn(browserPath, browserArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   try {
     const debugWs = await waitForDebugEndpoint(proc);
@@ -1212,19 +1354,24 @@ async function cdpBrowserChecks(url, options = {}) {
     const cdp = new CdpSession(ws);
     const results = [];
     const consoleErrors = [];
+    const nonCoreWarnings = [];
     const imageNetworkErrors = [];
     let currentViewport = 'unknown';
     cdp.onEvent(msg => {
       if (msg.method === 'Runtime.exceptionThrown') {
         const text = msg.params?.exceptionDetails?.text || 'Runtime exception';
-        if (CORE_ERROR_RE.test(text)) consoleErrors.push({ viewport: 'unknown', type: 'error', text: sanitizeBrowserText(text) });
+        if (!CORE_ERROR_RE.test(text)) return;
+        const entry = { viewport: 'unknown', type: 'error', text: sanitizeBrowserText(text) };
+        if (TRACKER_NOISE_RE.test(text)) nonCoreWarnings.push(entry);
+        else consoleErrors.push(entry);
       }
       if (msg.method === 'Runtime.consoleAPICalled') {
         const type = msg.params?.type || '';
         const text = (msg.params?.args || []).map(arg => String(arg.value || arg.description || '')).join(' ');
-        if (['error', 'warning', 'warn'].includes(type) && CORE_ERROR_RE.test(text)) {
-          consoleErrors.push({ viewport: 'unknown', type, text: sanitizeBrowserText(text) });
-        }
+        if (!['error', 'warning', 'warn'].includes(type) || !CORE_ERROR_RE.test(text)) return;
+        const entry = { viewport: 'unknown', type, text: sanitizeBrowserText(text) };
+        if (TRACKER_NOISE_RE.test(text)) nonCoreWarnings.push(entry);
+        else consoleErrors.push(entry);
       }
       if (msg.method === 'Network.loadingFailed' && msg.params?.type === 'Image') {
         imageNetworkErrors.push({ viewport: currentViewport, type: 'requestfailed', message: sanitizeBrowserText(msg.params?.errorText || '') });
@@ -1272,6 +1419,11 @@ async function cdpBrowserChecks(url, options = {}) {
         returnByValue: true,
         awaitPromise: true,
       });
+      const shareModalMetrics = options.checkShareModal ? await cdp.send('Runtime.evaluate', {
+        expression: `(${shareModalChecksExpression.toString()})()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }) : null;
       const evaluated = await cdp.send('Runtime.evaluate', {
         expression: `(${pageMetricsExpression.toString()})()`,
         returnByValue: true,
@@ -1282,10 +1434,11 @@ async function cdpBrowserChecks(url, options = {}) {
         continue;
       }
       evaluated.result.value.images = preparedImages.result?.value || {};
+      evaluated.result.value.shareModal = shareModalMetrics?.result?.value || null;
       results.push(viewportResult(viewport, evaluated.result.value, options));
     }
     ws.close();
-    return { checked: true, engine: 'system-browser', browser: browserPath, viewports: results, consoleErrors, imageNetworkErrors };
+    return { checked: true, engine: 'system-browser', browser: browserPath, viewports: results, consoleErrors, nonCoreWarnings, imageNetworkErrors };
   } catch (err) {
     return { checked: false, skipped: true, reason: err && err.message ? err.message : String(err), browser: browserPath };
   } finally {
@@ -1348,6 +1501,27 @@ function summarize(staticResult, browserResult, options) {
       if (Number(r.images?.managedTotal || 0) > 0 && !r.images?.posterCanvasExportable) {
         problems.push(`${r.viewport}: 分享海报 canvas 无法导出`);
       }
+      if (options.minVisibleFontPx > 0 && Number(r.visibleFonts?.minimumPx || 0) < options.minVisibleFontPx) {
+        const sample = (r.visibleFonts?.smallest || [])[0];
+        problems.push(`${r.viewport}: 可见文字最小计算字号 ${r.visibleFonts?.minimumPx || 0}px 小于 ${options.minVisibleFontPx}px${sample ? ` (${sample.label}: ${sample.text})` : ''}`);
+      }
+      if (options.checkShareModal) {
+        const share = r.shareModal || {};
+        if (!share.present) {
+          problems.push(`${r.viewport}: 公共分享弹层合同缺失 ${Array.isArray(share.missing) ? share.missing.join(', ') : ''}`.trim());
+        } else {
+          if (!share.opened) problems.push(`${r.viewport}: 分享弹层无法打开`);
+          if (!share.posterReady) problems.push(`${r.viewport}: 分享海报未生成可用 PNG 预览`);
+          if (!share.dialogWithinViewport) problems.push(`${r.viewport}: 分享弹层超出目标视口`);
+          if (!share.pageScrollStable) problems.push(`${r.viewport}: 打开分享弹层改变了页面滚动位置`);
+          const badButtons = (share.buttons || []).filter(button => !button.visible || !button.withinViewport || !button.reachable
+            || (r.width <= 680 && (button.width < 44 || button.height < 44)));
+          if (badButtons.length) problems.push(`${r.viewport}: 分享操作不可达${r.width <= 680 ? '或小屏点击目标小于 44px' : ''} (${badButtons.map(button => button.id).join(', ')})`);
+          const failedActions = Object.entries(share.outcomes || {}).filter(([, ok]) => !ok).map(([name]) => name);
+          if (failedActions.length) problems.push(`${r.viewport}: 分享操作处理路径未响应 (${failedActions.join(', ')})`);
+          if (r.width <= 680 && Number(share.columnCount || 0) !== 2) problems.push(`${r.viewport}: 小屏分享操作区不是 2×2`);
+        }
+      }
     }
     if (browserResult.consoleErrors.length) problems.push('控制台存在核心接口/运行时错误');
     if ((browserResult.imageNetworkErrors || []).length) problems.push('图片请求存在 requestfailed 或非 2xx 响应');
@@ -1356,7 +1530,13 @@ function summarize(staticResult, browserResult, options) {
     warnings.push(warning);
     if (options.requireBrowser) problems.push(warning);
   }
-  return { ok: problems.length === 0, problems, warnings };
+  return {
+    ok: problems.length === 0,
+    problems,
+    warnings,
+    non_core_console_warnings: browserResult.nonCoreWarnings || [],
+    security_mode: options.relaxSecurity ? 'disabled-web-security' : 'default',
+  };
 }
 
 function updateManifest(file, verification) {
@@ -1437,8 +1617,19 @@ try {
     emit(result);
     process.exit(cardRuntimeResult.ok ? 0 : 1);
   }
-  const browserResult = await browserChecks(target, {});
-  const summary = summarize(staticResult, browserResult, { requireBrowser, checkLayout: verificationProfile.checkLayout });
+  const browserOptions = {
+    checkShareModal: verificationProfile.checkShareModal,
+    minVisibleFontPx,
+    // fork-local 在本地 file://(origin=null) 下放开同源策略，让真实取数能跑完渲染；
+    // public-smoke 仍用浏览器默认安全策略，核心数据接口 CORS 仍严格拦截。
+    relaxSecurity: verificationProfile.name === 'fork-local',
+  };
+  const browserResult = await browserChecks(target, browserOptions);
+  const summary = summarize(staticResult, browserResult, {
+    requireBrowser,
+    checkLayout: verificationProfile.checkLayout,
+    ...browserOptions,
+  });
   if (cardRuntimeResult.problems.length) {
     summary.ok = false;
     summary.problems.push(...cardRuntimeResult.problems);
@@ -1449,11 +1640,15 @@ try {
     verification_profile: verificationProfile.name,
     verification_level: browserResult.checked ? 'browser' : 'static-only',
     require_browser: requireBrowser,
+    min_visible_font_px: minVisibleFontPx || null,
+    extra_viewports: extraViewports,
     card_runtime: cardRuntime,
     card_runtime_only: false,
     static: staticResult,
     card_runtime_check: cardRuntimeResult,
     browser: browserResult,
+    security_mode: summary.security_mode,
+    non_core_console_warnings: summary.non_core_console_warnings,
     warnings: summary.warnings,
     problems: summary.problems,
   };

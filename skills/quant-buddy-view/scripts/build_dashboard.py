@@ -39,8 +39,6 @@ r"""
       "out_file":   "可选，输出 HTML 路径（默认 output/pages/<slug>.html）",
       "upload":     "可选 true，则生成后顺带调用 static_page 上传，返回公开 url",
       "update_page_id": "可选 page_xxx，则替换该已发布页面的内容（URL/page_id 不变），优先于新上传",
-      "thumbnail_file": "可选，现成 PNG/JPG 缩略图；HTML 上传/更新成功后自动设封面",
-      "thumbnail":  "可选 true 或对象；自动生成 1200x675 封面（默认全幅裸图，style=poster 可生成品牌海报；无浏览器则走纯 Python PNG 或 SVG 兜底，均不影响 HTML）",
       "brand":      "可选对象：name/cn_name/tagline/homepage/page_type/footer_note",
       "official_url": "可选，默认 https://www.quantbuddy.cn"
     }
@@ -50,6 +48,13 @@ r"""
     BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_dashboard.py
 
 输出：打印 {code, out_file, ...(upload 时含 url)}，并写一份到临时目录 bd_out.txt。
+
+局部产出模式（emit=panel_block）：不生成整页 HTML，只生成 marker 包住的运行时 <script> 片段，
+供 bespoke（手写）页面把某几个图表交给标准声明式引擎画——panel 里加 target_selector 指向 bespoke
+布局里已经摆好的容器，图表直接渲染进那个容器，不包卡片外壳。生成的片段仍带
+QBV_RENDER_JS_START/END marker，chart_edit.py 之后能对这些嵌入的图表做定点编辑。用法：
+    python scripts/build_dashboard.py '{"emit":"panel_block","panels":[...]}'
+详见 cmd_panel_block 函数文档与 guides/bespoke-page.md。
 """
 
 import datetime
@@ -69,6 +74,7 @@ import formula_package as FP
 import data_grant as DG
 import fast_query_csv as FQCSV
 import live_card as LC
+import data_kernel_retrofit as DKR
 
 PAGES_DIR = os.path.join(C.SKILL_ROOT, "output", "pages")
 ASSETS_DIR = os.path.join(C.SKILL_ROOT, "assets")
@@ -245,70 +251,15 @@ def _shared_shell_js():
     ])
 
 
-def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signature, generated_at, grants=None):
-    """组装 HTML。骨架自包含（样式/内核内联），数据走运行时实时取数：页面内联 endpoint+凭证 + 取数 JS。
-    grants：panel 里引用 grant_id 的数据授权列表 [{grant_id,signature}]，与公式包 panel 同页并存。"""
-    share = _share_config(spec)
-    page_mode = "live" if package_id or grants else "static"
-    boot = {
-        "mode": page_mode,
-        "panels": panels,
-        "grants": grants or [],
-        "generatedAt": generated_at,
-        "share": {
-            "enabled": share["show_qr"],
-            "url": share["share_url"],
-            "officialUrl": share["official_url"],
-            "title": title or "看板",
-            "subtitle": subtitle or "",
-            "pageType": share["page_type"],
-            "footerNote": share["footer_note"],
-        },
-        "endpoint": endpoint,
-        "packageId": package_id,
-        "signature": signature,
-        # 构建时的 quant-buddy-view 版本/名，随实时取数上报给服务端 audit
-        "skillVersion": C.SKILL_VERSION,
-        "skillName": C.SKILL_NAME,
-    }
+# QBV_RENDER_JS_START/END 标记着运行时渲染引擎（取数 + 面板渲染），供 chart_edit.py 在编辑已发布页面时
+# 做「只换这一块 <script>、页面其余内容字节不变」的定点 retrofit——写法与 assets/data-kernel.js 的
+# QB_DATA_KERNEL_START/END 标记一致。BOOT 用 __BOOT__ 占位，由 _render_html / chart_edit.py 各自替换。
+RENDER_JS_START_MARKER = "/* QBV_RENDER_JS_START:v1 */"
+RENDER_JS_END_MARKER = "/* QBV_RENDER_JS_END:v1 */"
 
-    boot_json = json.dumps(boot, ensure_ascii=False)
-    title_esc = html_escape(title or "看板")
-    subtitle_esc = html_escape(subtitle or "")
-    brand_name_esc = html_escape(share["brand_name"])
-    brand_cn_esc = html_escape(share["brand_cn"])
-    tagline_esc = html_escape(share["tagline"])
-    page_type_esc = html_escape(share["page_type"])
-    official_url_attr = html_escape(share["official_url"], quote=True)
-    official_host_esc = html_escape(re.sub(r"^https?://", "", share["official_url"]).rstrip("/"))
-    official_label_esc = html_escape(share["official_label"])
-    share_title_esc = html_escape(share["share_title"])
-    footer_note_esc = html_escape(share["footer_note"])
-    brand_logo_html = _brand_logo_html()
-    shared_header = _shared_shell_section("HEADER")
-    shared_footer = _shared_shell_section("FOOTER")
-    shared_modal = _shared_shell_section("MODAL")
-    shared_css = _shared_shell_css()
-    shared_runtime_js = _shared_shell_js()
-    data_kernel_js = _read_text(os.path.join(ASSETS_DIR, "data-kernel.js")).replace(
-        "__QBV_SKILL_VERSION__", C.SKILL_VERSION or ""
-    )
-    live_card_config = LC.dashboard_config(spec, panels)
-    live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
-    card_runtime_bundle = LC.card_runtime_bundle(
-        live_card_config,
-        endpoint=endpoint,
-        package_id=package_id,
-        signature=signature,
-        style=live_card_css,
-        fallback_title=title or "",
-        fallback_description=subtitle or "",
-    ) if live_card_config else None
-    card_runtime_artifacts = card_runtime_bundle["artifacts"] if card_runtime_bundle else ""
-    card_runtime_js = card_runtime_bundle["runtime"] if card_runtime_bundle else ""
-
-    # 渲染脚本：把任意 data 形态归一为 {columns, rows}，再按 panel.type 出图/表
-    render_js = r"""
+_RENDER_JS_TEMPLATE = r"""/* QBV_RENDER_JS_START:v1 */
+(function () {
+'use strict';
 const BOOT = __BOOT__;
 let LAST_OUTPUTS = {};
 
@@ -555,33 +506,123 @@ function renderChart(el, tab, panel) {
     const i = colIdx(tab, c);
     return i != null && tab.rows.some(r => typeof r[i] === 'number');
   });
+  // 双轴：panel.right_series 声明哪些列（= 多 output 面板里的 output 名）归右轴，其余归左轴；
+  // 未声明 right_series 或 dual_axis!==true 时行为与单轴完全一致（向后兼容默认关闭）。
+  const rightSet = new Set(Array.isArray(panel.right_series) ? panel.right_series : []);
+  const dualAxis = panel.dual_axis === true && rightSet.size > 0;
+  // 迷你走势图：panel.sparkline===true 时去掉坐标轴/图例/网格留白，只保留曲线本身。
+  const spark = panel.sparkline === true;
   const series = yCols.map(c => {
     const i = colIdx(tab, c);
+    const onRight = dualAxis && rightSet.has(c);
     return {name: c, type: panel.type === 'bar' ? 'bar' : 'line', smooth: panel.type !== 'bar',
-            showSymbol: false, connectNulls: true, data: tab.rows.map(r => r[i])};
+            showSymbol: false, connectNulls: true, data: tab.rows.map(r => r[i]),
+            yAxisIndex: onRight ? 1 : 0,
+            lineStyle: spark ? {width: 2} : undefined};
   });
+  const yAxisBase = {type: 'value', scale: true, axisLabel: {color: '#697586'}, splitLine: {lineStyle: {color: '#e8edf4'}}};
+  const yAxis = dualAxis
+    ? [yAxisBase, Object.assign({}, yAxisBase, {splitLine: {show: false}})]
+    : yAxisBase;
   chart.setOption({
-    tooltip: {trigger: 'axis'},
-    legend: {data: yCols, top: 0, type: 'scroll'},
+    tooltip: {trigger: 'axis', show: !spark},
+    legend: {data: yCols, top: 0, type: 'scroll', show: !spark},
     color: ['#2454a6', '#7a8ca8', '#c03d3d', '#16845b', '#b2762d'],
-    grid: {left: 56, right: 24, top: 34, bottom: 42},
-    xAxis: {type: 'category', data: xData, boundaryGap: panel.type === 'bar',
+    grid: spark ? {left: 2, right: 2, top: 2, bottom: 2} : {left: 56, right: dualAxis ? 56 : 24, top: 34, bottom: 42},
+    xAxis: {type: 'category', data: xData, boundaryGap: panel.type === 'bar', show: !spark,
             axisLine: {lineStyle: {color: '#bfccda'}}, axisTick: {show:false}, axisLabel: {color: '#697586'}},
-    yAxis: {type: 'value', scale: true, axisLabel: {color: '#697586'}, splitLine: {lineStyle: {color: '#e8edf4'}}},
+    yAxis: spark ? Object.assign({}, yAxisBase, {show: false, splitLine: {show: false}}) : yAxis,
     series: series,
   });
   window.addEventListener('resize', () => chart.resize());
 }
 
+// 雷达图：tab 第一列是维度名、第二列（或唯一列）是 0..max 的得分。panel.max 缺省 1（比例型分数）。
+function renderRadarChart(el, tab, panel) {
+  const chart = echarts.init(el);
+  const nameIdx = 0;
+  const valueIdx = tab.columns.length > 1 ? 1 : 0;
+  const maxVal = typeof panel.max === 'number' ? panel.max : 1;
+  const indicator = tab.rows.map(r => ({name: String(r[nameIdx] == null ? '' : r[nameIdx]), max: maxVal}));
+  const values = tab.rows.map(r => (typeof r[valueIdx] === 'number' ? r[valueIdx] : 0));
+  chart.setOption({
+    tooltip: {},
+    color: ['#2454a6'],
+    radar: {
+      indicator: indicator, radius: '65%',
+      axisName: {color: '#697586', fontSize: 11},
+      splitLine: {lineStyle: {color: '#e8edf4'}},
+      splitArea: {show: false},
+      axisLine: {lineStyle: {color: '#dde5ef'}},
+    },
+    series: [{type: 'radar', data: [{value: values, areaStyle: {opacity: 0.15}}]}],
+  });
+  window.addEventListener('resize', () => chart.resize());
+}
+
 // 骨架先行：先把所有面板卡片铺出来，正文随产出到达再逐个填。
-// PANEL_REG 存每个面板的 body/span/是否已填；OUTPUT_INDEX 把产出名映射到引用它的面板（一个产出可被多个面板复用）。
+// PANEL_REG 存每个面板的 body/span/是否已填/它依赖的 output 名单；OUTPUT_INDEX 把产出名映射到引用它的面板
+// （一个产出可被多个面板复用，一个面板也可以同时依赖多个产出——叠加对比线就是这么接进来的）。
 let PANEL_REG = [];
 let OUTPUT_INDEX = {};
 
+// 面板依赖的 output 名单：新的 panel.outputs（复数，叠加对比线）优先，兼容旧的 panel.output（单数）。
+function panelOutputNames(panel) {
+  if (Array.isArray(panel.outputs) && panel.outputs.length) return panel.outputs;
+  if (panel.output) return [panel.output];
+  return [];
+}
+
+// 把一个面板依赖的若干 output 合并成一张表：单 output 时行为与老版本完全一致（直接 normalize）；
+// 多 output 时各自 normalize 成 [x,y] 两列，再按 x（日期）外连接拼成宽表，喂给 renderChart 出多条线。
+function mergeOutputTables(names, received) {
+  if (names.length <= 1) {
+    const out = names.length ? received[names[0]] : null;
+    if (!out || out.error) return {tab: null, out: out || {error: '无产出'}};
+    return {tab: normalize(out.data), out: null};
+  }
+  const perOutput = names.map(name => {
+    const out = received[name];
+    if (!out || out.error) return null;
+    const tab = normalize(out.data);
+    if (!tab.rows.length) return null;
+    const yi = tab.columns.length > 1 ? 1 : 0;
+    return {name: name, rows: tab.rows.map(r => [r[0], r[yi]])};
+  });
+  if (perOutput.every(s => !s)) return {tab: null, out: {error: '无产出'}};
+  const byX = new Map();
+  const order = [];
+  perOutput.forEach(s => {
+    if (!s) return;
+    s.rows.forEach(([x, y]) => {
+      if (!byX.has(x)) { byX.set(x, {}); order.push(x); }
+      byX.get(x)[s.name] = y;
+    });
+  });
+  const columns = ['x'].concat(names);
+  const rows = order.map(x => {
+    const cell = byX.get(x);
+    return columns.map(c => c === 'x' ? x : (c in cell ? cell[c] : null));
+  });
+  return {tab: {columns: columns, rows: rows}, out: null};
+}
+
 function createCard(panel) {
-  const card = document.createElement('section');
   const type = panel.type || 'table';
-  const defaultSpan = (type === 'line' || type === 'bar') ? 'full' : 'auto';
+  // target_selector：bespoke 页面自己排好版的容器（如 <div id="priceChart">），直接渲染进去，
+  // 不包卡片外壳（标题/边框/间距），页面布局与样式完全由 bespoke 页面自己掌控。
+  // 命中不到时退化为标准网格卡片，不让整页因为一个选择器写错而白屏。
+  if (panel.target_selector) {
+    const target = document.querySelector(panel.target_selector);
+    if (target) {
+      target.innerHTML = '';
+      target.classList.add('qb-embedded-body', 'body', type);
+      return {body: target, span: 'embedded'};
+    }
+    console.warn('[QBV] target_selector 未命中: ' + panel.target_selector + '，回退到标准网格卡片');
+  }
+  const card = document.createElement('section');
+  const defaultSpan = (type === 'line' || type === 'bar' || type === 'radar') ? 'full' : 'auto';
   const span = ['full', 'wide', 'auto'].includes(panel.span) ? panel.span : defaultSpan;
   card.className = 'card card-' + type + ' span-' + span;
   card.innerHTML = '<div class="card-head"><h3>' + esc(panel.title || panel.output || '') + '</h3>' +
@@ -590,19 +631,30 @@ function createCard(panel) {
   const body = document.createElement('div');
   body.className = 'body ' + type;
   card.appendChild(body);
-  document.getElementById('grid').appendChild(card);
+  const grid = document.getElementById('grid');
+  if (grid) grid.appendChild(card);
   return {body: body, span: span};
 }
 
-function renderPanelBody(body, panel, span, out) {
+// 展示层裁剪：panel.x_range.start_date（chart_edit.py set_window 在"目标窗口已在已取数范围内"时写入）
+// 只影响这张图从第几天开始画，不影响实际取数范围——不用重新验证/注册公式包就能收窄可视窗口。
+function applyXRange(tab, panel) {
+  const startDate = panel.x_range && panel.x_range.start_date;
+  if (!startDate || !tab || !tab.rows || !tab.rows.length) return tab;
+  return {columns: tab.columns, rows: tab.rows.filter(r => r[0] == null || String(r[0]) >= startDate)};
+}
+
+function renderPanelBody(body, panel, span, merged) {
   const type = panel.type || 'table';
-  if (!out) { body.innerHTML = '<p class="empty">无产出：' + (panel.output || '') + '</p>'; return; }
-  if (out.error) { body.innerHTML = '<p class="empty err">取数失败：' + out.error + '</p>'; return; }
-  const tab = normalize(out.data);
+  const out = merged.out;
+  if (!merged.tab) { body.innerHTML = '<p class="empty">无产出：' + (panel.output || (panel.outputs || []).join('、') || '') + '</p>'; return; }
+  if (out && out.error) { body.innerHTML = '<p class="empty err">取数失败：' + out.error + '</p>'; return; }
+  const tab = (type === 'line' || type === 'bar') ? applyXRange(merged.tab, panel) : merged.tab;
   try {
-    if (type === 'raw') body.innerHTML = '<pre>' + JSON.stringify(out.data, null, 2) + '</pre>';
+    if (type === 'raw') body.innerHTML = '<pre>' + JSON.stringify((merged.rawData !== undefined ? merged.rawData : tab), null, 2) + '</pre>';
     else if (type === 'number') renderNumber(body, tab, panel);
     else if (type === 'table') renderTable(body, tab, panel);
+    else if (type === 'radar') { body.style.height = (panel.height || (span === 'full' ? 360 : 300)) + 'px'; renderRadarChart(body, tab, panel); }
     else { body.style.height = (panel.height || (span === 'full' ? 360 : 300)) + 'px'; renderChart(body, tab, panel); }
   } catch (e) {
     body.innerHTML = '<p class="empty">渲染失败: ' + e + '</p>';
@@ -610,27 +662,33 @@ function renderPanelBody(body, panel, span, out) {
 }
 
 function buildSkeletons() {
+  // 嵌入模式（面板全部走 target_selector）可能压根没有 #grid；null 时跳过清空，不整页报错。
   const grid = document.getElementById('grid');
-  grid.innerHTML = '';
+  if (grid) grid.innerHTML = '';
   PANEL_REG = [];
   OUTPUT_INDEX = {};
   BOOT.panels.forEach(panel => {
     const type = panel.type || 'table';
     const made = createCard(panel);
-    const reg = {panel: panel, body: made.body, span: made.span, filled: false};
+    const names = panelOutputNames(panel);
+    const reg = {panel: panel, body: made.body, span: made.span, filled: false, names: names, received: {}};
     PANEL_REG.push(reg);
     if (type === 'text') { renderText(made.body, panel); reg.filled = true; return; }
     if (type === 'image') { renderImage(made.body, panel); reg.filled = true; return; }
     made.body.innerHTML = '<p class="empty">加载中…</p>';
-    const name = panel.output;
-    if (name) (OUTPUT_INDEX[name] = OUTPUT_INDEX[name] || []).push(reg);
+    names.forEach(name => { (OUTPUT_INDEX[name] = OUTPUT_INDEX[name] || []).push(reg); });
   });
 }
 
-// 某产出到达后，立刻渲染所有引用它的面板（先到先显）
+// 某产出到达后记进对应面板的 received；面板依赖的 output 全部到齐才渲染（单 output 面板天然一到即齐，
+// 不改变既有的「先到先显」行为；只有引用多个 output 的叠加对比面板才会等）。
 function applyOutput(name, out) {
   (OUTPUT_INDEX[name] || []).forEach(reg => {
-    renderPanelBody(reg.body, reg.panel, reg.span, out);
+    reg.received[name] = out;
+    if (!reg.names.every(n => Object.prototype.hasOwnProperty.call(reg.received, n))) return;
+    const merged = mergeOutputTables(reg.names, reg.received);
+    if (reg.names.length === 1 && (reg.panel.type || 'table') === 'raw') merged.rawData = out.data;
+    renderPanelBody(reg.body, reg.panel, reg.span, merged);
     reg.filled = true;
   });
 }
@@ -677,18 +735,27 @@ function parseSSE(text) {
   return outputs;
 }
 
-// 只标错公式包来源的面板（type=grant 的面板走自己的 fetchGrantsLive，互不牵连）
+// 只标错公式包来源、且尚未拿到产出的面板（type=grant 的面板走自己的 fetchGrantsLive，互不牵连；
+// 已经渲染成功的面板不因为「同页另一个包」失败而被覆盖——每个包只影响它自己名下、还没到齐的面板）。
 function markPackagePanelsError(msg) {
   PANEL_REG.forEach(reg => {
+    if (reg.filled) return;
     if (reg.panel._source === 'grant') return;
     if ((reg.panel.type || 'table') === 'text') return;
-    renderPanelBody(reg.body, reg.panel, reg.span, {error: msg});
-    reg.filled = true;
+    renderPanelBody(reg.body, reg.panel, reg.span, {tab: null, out: {error: msg}});
   });
 }
 
-// 公式包取数：SSE 流，边收边渲染（钉死 output → panel，重算会走 stale/recomputed）
-async function _fetchPackageLive() {
+// BOOT.packages（多包，叠加编辑用）优先；缺省时从旧版单包字段 packageId/signature 合成一个元素，
+// 保证「只 retrofit 了运行时 JS、还没来得及 patch BOOT」的过渡态页面也能正常取数。
+function resolvePackages() {
+  if (Array.isArray(BOOT.packages) && BOOT.packages.length) return BOOT.packages;
+  if (BOOT.packageId) return [{package_id: BOOT.packageId, signature: BOOT.signature}];
+  return [];
+}
+
+// 单个公式包取数：SSE 流，边收边渲染（钉死 output → panel，重算会走 stale/recomputed）
+async function _fetchOnePackageLive(pkg) {
   let resp;
   try {
     resp = await fetch(apiUrl(BOOT.endpoint, '/skill/queryFormulaPackage'), {
@@ -697,7 +764,7 @@ async function _fetchPackageLive() {
         {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
         BOOT.skillVersion ? {'x-skill-version': BOOT.skillVersion, 'x-skill-name': BOOT.skillName || 'quant-buddy-view'} : {}
       ),
-      body: JSON.stringify({package_id: BOOT.packageId, signature: BOOT.signature}),
+      body: JSON.stringify({package_id: pkg.package_id, signature: pkg.signature}),
     });
   } catch (e) {
     markPackagePanelsError('取数失败（可能是跨域/网络）：' + e);
@@ -742,11 +809,19 @@ async function _fetchPackageLive() {
   }
 }
 
+// 多公式包并发取数：每个包各自流式、互不阻塞——叠加一条线只需多注册一个小包，不牵连已有包的数据。
 async function fetchPackageLive() {
+  const packages = resolvePackages();
+  if (!packages.length) return;
   QB.runtime.begin('sse');
-  try { return await _fetchPackageLive(); }
-  catch (e) { QB.runtime.fail(e); throw e; }
-  finally { QB.runtime.end(); }
+  try {
+    await Promise.all(packages.map(pkg => _fetchOnePackageLive(pkg)));
+  } catch (e) {
+    QB.runtime.fail(e);
+    throw e;
+  } finally {
+    QB.runtime.end();
+  }
 }
 
 // 数据授权取数：普通 JSON（非 SSE，不重算），各 grant 并发独立请求、互不阻塞
@@ -771,13 +846,13 @@ async function fetchLive() {
   buildSkeletons();          // 先把面板骨架铺出来，产出到一个就渲染一个
   LAST_OUTPUTS = {};
   const tasks = [];
-  if (BOOT.packageId) tasks.push(fetchPackageLive());
+  if (resolvePackages().length) tasks.push(fetchPackageLive());
   if (BOOT.grants && BOOT.grants.length) tasks.push(fetchGrantsLive());
   if (tasks.length) await Promise.all(tasks.map(task => task.catch(() => null)));
   // 收尾：始终没等到产出的非 text 面板，标注无产出
   PANEL_REG.forEach(reg => {
     if (!reg.filled && (reg.panel.type || 'table') !== 'text') {
-      reg.body.innerHTML = '<p class="empty">无产出：' + (reg.panel.output || '') + '</p>';
+      reg.body.innerHTML = '<p class="empty">无产出：' + (reg.panel.output || (reg.panel.outputs || []).join('、') || '') + '</p>';
     }
   });
   return LAST_OUTPUTS;
@@ -866,8 +941,122 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   fetchLive();
 });
+})();
+/* QBV_RENDER_JS_END:v1 */
 """
-    render_js = render_js.replace("__BOOT__", boot_json)
+
+# 局部嵌入模式（bespoke 页面内嵌图表用）：复用同一份渲染引擎正文，只换启动方式——不接管整页
+# （不调 QBShareShell.init、不处理 __QB_COVER__ 封面分支），改成暴露 window.QBV.refresh 并立即取数。
+# 用正则从标准模板里换掉 DOMContentLoaded 引导块，而不是维护第二份 JS 正文，避免两份渲染逻辑长期漂移。
+_BOOTSTRAP_BLOCK_RE = re.compile(
+    r"document\.addEventListener\('DOMContentLoaded', \(\) => \{.*?\n\}\);\n\}\)\(\);\n"
+    + re.escape(RENDER_JS_END_MARKER),
+    re.S,
+)
+
+_EMBEDDED_BOOTSTRAP = (
+    "(function () {\n"
+    "  window.QBV = window.QBV || {};\n"
+    "  window.QBV.refresh = fetchLive;\n"
+    "  fetchLive();\n"
+    "})();\n"
+    "})();\n"  # 闭合模板最外层的渲染引擎 IIFE（_RENDER_JS_TEMPLATE 开头新增的那一层）
+) + RENDER_JS_END_MARKER
+
+
+def _render_js_for_boot(boot):
+    """把 BOOT 编译成运行时 <script> 正文。boot.embedded 为真时换成嵌入式启动，供 bespoke 页面内嵌图表用；
+    否则走标准整页启动，行为与此前完全一致。_render_html（整页生成）与 chart_edit.py（定点编辑回写）
+    共用这份判断，保证「这个页面当初是不是嵌入模式生成的」在编辑时不会被错误地换回整页启动逻辑。"""
+    boot_json = json.dumps(boot, ensure_ascii=False)
+    full = _RENDER_JS_TEMPLATE.replace("__BOOT__", boot_json)
+    if not boot.get("embedded"):
+        return full
+    embedded, n = _BOOTSTRAP_BLOCK_RE.subn(_EMBEDDED_BOOTSTRAP, full, count=1)
+    if n != 1:
+        raise ValueError("无法定位 DOMContentLoaded 引导代码块，embedded 模式生成失败（渲染引擎模板可能已变化）")
+    return embedded
+
+
+def _render_html(spec, *, title, subtitle, panels, endpoint, package_id, signature, generated_at, grants=None):
+    """组装 HTML。骨架自包含（样式/内核内联），数据走运行时实时取数：页面内联 endpoint+凭证 + 取数 JS。
+    grants：panel 里引用 grant_id 的数据授权列表 [{grant_id,signature}]，与公式包 panel 同页并存。"""
+    share = _share_config(spec)
+    page_mode = "live" if package_id or grants else "static"
+
+    # packages：多公式包列表，运行时并发取数、互不阻塞。生成时只有一个包，但形状从一开始就是数组，
+    # 后续 chart_edit.py 增/删/改某条线时只需往这个数组追加/摘除元素，不用改造整页。
+    # formulas/reads（若 spec 显式给出）随包一起落进页面——不是敏感信息（signature 本就设计成随页面
+    # 公开），留在页面里是给未来编辑用的"溯源清单"：不用再翻会话记录或猜测原始公式。
+    packages = []
+    if package_id:
+        pkg_entry = {"role": "primary", "package_id": package_id, "signature": signature}
+        if isinstance(spec.get("formulas"), list):
+            pkg_entry["formulas"] = spec["formulas"]
+        if isinstance(spec.get("reads"), list):
+            pkg_entry["reads"] = spec["reads"]
+        packages.append(pkg_entry)
+
+    boot = {
+        "mode": page_mode,
+        "panels": panels,
+        "grants": grants or [],
+        "generatedAt": generated_at,
+        "share": {
+            "enabled": share["show_qr"],
+            "url": share["share_url"],
+            "officialUrl": share["official_url"],
+            "title": title or "看板",
+            "subtitle": subtitle or "",
+            "pageType": share["page_type"],
+            "footerNote": share["footer_note"],
+        },
+        "endpoint": endpoint,
+        # packageId/signature（单数）保留只为兼容任何仍读取旧字段的代码；运行时以 packages（数组）为准。
+        "packageId": package_id,
+        "signature": signature,
+        "packages": packages,
+        # 构建时的 quant-buddy-view 版本/名，随实时取数上报给服务端 audit
+        "skillVersion": C.SKILL_VERSION,
+        "skillName": C.SKILL_NAME,
+    }
+
+    title_esc = html_escape(title or "看板")
+    subtitle_esc = html_escape(subtitle or "")
+    brand_name_esc = html_escape(share["brand_name"])
+    brand_cn_esc = html_escape(share["brand_cn"])
+    tagline_esc = html_escape(share["tagline"])
+    page_type_esc = html_escape(share["page_type"])
+    official_url_attr = html_escape(share["official_url"], quote=True)
+    official_host_esc = html_escape(re.sub(r"^https?://", "", share["official_url"]).rstrip("/"))
+    official_label_esc = html_escape(share["official_label"])
+    share_title_esc = html_escape(share["share_title"])
+    footer_note_esc = html_escape(share["footer_note"])
+    brand_logo_html = _brand_logo_html()
+    shared_header = _shared_shell_section("HEADER")
+    shared_footer = _shared_shell_section("FOOTER")
+    shared_modal = _shared_shell_section("MODAL")
+    shared_css = _shared_shell_css()
+    shared_runtime_js = _shared_shell_js()
+    data_kernel_js = _read_text(os.path.join(ASSETS_DIR, "data-kernel.js")).replace(
+        "__QBV_SKILL_VERSION__", C.SKILL_VERSION or ""
+    )
+    live_card_config = LC.dashboard_config(spec, panels)
+    live_card_css = _read_text(os.path.join(ASSETS_DIR, "live-card.css")) if live_card_config else ""
+    card_runtime_bundle = LC.card_runtime_bundle(
+        live_card_config,
+        endpoint=endpoint,
+        package_id=package_id,
+        signature=signature,
+        style=live_card_css,
+        fallback_title=title or "",
+        fallback_description=subtitle or "",
+    ) if live_card_config else None
+    card_runtime_artifacts = card_runtime_bundle["artifacts"] if card_runtime_bundle else ""
+    card_runtime_js = card_runtime_bundle["runtime"] if card_runtime_bundle else ""
+
+    # 渲染脚本：把任意 data 形态归一为 {columns, rows}，再按 panel.type 出图/表
+    render_js = _render_js_for_boot(boot)
 
     mode_note = "数据：打开时实时取最新" if page_mode == "live" else "内容：静态展示"
     mode_label = "Live HTML" if page_mode == "live" else "Static HTML"
@@ -1052,6 +1241,149 @@ document.addEventListener('DOMContentLoaded', () => {
 </html>
 """
     return html
+
+
+def _host_already_has_kernel(host_html):
+    """判断宿主 bespoke 页面是否已经有一份取数内核（marker 版或历史手写等价版）。
+    复用 data_kernel_retrofit.py 现成的 marker 常量和指纹判断，不重新发明一套检测逻辑。"""
+    if DKR.START in host_html and DKR.END in host_html:
+        return True
+    return any(
+        DKR._is_legacy_kernel(m.group(2))
+        for m in DKR.SCRIPT_RE.finditer(host_html)
+    )
+
+
+def cmd_panel_block(params):
+    """局部产出模式（emit=panel_block）：只生成 marker 包住的运行时 <script>，不生成整页 HTML
+    （不含 <head>/样式/页头页尾/#grid）。供 bespoke 页面把某几个图表交给标准声明式引擎画：
+    在 bespoke 布局里摆好容器（如 <div id="priceChart">），panel 里传 target_selector 指向它，
+    这段脚本运行时会直接把图渲染进那个容器，不包卡片外壳，bespoke 页面其余布局/样式不受影响。
+
+    生成的页面因此仍然带 QBV_RENDER_JS_START/END marker + BOOT.packages/panels[]，chart_edit.py
+    可以照常对其做定点编辑——bespoke 页面里嵌入的这几个图表和整页声明式看板走的是同一套编辑机制。
+
+    参数（与 cmd_build 的 spec 同源，但不需要 title/out_file/upload 这些整页专属字段）：
+        {
+          "panels": [ ... 同 build_dashboard 的 panel 结构，新增 target_selector（必填，
+                       bespoke 页面里已存在的容器选择器）、right_series/dual_axis（双轴，可选）],
+          "package_id": "可选，缺省从本地凭证推断",
+          "signature":  "可选，缺省从本地凭证补全",
+          "formulas":   "可选，随包落进页面供以后编辑溯源",
+          "reads":      "可选，同上",
+          "include_echarts_cdn": "可选 bool，默认 true；bespoke 页面自己已引入 ECharts 时可传 false 跳过",
+          "host_html_file": "可选，目标 bespoke 页面当前 HTML 的本地文件路径；给了这个参数会自动探测宿主"
+                            "页面是否已经有取数内核（marker 版或历史手写等价版），有则跳过重复内联"
+                            "data-kernel.js（否则两份内核在同一页面里会因为顶层变量重复声明而崩溃）",
+          "include_data_kernel": "可选 bool，显式指定要不要内联 data-kernel.js；不传时若给了 "
+                                 "host_html_file 走自动探测，否则默认 true（与旧行为一致）"
+        }
+
+    返回 {code, script_html, package_id, panels}；script_html 是可以直接粘贴进 bespoke 页面
+    <body> 里（放在对应容器之后）的完整 <script> 片段字符串，不落盘、不上传——bespoke 页面的
+    发布仍走 compile_bespoke_page.py / static_page.py 常规流程。
+    """
+    panels = params.get("panels")
+    if not isinstance(panels, list) or not panels:
+        return {"code": 1, "message": "panels 必须是非空数组"}
+    missing_target = [i for i, p in enumerate(panels) if isinstance(p, dict) and not p.get("target_selector")]
+    if missing_target:
+        return {"code": 1, "message": f"panels{missing_target} 缺少 target_selector（局部产出模式下每个面板都必须指定要渲染进哪个已存在的容器）"}
+    image_panel_error = _validate_image_panels(panels)
+    if image_panel_error:
+        return image_panel_error
+
+    grants, grant_err = _resolve_grant_panels(panels)
+    if grant_err:
+        return grant_err
+
+    needs_formula = any(
+        isinstance(p, dict) and p.get("output") and p.get("_source") != "grant"
+        for p in panels
+    )
+    pkg = sig = None
+    if needs_formula or params.get("package_id"):
+        pkg, sig, err = _resolve_credential(params)
+        if err:
+            return err
+        if not pkg or not sig:
+            return {"code": 1, "message": "需要 package_id + signature 才能在页面内实时取数（signature 可由本地凭证补全）"}
+    if not pkg and not grants:
+        return {"code": 1, "message": "panels 未引用任何 output（公式包）或 grant_id（数据授权），无法确定取数来源"}
+
+    endpoint = C.endpoint_of(C.load_config())
+
+    packages = []
+    if pkg:
+        pkg_entry = {"role": "primary", "package_id": pkg, "signature": sig}
+        if isinstance(params.get("formulas"), list):
+            pkg_entry["formulas"] = params["formulas"]
+        if isinstance(params.get("reads"), list):
+            pkg_entry["reads"] = params["reads"]
+        packages.append(pkg_entry)
+
+    boot = {
+        "mode": "live",
+        "embedded": True,     # 关键标记：_render_js_for_boot 据此换成嵌入式启动，不接管整页
+        "panels": panels,
+        "grants": grants or [],
+        "endpoint": endpoint,
+        "packageId": pkg,
+        "signature": sig,
+        "packages": packages,
+        "skillVersion": C.SKILL_VERSION,
+        "skillName": C.SKILL_NAME,
+    }
+
+    render_js = _render_js_for_boot(boot)
+
+    include_kernel = params.get("include_data_kernel")
+    kernel_skip_reason = None
+    if include_kernel is None:
+        host_html_file = params.get("host_html_file")
+        if host_html_file:
+            try:
+                host_html = _read_text(_resolve_local_path(host_html_file))
+            except OSError as exc:
+                return {"code": 1, "message": f"host_html_file 读取失败: {exc}"}
+            if _host_already_has_kernel(host_html):
+                include_kernel = False
+                kernel_skip_reason = "检测到宿主页面已有取数内核，跳过重复内联（避免同页两份内核顶层变量重复声明报错）"
+    if include_kernel is None:
+        include_kernel = True  # 缺省行为不变，向后兼容
+
+    data_kernel_js = ""
+    if include_kernel:
+        data_kernel_js = _read_text(os.path.join(ASSETS_DIR, "data-kernel.js")).replace(
+            "__QBV_SKILL_VERSION__", C.SKILL_VERSION or ""
+        )
+
+    include_cdn = _as_bool(params.get("include_echarts_cdn"), True)
+    cdn_tag = f'<script src="{_ECHARTS_CDN}"></script>\n' if include_cdn else ""
+    kernel_block = (data_kernel_js + "\n") if data_kernel_js else ""
+    script_html = (
+        cdn_tag
+        + "<script>\n"
+        + kernel_block
+        + render_js + "\n"
+        + "</script>"
+    )
+
+    message = ("已生成局部产出的运行时 <script> 片段，把它粘贴进 bespoke 页面 <body>（对应 target_selector 容器之后）；"
+               "该片段带 QBV_RENDER_JS_START/END marker，之后可用 chart_edit.py 对这些面板做定点编辑。")
+    if kernel_skip_reason:
+        message += " " + kernel_skip_reason
+
+    return {
+        "code": 0,
+        "package_id": pkg,
+        "grants": [g["grant_id"] for g in grants],
+        "panels": len(panels),
+        "script_html": script_html,
+        "size": len(script_html.encode("utf-8")),
+        "included_data_kernel": include_kernel,
+        "message": message,
+    }
 
 
 def _normalize_grant_data(kind, data):
@@ -1427,428 +1759,6 @@ def _resolve_local_path(path):
     return path if os.path.isabs(path) else os.path.join(C.SKILL_ROOT, path)
 
 
-def _provided_thumbnail_file(params):
-    for key in ("thumbnail_file", "thumbnail_image", "thumbnail_path"):
-        value = params.get(key)
-        if isinstance(value, str) and value.strip():
-            return _resolve_local_path(value.strip())
-    thumb = params.get("thumbnail")
-    if isinstance(thumb, str) and thumb.strip():
-        return _resolve_local_path(thumb.strip())
-    if isinstance(thumb, dict):
-        for key in ("file", "image_file", "thumbnail_file", "path"):
-            value = thumb.get(key)
-            if isinstance(value, str) and value.strip():
-                return _resolve_local_path(value.strip())
-    return None
-
-
-def _auto_thumbnail_requested(params):
-    for key in ("auto_thumbnail", "generate_thumbnail"):
-        if key in params:
-            return _as_bool(params.get(key), False)
-    thumb = params.get("thumbnail")
-    if isinstance(thumb, bool):
-        return thumb
-    if isinstance(thumb, dict):
-        if any(isinstance(thumb.get(k), str) and thumb.get(k).strip()
-               for k in ("file", "image_file", "thumbnail_file", "path")):
-            return False
-        if "enabled" in thumb:
-            return _as_bool(thumb.get("enabled"), True)
-        if "auto" in thumb:
-            return _as_bool(thumb.get("auto"), True)
-        if "generate" in thumb:
-            return _as_bool(thumb.get("generate"), True)
-        return True
-    return False
-
-
-def _thumbnail_tags(params):
-    tags = params.get("tags") if isinstance(params.get("tags"), list) else []
-    if tags:
-        return tags
-    out = []
-    for key in ("template", "page_type", "category"):
-        value = params.get(key)
-        if value:
-            out.append(value)
-    if params.get("upload") or params.get("update_page_id"):
-        out.append("可分享")
-    out.append("实时取数")
-    return out
-
-
-def _thumb_number(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)) and math.isfinite(value):
-        return float(value)
-    if isinstance(value, str):
-        text = value.strip().replace(",", "")
-        if not text:
-            return None
-        try:
-            value = float(text)
-            return value if math.isfinite(value) else None
-        except ValueError:
-            return None
-    return None
-
-
-def _thumb_series_from_data(data):
-    if data is None:
-        return []
-    if isinstance(data, dict):
-        for key in ("range_data", "last_value", "last_day_stats", "last_valid_per_asset"):
-            points = _thumb_series_from_data(data.get(key))
-            if points:
-                return points
-        dates = data.get("dates") or data.get("x") or data.get("labels") or data.get("categories")
-        values = data.get("values") or data.get("y") or data.get("series") or data.get("data")
-        if isinstance(dates, list) and isinstance(values, list):
-            if values and isinstance(values[0], list):
-                values = values[0]
-            pairs = []
-            for i in range(min(len(dates), len(values))):
-                pairs.append([dates[i], values[i]])
-            return _thumb_series_from_data(pairs)
-        if isinstance(data.get("columns"), list) and isinstance(data.get("rows"), list):
-            columns = data["columns"]
-            rows = data["rows"]
-            numeric_idx = None
-            for ci, _name in enumerate(columns):
-                if any(_thumb_number(row[ci]) is not None for row in rows if isinstance(row, list) and ci < len(row)):
-                    numeric_idx = ci
-            if numeric_idx is None:
-                return []
-            x_idx = 0 if numeric_idx != 0 else (1 if len(columns) > 1 else None)
-            points = []
-            for ri, row in enumerate(rows):
-                if not isinstance(row, list) or numeric_idx >= len(row):
-                    continue
-                y = _thumb_number(row[numeric_idx])
-                if y is None:
-                    continue
-                x = row[x_idx] if x_idx is not None and x_idx < len(row) else ri
-                points.append({"x": str(x), "y": y})
-            return points[-260:]
-        for key in ("points", "items", "records", "top_values"):
-            points = _thumb_series_from_data(data.get(key))
-            if points:
-                return points
-        return []
-    if not isinstance(data, list):
-        return []
-    points = []
-    for idx, item in enumerate(data):
-        x = idx
-        y = None
-        if isinstance(item, dict):
-            x = item.get("date", item.get("time", item.get("x", item.get("label", idx))))
-            for key in ("value", "y", "close", "price", "score"):
-                y = _thumb_number(item.get(key))
-                if y is not None:
-                    break
-            if y is None:
-                for val in item.values():
-                    y = _thumb_number(val)
-                    if y is not None:
-                        break
-        elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            x = item[0]
-            y = _thumb_number(item[1])
-        else:
-            y = _thumb_number(item)
-        if y is not None:
-            points.append({"x": str(x), "y": y})
-    return points[-260:]
-
-
-def _thumbnail_series_from_outputs(panels, outputs):
-    if not isinstance(outputs, dict):
-        return []
-    preferred = []
-    fallback = []
-    for panel in panels:
-        if not isinstance(panel, dict) or not panel.get("output"):
-            continue
-        target = preferred if (panel.get("type") or "").lower() in ("line", "bar") else fallback
-        target.append(panel.get("output"))
-    for output in preferred + fallback:
-        item = outputs.get(output)
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        points = _thumb_series_from_data(item.get("data"))
-        if len(points) >= 2:
-            return points
-    return []
-
-
-def _default_thumbnail_file(out_file):
-    base = os.path.splitext(os.path.basename(out_file))[0] or "dashboard"
-    return os.path.join(C.SKILL_ROOT, "output", "thumbnails", base + ".png")
-
-
-_COVER_MODE_CSS = (
-    "<style id=\"qb-cover-css\">"
-    ":root{color-scheme:light !important;}"
-    "html,body{background:#f3f6fa !important;}"
-    ".qb-head,[data-qb-share-shell],.qb-footer,[data-qb-share-shell-footer],"
-    ".share-modal,#sharePosterModal,.qb-actions,#refresh,#shareBtn,.site-footer{display:none !important;}"
-    "main{max-width:1200px !important;margin:0 auto !important;padding:24px !important;}"
-    "@media (prefers-color-scheme: dark){"
-    "body{background:#f3f6fa !important;color:#1f2937 !important;}"
-    ".card{background:#fff !important;border-color:#dde5ef !important;box-shadow:none !important;}"
-    ".card h3,.std-hero h1{color:#172033 !important;} .card-head p,.desc{color:#697586 !important;}"
-    ".big{color:#111827 !important;} .text-panel{color:#334155 !important;}"
-    "th,td{border-color:#eef0f2 !important;} thead th{background:#fafbfc !important;}}"
-    "</style>"
-)
-
-
-def _echarts_local_path():
-    """确保 ECharts 本地缓存存在（缺则一次性从 CDN 下载落盘），返回缓存绝对路径或 None。
-
-    缓存到 assets/vendor/echarts.min.js；下载失败返回 None（封面页退回 CDN）。
-    """
-    cache = os.path.join(C.SKILL_ROOT, "assets", "vendor", "echarts.min.js")
-    if os.path.exists(cache) and os.path.getsize(cache) > 200000:
-        return cache
-    try:
-        import urllib.request
-        req = urllib.request.Request(_ECHARTS_CDN, headers={"User-Agent": "qb-view"})
-        with C._NO_PROXY_OPENER.open(req, timeout=30) as resp:
-            data = resp.read()
-        if len(data) < 200000:
-            return None
-        os.makedirs(os.path.dirname(cache), exist_ok=True)
-        with open(cache, "wb") as f:
-            f.write(data)
-        return cache
-    except Exception:
-        return None
-
-
-def _build_cover_html(html, outputs):
-    """把渲染好的页面 html 改成一次性「封面模式页」：本地 ECharts + 注入构建期产出 + 隐藏头尾 + 强制浅色。
-
-    该文件只用于本地 Edge 无头截图，不上传；正常页面不含 window.__QB_COVER__，分支 inert。
-    把 CDN ECharts 换成本地文件引用后，封面页无需联网、秒加载、图表同步画完——保证截图时页面已完全渲染。
-    """
-    # 用本地文件引用替换 CDN <script src>（file:// 页面可加载 file:// 脚本），去掉 ~8s CDN 等待。
-    # 不内联文本：minified JS 里的 </script> 等序列会提前闭合标签、把源码当文本渲染。
-    cache = _echarts_local_path()
-    if cache:
-        cdn_tag = '<script src="' + _ECHARTS_CDN + '"></script>'
-        local_uri = pathlib.Path(cache).resolve().as_uri()
-        html = html.replace(cdn_tag, '<script src="' + local_uri + '"></script>', 1)
-
-    data = json.dumps({"outputs": outputs or {}}, ensure_ascii=False)
-    boot = "<script>window.__QB_COVER__=" + data + ";</script>"
-    if "</head>" in html:
-        html = html.replace("</head>", _COVER_MODE_CSS + "</head>", 1)
-    else:
-        html = _COVER_MODE_CSS + html
-    if "</body>" in html:
-        html = html.replace("</body>", boot + "</body>", 1)
-    else:
-        html = html + boot
-    return html
-
-
-def _estimate_cover_height(panels):
-    """按 panel 估算整页内容高度（用于 Edge 窗口高度）。宁可底部留白，不可裁切：上取整 ×1.1，cap[700,5000]。"""
-    total = 150 + 60  # hero + main padding
-    small = 0
-    for p in panels or []:
-        if not isinstance(p, dict):
-            continue
-        t = (p.get("type") or "table").lower()
-        span = p.get("span") or ("full" if t in ("line", "bar") else "auto")
-        if t in ("line", "bar") or span in ("full", "wide"):
-            try:
-                h = int(p.get("height") or 360)
-            except (TypeError, ValueError):
-                h = 360
-            total += h + 80 + 16
-        else:
-            small += 1
-    total += math.ceil(small / 2) * (240 + 16)
-    return max(700, min(5000, int(total * 1.08)))
-
-
-_THUMB_MAX_BYTES = 2 * 1024 * 1024
-
-
-def _shrink_png_under(path, limit):
-    """可选增强：截图超 2MB 时用 Pillow 降采样/转 JPEG 压到限内；无 Pillow 返回 None。"""
-    try:
-        from PIL import Image
-    except Exception:
-        return None
-    try:
-        img = Image.open(path).convert("RGB")
-    except Exception:
-        return None
-    for scale in (1.0, 0.85, 0.7, 0.55, 0.42):
-        im = img if scale == 1.0 else img.resize(
-            (max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.LANCZOS)
-        try:
-            im.save(path, format="PNG", optimize=True)
-            if os.path.getsize(path) <= limit:
-                return path
-            jpg = os.path.splitext(path)[0] + ".jpg"
-            im.save(jpg, format="JPEG", quality=82, optimize=True)
-            if os.path.getsize(jpg) <= limit:
-                if os.path.abspath(jpg) != os.path.abspath(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                return jpg
-        except Exception:
-            continue
-    return None
-
-
-def _generate_page_cover(html_file, panels, outputs, thumb_out):
-    """默认封面：截真实页面整页内容（去头尾、强制浅色、构建期数据离线渲染）。
-
-    失败/无浏览器/超 2MB 又压不下来 → 返回 None，交回调用方走合成 SVG 兜底。
-    """
-    _generate_page_cover.last_reason = None
-    try:
-        import render_cover as RC
-    except Exception:
-        _generate_page_cover.last_reason = "render_cover_import_failed"
-        return None
-    if not RC._find_browser():
-        _generate_page_cover.last_reason = "no_browser"
-        return None
-    try:
-        with open(html_file, "r", encoding="utf-8") as f:
-            html = f.read()
-    except OSError:
-        _generate_page_cover.last_reason = "html_read_failed"
-        return None
-
-    base = os.path.splitext(thumb_out)[0]
-    cover_html_path = base + ".cover-page.html"
-    out_png = base + ".png"
-    shot = None
-    try:
-        with open(cover_html_path, "w", encoding="utf-8") as f:
-            f.write(_build_cover_html(html, outputs or {}))
-        shot = RC.capture_page_cover(cover_html_path, out_png, _estimate_cover_height(panels))
-    except Exception as exc:
-        _generate_page_cover.last_reason = f"capture_exception:{exc}"
-        shot = None
-    finally:
-        try:
-            os.remove(cover_html_path)
-        except OSError:
-            pass
-    if not shot:
-        if not _generate_page_cover.last_reason:
-            _generate_page_cover.last_reason = "capture_failed"
-        return None
-
-    dims = RC._png_dims(shot)
-    size = os.path.getsize(shot)
-    if size > _THUMB_MAX_BYTES:
-        smaller = _shrink_png_under(shot, _THUMB_MAX_BYTES)
-        if not smaller:
-            _generate_page_cover.last_reason = "over_2mb_unshrinkable"
-            try:
-                os.remove(shot)
-            except OSError:
-                pass
-            return None
-        shot = smaller
-        size = os.path.getsize(shot)
-        dims = RC._png_dims(shot) or dims
-    return {
-        "code": 0,
-        "thumbnail_generation_status": "generated",
-        "out_file": shot,
-        "mode": "page",
-        "rasterizer": "edge-page",
-        "width": dims[0] if dims else None,
-        "height": dims[1] if dims else None,
-        "bytes": size,
-    }
-
-
-def _prepare_thumbnail(params, panels, out_file, outputs=None):
-    provided = _provided_thumbnail_file(params)
-    if provided:
-        return {
-            "file": provided,
-            "status": "provided" if os.path.exists(provided) else "provided_missing",
-            "generation": {"code": 0, "provided": True, "out_file": provided},
-        }
-
-    if not _auto_thumbnail_requested(params):
-        return {"file": None, "status": "not_requested", "generation": None}
-
-    thumb_cfg = params.get("thumbnail") if isinstance(params.get("thumbnail"), dict) else {}
-    thumb_out = _resolve_local_path(thumb_cfg.get("out_file")) if thumb_cfg.get("out_file") else _default_thumbnail_file(out_file)
-    render_params = {
-        "title": params.get("title"),
-        "subtitle": params.get("subtitle"),
-        "description": params.get("description"),
-        "template": params.get("template") or params.get("page_type"),
-        # 分类/数据模式：默认裸图只记录元信息；style=poster 时用于 eyebrow 与信息卡。
-        "template_type": thumb_cfg.get("template_type") or params.get("template_type") or params.get("category"),
-        "category": thumb_cfg.get("category") or params.get("category"),
-        "data_mode": thumb_cfg.get("data_mode") or params.get("data_mode"),
-        "tags": thumb_cfg.get("tags") if isinstance(thumb_cfg.get("tags"), list) else _thumbnail_tags(params),
-        "out_file": thumb_out,
-    }
-    for key in ("style", "cover_style"):
-        if thumb_cfg.get(key):
-            render_params[key] = thumb_cfg.get(key)
-    # 封面曲线用「构建期已校验数据」内联绘制：显式 series 优先，否则从产出抽首个 line/bar 序列。
-    series = thumb_cfg.get("series") or thumb_cfg.get("chart_series") or params.get("series") or params.get("chart_series")
-    if not series:
-        series = _thumbnail_series_from_outputs(panels, outputs or {})
-    if series:
-        render_params["series"] = series
-
-    # 封面模式：page=截真实页面整页（默认）/ chart=合成全幅曲线 / poster=品牌海报。
-    cover_mode = str(thumb_cfg.get("cover_mode") or params.get("cover_mode") or "page").lower()
-    if cover_mode == "poster":
-        render_params.setdefault("style", "poster")
-
-    # 1) 默认：截真实页面整页内容（去头尾）。失败/无浏览器/超 2MB 压不下 → 回退合成。
-    if cover_mode == "page":
-        page_gen = _generate_page_cover(out_file, panels, outputs, thumb_out)
-        if page_gen:
-            return {"file": page_gen.get("out_file"), "status": "generated", "generation": page_gen}
-
-    # 2) 合成 SVG 封面（chart/poster，或截图回退）：Edge 栅格化 → 纯 Python PNG → SVG 三层兜底。
-    try:
-        import render_cover as RC
-        generation = RC.render_cover(render_params)
-        if isinstance(generation, dict) and generation.get("code") == 0 and cover_mode == "page":
-            generation["mode"] = "chart-fallback"
-            generation["fallback_reason"] = getattr(_generate_page_cover, "last_reason", None) or "page_cover_failed"
-        elif isinstance(generation, dict) and generation.get("code") == 0 and cover_mode in ("chart", "poster"):
-            generation["mode"] = cover_mode
-        if isinstance(generation, dict) and generation.get("code") == 0 and generation.get("bytes") is None:
-            out = generation.get("out_file")
-            if out and os.path.exists(out):
-                generation["bytes"] = os.path.getsize(out)
-    except Exception as exc:
-        generation = {"code": 1, "message": str(exc), "thumbnail_generation_status": "failed"}
-
-    if isinstance(generation, dict) and generation.get("code") == 0:
-        return {"file": generation.get("out_file"), "status": "generated", "generation": generation}
-    if isinstance(generation, dict) and generation.get("skipped"):
-        return {"file": None, "status": "skipped", "generation": generation}
-    return {"file": None, "status": "failed", "generation": generation}
-
 
 def cmd_build(params):
     task_id = str((params or {}).get("task_id") or C.current_trace_context().get("task_id") or "").strip()
@@ -1960,16 +1870,12 @@ def cmd_build(params):
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(html)
 
-    thumbnail_info = _prepare_thumbnail(params, panels, out_file, verify_outputs)
     manifest = {
         "schema_version": 1,
         "page_id": None,
         "url": None,
         "html_file": out_file,
         "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
-        "thumbnail_file": thumbnail_info.get("file"),
-        "thumbnail_url": None,
-        "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
         "endpoint": endpoint,
         "formula_packages": ({
             "DEFAULT": {
@@ -2000,8 +1906,6 @@ def cmd_build(params):
             "enabled": live_card_enabled,
         },
     }
-    if thumbnail_info.get("generation"):
-        manifest["thumbnail_generation"] = thumbnail_info["generation"]
     manifest_path = _write_manifest(out_file, manifest)
 
     page_mode = "live" if pkg or grants else "static"
@@ -2014,12 +1918,8 @@ def cmd_build(params):
         "panels": len(panels),
         "size": len(html.encode("utf-8")),
         "manifest": manifest_path,
-        "thumbnail_file": thumbnail_info.get("file"),
-        "thumbnail_generation_status": thumbnail_info.get("status") or "not_requested",
         "message": "已生成实时取数看板 HTML" if page_mode == "live" else "已生成静态看板 HTML",
     }
-    if thumbnail_info.get("generation"):
-        result["thumbnail_generation"] = thumbnail_info["generation"]
     if legacy_mode and legacy_mode != page_mode:
         result["note"] = f"spec 里的 mode 字段已忽略，页面按实际数据源生成 {page_mode} 模式。"
     if single_stock_facts:
@@ -2033,7 +1933,6 @@ def cmd_build(params):
         import static_page as SP
         # 页面说明（列表/详情展示用）：仅显式传 spec.description 时透传；不传则不动（update 保留原值）
         page_desc = params.get("description")
-        thumbnail_file = thumbnail_info.get("file")
         reply_params, reply_resolution, reply_error = SP._resolve_publish_agent_reply_template(
             {
                 **params,
@@ -2064,7 +1963,6 @@ def cmd_build(params):
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
                 "verify_card_runtime": params.get("verify_card_runtime"),
-                "thumbnail_file": thumbnail_file,
                 **reply_metadata,
             })
             result["update"] = up
@@ -2077,22 +1975,16 @@ def cmd_build(params):
                 "ttl_days": params.get("ttl_days"),
                 "verify_packages": params.get("verify_packages"),
                 "verify_card_runtime": params.get("verify_card_runtime"),
-                "thumbnail_file": thumbnail_file,
                 **reply_metadata,
             })
             result["upload"] = up
             verb = "上传"
         if up.get("code") == 0 and up.get("url"):
             result["url"] = up["url"]
-            if up.get("thumbnail_url"):
-                result["thumbnail_url"] = up.get("thumbnail_url")
             manifest["page_id"] = up.get("page_id")
             manifest["url"] = up.get("url")
-            manifest["thumbnail_url"] = up.get("thumbnail_url") or None
             if up.get("card_runtime_verification"):
                 manifest["verification"]["card_runtime"] = "ok"
-            if up.get("thumbnail_warning"):
-                manifest["thumbnail_upload_warning"] = up.get("thumbnail_warning")
             manifest["verification"]["publish_runtime_check"] = (
                 (up.get("_package_runtime_check") or {}).get("status")
                 or "not_verifiable_by_publish_key"
@@ -2110,8 +2002,12 @@ def cmd_build(params):
 
 def main():
     params = C.read_params(sys.argv[1:], env_var="BD_PARAMS")
+    emit = str((params or {}).get("emit") or "").strip().lower()
     try:
-        result = cmd_build(params)
+        if emit == "panel_block":
+            result = cmd_panel_block(params)
+        else:
+            result = cmd_build(params)
     except (FileNotFoundError, ValueError) as e:
         result = {"code": 1, "message": str(e)}
     C.emit(result, out_name="bd_out.txt")

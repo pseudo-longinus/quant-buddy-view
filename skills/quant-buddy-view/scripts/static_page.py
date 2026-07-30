@@ -16,24 +16,23 @@ r"""
     list       列出我的页面
     init_reply_metadata  为缺少 page_context / agent_reply_template 的旧页面初始化回复元数据
     revoke     撤销页面（删对象 + 标记失效，链接立即 404）
-    thumbnail  给页面设置 / 替换缩略图（纯展示封面，直传 PNG/JPG，独立于 HTML 上传）
     tags       查询 upload/update 可用标签（scene 场景 / paradigm 范式；recommend 仅后台维护）
     autotag    LLM 自动识别页面的场景/范式标签并落库（dry_run 只读预览；force 忽略缓存重打）
     publish_community    将自己的 active 普通页发布到社区（内部受控打 recommend:社区 标签）
     unpublish_community  取消社区发布（移除固定 recommend:社区 标签）
     templates  列出范式卡活页（默认官方精选；recommend="all" 或 include_community=true 合并官方精选+社区）
-    template   官方精选详情：标题/说明/缩略图/关联公式包 + 公开下载链接（拿来克隆复用）
+    template   官方精选详情：标题/说明/关联公式包 + 公开下载链接（拿来克隆复用）
     direct_deliver  直达命中确定性执行：模板详情 → 单次实时查询 → direct_finalize
     direct_finalize  直达命中终态：校验模板 revision、实时查询证据和任务归属，返回交付 Trace
-    fork_prepare  下载命中范式 HTML 并生成 fork_manifest_v1，供 publish_final 做来源/能力门禁
+    fork_prepare  下载命中范式，自动脱敏凭证并生成 fork_manifest_v2/review/publish plan
     fork_validate 在浏览器验收前对工作 HTML 复用 publish_final 的 fork 门禁（不发布）
     update_template  官方精选/旧模板安全改写：metadata 复查后走 updateTemplate
     retrofit_card_runtime  为已发布模板重建独立 card runtime artifact，可原链接写回
     verify_card_runtime  批量快速验收独立 card runtime artifact（下载 HTML + required_outputs + 独立 hydrate）
 
 权限 / 权责（is_test 内部互通）：归属由 api_key（Bearer）认定。
-  · 自己的页面（upload/update/download/list/revoke/thumbnail）：默认只能操作本人页面；
-    is_test=true 的用户可 download / update / thumbnail 其他 is_test 用户的页面、并用 list 的
+  · 自己的页面（upload/update/download/list/revoke）：默认只能操作本人页面；
+    is_test=true 的用户可 download / update 其他 is_test 用户的页面、并用 list 的
     scope=test_all 列出全部 test 用户页面。对普通（非 is_test）用户的页面一律 FORBIDDEN。
   · 官方精选（templates/template）：浏览 / 复制对**全体登录用户**开放，发现口径是后台
     推荐标签 recommend:官方精选；不再要求 is_template=true 或 template_status=published。
@@ -51,7 +50,6 @@ upload 参数：
       "title":       "可选，不传则服务端从 <title> 抽取",
       "description": "可选，页面说明（≤1000 字，列表/详情展示用）",
       "ttl_days":    "可选，默认 365",
-      "thumbnail_file": "可选，本地 PNG/JPG；HTML 上传成功后再设封面，失败只返回 warning",
       "scene_tags":    "可选，场景标签（数组/逗号串/单值）；只能选已有，查无报 SCENE_TAG_NOT_FOUND",
       "paradigm_tags": "可选，范式标签（数组/逗号串/单值）；可选已有或现写新名自动入池(source=user)",
       "user_query": "可选，用户原始问题；用于 LLM 打标或显式标签来源溯源",
@@ -64,8 +62,9 @@ upload 参数：
     }
     标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
     先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
-new_page 参数：title / message / current_step / page_status / steps / required_input 可选；默认接入公共 share shell，
-    上传一个不自刷新的 iframe 活页进度页，并返回 page_id / url / progress。
+new_page 参数：title / message / current_step / page_status / steps / required_input 可选；正式 task 还必须在 templates(recommend="all") 后由 Agent 传 routing_decision：
+    fork 用 {mode:"fork",source_template_id,reason_code}；unmatched 用 {mode:"unmatched",closest_template_id,reason_code,reason}。
+    脚本核验候选属于本 task 并记录决定；默认接入公共 share shell，上传一个不自刷新的 iframe 活页进度页，并返回 page_id / url / progress。
 update_progress 参数：page_id 必填；title / message / current_step / page_status / steps / required_input 可选；
     只 update 同一个 URL 的 HTML 内容；仅传 current_step 时会自动推导前序完成、当前进行中、后序待开始。
     必须等用户决定时用 page_status=waiting_input + required_input{id,prompt,options?,resume_step}；
@@ -74,6 +73,8 @@ update_progress 参数：page_id 必填；title / message / current_step / page_
     不在页面里写自动刷新、跳转或 parent 通信。
 publish_final 参数：同 update；推荐用于首链进度页的最终正式发布。
     会先把进度页推进到 final_publish；若正式 update 失败，会自动把同一 page_id 更新为 failed 进度页。
+    会在任何网络写入前复核 new_page 的 routing_decision；已选 fork 却没有 fork_prepare binding 时返回 ROUTING_RECONFIRM_REQUIRED。
+    确认模板确有实质能力缺口时可传 routing_override:{from_mode:"fork",to_mode:"unmatched",reason_code,reason} 显式改判；已完成 fork_prepare 后不允许改判。
     复用在线模板时传 source_template_id + fork_manifest_file；前者继承回复骨架，后者证明来源 HTML 已下载并声明 fork 门禁；page_context 必须按最终用户活页重新生成。
     同一 task_id 执行过 fork_prepare 后，publish_final 会自动恢复已绑定的来源与 manifest；省略或改写参数不能绕过 fork 门禁。
     无法匹配专业骨架时使用 generic_live_page_delivery_v1；v2 hybrid 缺 page_context / hybrid_composition 时 fail-closed。
@@ -82,7 +83,6 @@ update 参数：page_id 必填；title / description / ttl_days / scene_tags / p
     user_query / tagging_method / tagging_source / tagging_meta /
     page_context / agent_reply_template / verify_card_runtime 仅在传了才改
     （description 传空串=清空，不传保留原值；标签字段传 [] 清空、不传保留原标签）。
-    可同样传 thumbnail_file，HTML 更新成功后再替换封面；缩略图失败不回滚 HTML。
 download 参数：
     {
       "page_id":  "要下载的页面（与 url 二选一）",
@@ -91,13 +91,6 @@ download 参数：
       "final_response": "可选 true；仅在只读页面后直接回答时返回终态 contract，默认返回非终态 hint"
     }
     下载字节直连 OSS（public-read），不经服务端 → 不占服务端带宽。
-thumbnail 参数：
-    {
-      "page_id":    "要设置缩略图的页面（必填）",
-      "image_file": "本地图片路径（PNG/JPG，≤2MB，相对则相对 skill 根）"
-    }
-    直传图片到 OSS（pages/thumbnails/{page_id}.png，public-read），仅回写页面的 thumbnail_url；
-    不动 HTML、不占活跃页配额。缩略图只是「列表/详情/模板墙」的展示封面，纯展示用。
 tags 参数：{ "tag_type":可选("scene" 或 "paradigm") }；不传则同时返回 scene_tags / paradigm_tags。
 init_reply_metadata 参数：{ "scope":"test_all", "dry_run":true, "page_ids":["page_xxx"], "max_pages":500 }；
     默认只 dry-run 扫描 is_test 可见页面，下载缺 page_context / agent_reply_template 的页面，
@@ -107,11 +100,12 @@ templates 参数：{ "category":可选, "status":可选, "scene_tag_id":可选, 
 template  参数：{ "template_id":"tpl_xxx" }（或 "page_id":"page_xxx" 二选一）
 direct_finalize 参数：{ "task_id":"本次 Trace task_id", "page_id":"page_xxx", "template_revision":"template 返回的 sha256" }
 direct_deliver 参数：{ "task_id":"本次 Trace task_id", "page_id":"page_xxx", "template_revision":"templates 返回的 sha256" }
-fork_prepare 参数：{ "task_id":"本次 Trace task_id", "source_template_id":"page_xxx", "output_dir":"output/forks/page_xxx", "source_markers":["原标的名","原代码"], "target_asset":"新代码", "asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}, "minimum_target_package_count":可选, "minimum_target_grant_count":可选, "credential_count_reduction_reason":"数量下调时必填" }
+fork_prepare 参数：{ "task_id":"本次 Trace task_id", "source_template_id":"page_xxx", "target_page_id":"new_page 返回的目标 page_id", "output_dir":"output/forks/page_xxx", "target_asset":{"name":"目标标的名","code":"目标代码"}, "source_asset":可选{"name":"来源模板主资产名"}（多资产/指数类范式建议显式给）, "asset_replacements":可选覆盖映射, "minimum_target_package_count":可选, "minimum_target_grant_count":可选, "credential_count_reduction_reason":"数量下调时必填" }
+  资产替换由 target_asset 驱动：来源主资产及其在页面中的实际代码写法由脚本自行推导，Agent 不需要（也无法）猜来源 HTML 里代码写成 SH600900 还是 600900.SH。asset_replacements 仅在需要额外文案替换或覆盖推导结果时才传。
 verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, "timeout_sec":180 }
 
 用法示例：
-    python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
+    python scripts/static_page.py new_page '{"task_id":"task_xxx","title":"贵州茅台估值质量分析","message":"正在确认活页方案","routing_decision":{"mode":"fork","source_template_id":"page_template_xxx","reason_code":"same_paradigm_different_asset"}}'
     python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
     python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
     python scripts/static_page.py publish_verified '{"task_id":"task_xxx","page_id":"page_xxx","html_file":"output/pages/final.html","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","validation_receipt_files":["receipt.json"]}'
@@ -122,7 +116,6 @@ verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, 
     python scripts/static_page.py list '{"scope":"test_all"}'   # 仅 is_test：列出全部 test 用户页面
     python scripts/static_page.py init_reply_metadata '{"scope":"test_all","dry_run":true}'
     python scripts/static_page.py revoke '{"page_id":"page_xxx"}'
-    python scripts/static_page.py thumbnail '{"page_id":"page_xxx","image_file":"output/pages/cover.png"}'
     python scripts/static_page.py tags '{}'                                      # 查询可用场景/范式标签
     python scripts/static_page.py tags '{"tag_type":"scene"}'                 # 只查场景标签
     python scripts/static_page.py publish_community '{"page_id":"page_xxx"}'   # 发布到社区（全员可发现）
@@ -130,7 +123,7 @@ verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, 
     python scripts/static_page.py templates '{"page":1,"page_size":20}'        # 浏览官方精选
     python scripts/static_page.py template  '{"template_id":"page_xxx"}'        # 官方精选详情/拿下载链接克隆
     python scripts/static_page.py direct_finalize '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
-    python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
+    python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_xxx","target_page_id":"page_new","target_asset":{"name":"目标标的名","code":"目标代码"}}'
     python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"]}' # 快速批量验收 card artifact
 
 输出：结果打印到 stdout（UTF-8），并写一份到临时目录 sp_out.txt。
@@ -145,6 +138,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -152,12 +146,15 @@ import time
 import urllib.error
 import urllib.parse as _up
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 
 import compile_bespoke_page as CB
 import card_runtime_retrofit as CRT
 import common as C
+import fork_runtime_contract as FRC
 import progress_page as PP
+import reply_data_evidence as RDE
 import reply_template_registry as RTR
 
 _PATH = {
@@ -166,7 +163,6 @@ _PATH = {
     "download":  "/skill/getStaticPage",
     "list":      "/skill/listStaticPages",
     "revoke":    "/skill/revokeStaticPage",
-    "thumbnail": "/skill/setPageThumbnail",
     "image_upload": "/skill/uploadPageImage",
     "image_list": "/skill/listPageImages",
     "tags":      "/skill/listPageTags",
@@ -184,12 +180,15 @@ _DEFAULT_TIMEOUT = 60
 
 # 服务端限制：单页 ≤ 2MB（这里只做一次本地早检，真正以服务端为准）
 _MAX_HTML_BYTES = 2 * 1024 * 1024
-# 缩略图上限（与服务端 setPageThumbnail 一致，2MB）
-_MAX_THUMB_BYTES = 2 * 1024 * 1024
 _MAX_PAGE_IMAGE_BYTES = 5 * 1024 * 1024
 _SHARE_POSTER_VERSION = "snapshot-tall-v1"
 _SHARE_SHELL_VERSION = "copy-link-v1"
-_FORK_MANIFEST_VERSION = "fork_manifest_v1"
+_FORK_MANIFEST_VERSION_V1 = "fork_manifest_v1"
+_FORK_MANIFEST_VERSION = FRC.MANIFEST_VERSION
+_SUPPORTED_FORK_MANIFEST_VERSIONS = {
+    _FORK_MANIFEST_VERSION_V1,
+    _FORK_MANIFEST_VERSION,
+}
 _FORK_TASK_BINDING_VERSION = "fork_task_binding_v1"
 _FORK_PREFLIGHT_SENTINEL = object()
 _VIA_PUBLISH_WORKFLOW_SENTINEL = object()
@@ -287,6 +286,7 @@ def _delivery_policy():
         "channel": _FEISHU_GROUP_CHANNEL,
         "emit_intermediate_url": False,
         "terminal_url_format": "quantbuddy_playground",
+        "max_markdown_tables": 5,
     }
 
 
@@ -752,12 +752,16 @@ def _agent_reply_template_contract(record, *, operation=None):
             "Read template_file before writing the final answer.",
             "Use that Markdown template as the final answer shape; do not replace it with a generic publish summary.",
             "Use page_context to understand what this page does; for hybrid replies also follow hybrid_composition.",
+            "When reply_data_evidence_file is present, read that hash-bound evidence before drafting.",
             "Include public_url.",
-            "Use reply_data_availability to identify fields that actually exist in this delivery.",
-            "Delete structurally unavailable fields, all-missing columns, all-missing rows, and empty optional sections.",
+            "Use reply_data_availability to identify fields that actually exist in this delivery; every available template field must be rendered.",
+            "For single_stock_deep_dive_v1 keep all seven section headings; a section with no evidence must use its standard no-data sentence.",
+            "When delivery_policy.max_markdown_tables is present, keep the complete reply within that Markdown table limit and render overflow structures as lists or inline text.",
+            "Delete structurally unavailable rows and all-missing columns, but do not delete required section headings.",
             "Use -- only for an occasional missing value inside an otherwise valid structure.",
             "Never substitute turnover for capital flow or otherwise replace a missing metric with a different definition.",
             "Do not expose local file paths, api_key, signatures, or internal verification logs to the user.",
+            "After validator returns valid=true, send its validated_markdown verbatim without compression or rewriting.",
             ],
         })
     return contract
@@ -819,6 +823,19 @@ def _attach_agent_reply_contract(record, *, operation=None):
             "template_ref": contract.get("template_ref"),
             "template_file": contract.get("template_file"),
         })
+    return record
+
+
+def _attach_reply_data_contract(record, params):
+    if not isinstance(record, dict) or not isinstance(params, dict):
+        return record
+    contract = record.get("agent_reply_contract")
+    if not isinstance(contract, dict):
+        return record
+    for key in ("reply_data_evidence_file", "reply_data_evidence_sha256", "reply_data_availability"):
+        if params.get(key) not in (None, ""):
+            contract[key] = params[key]
+            record[key] = params[key]
     return record
 
 
@@ -1119,18 +1136,6 @@ def _read_html(params):
     return html, None
 
 
-def _thumbnail_file_from_params(params):
-    """Return optional thumbnail path from upload/update params."""
-    for key in ("thumbnail_file", "thumbnail_image", "thumbnail_path"):
-        value = params.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    value = params.get("thumbnail")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
 def _result_message(out):
     if not isinstance(out, dict):
         return str(out)
@@ -1150,33 +1155,6 @@ def _append_warning(out, warning):
         warnings = []
     warnings.append(warning)
     out["warnings"] = warnings
-
-
-def _attach_thumbnail_if_requested(out, params):
-    """Upload thumbnail after HTML publish succeeds; never fail the publish result."""
-    thumb_file = _thumbnail_file_from_params(params)
-    if not thumb_file or not isinstance(out, dict) or out.get("code") != 0:
-        return out
-    page_id = out.get("page_id") or params.get("page_id")
-    if not page_id:
-        out["thumbnail_warning"] = "HTML 已发布，但响应里缺少 page_id，无法设置缩略图"
-        _append_warning(out, {"type": "thumbnail_upload_skipped", "message": out["thumbnail_warning"]})
-        return out
-
-    thumb = cmd_thumbnail({"page_id": page_id, "image_file": thumb_file})
-    out["thumbnail_upload"] = thumb
-    if isinstance(thumb, dict) and thumb.get("code") == 0:
-        out["thumbnail_url"] = thumb.get("thumbnail_url") or out.get("thumbnail_url") or ""
-        return out
-
-    message = _result_message(thumb)
-    out["thumbnail_warning"] = f"HTML 已发布，但缩略图上传失败：{message}"
-    _append_warning(out, {
-        "type": "thumbnail_upload_failed",
-        "message": message,
-        "thumbnail_file": thumb_file,
-    })
-    return out
 
 
 def _has_shared_header(html):
@@ -1594,6 +1572,11 @@ def _template_grant_contract(record):
     return grants
 
 
+def _command_string(argv):
+    values = [str(value) for value in argv]
+    return subprocess.list2cmdline(values) if os.name == "nt" else shlex.join(values)
+
+
 def _fork_path(value, *, base=None):
     path = str(value or "").strip()
     if not path:
@@ -1609,23 +1592,28 @@ def _fork_task_id(params):
     return str(params.get("task_id") or context.get("task_id") or "").strip()
 
 
-def _fork_binding_root():
+def _fork_binding_root(task_id=None):
     override = str(os.environ.get("QBV_FORK_BINDING_DIR") or "").strip()
     if override:
         return os.path.abspath(override)
+    if str(task_id or "").strip():
+        return str(C.task_temp_dir(task_id, create=True))
     return os.path.join(C.SKILL_ROOT, "output", "fork_task_bindings")
 
 
 def _fork_binding_path(task_id):
+    root = _fork_binding_root(task_id)
+    if not os.environ.get("QBV_FORK_BINDING_DIR") and str(task_id or "").strip():
+        return os.path.join(root, "fork-task-binding.json")
     digest = hashlib.sha256(str(task_id or "").encode("utf-8")).hexdigest()
-    return os.path.join(_fork_binding_root(), digest + ".json")
+    return os.path.join(root, digest + ".json")
 
 
 def _write_fork_task_binding(binding):
     task_id = str((binding or {}).get("task_id") or "").strip()
     if not task_id:
         return None, {"code": 1, "message": "fork task binding 缺少 task_id"}
-    root = _fork_binding_root()
+    root = _fork_binding_root(task_id)
     path = _fork_binding_path(task_id)
     os.makedirs(root, exist_ok=True)
     fd, temp_path = tempfile.mkstemp(prefix=".fork-binding-", suffix=".json", dir=root)
@@ -1815,8 +1803,10 @@ def _validate_fork_manifest(params, template_resolution, final_html):
     manifest, manifest_file, error = _load_fork_manifest(params)
     if error:
         return None, error
-    if manifest.get("version") != _FORK_MANIFEST_VERSION:
-        return None, {"code": 1, "message": f"fork_manifest.version 必须是 {_FORK_MANIFEST_VERSION}"}
+    manifest_version = str(manifest.get("version") or "")
+    if manifest_version not in _SUPPORTED_FORK_MANIFEST_VERSIONS:
+        supported = "/".join(sorted(_SUPPORTED_FORK_MANIFEST_VERSIONS))
+        return None, {"code": 1, "message": f"fork_manifest.version 必须是 {supported}"}
     if str(manifest.get("source_template_id") or "") != source_template_id:
         return None, {"code": 1, "message": "fork_manifest 的 source_template_id 与 publish_final 不一致"}
 
@@ -1874,17 +1864,26 @@ def _validate_fork_manifest(params, template_resolution, final_html):
             actual_image_sha = hashlib.sha256(handle.read()).hexdigest()
         if actual_image_sha != expected_image_sha:
             return None, {"code": 1, "message": f"fork 来源托管图片 SHA256 校验失败: {image.get('source_asset_id') or index}"}
+    runtime_roles = manifest.get("runtime_roles") if manifest_version == _FORK_MANIFEST_VERSION else None
+    source_package_count = (
+        sum(isinstance(role, dict) and role.get("kind") == "package" for role in runtime_roles)
+        if isinstance(runtime_roles, list) else len(manifest_packages)
+    )
+    source_grant_count = (
+        sum(isinstance(role, dict) and role.get("kind") == "grant" for role in runtime_roles)
+        if isinstance(runtime_roles, list) else len(manifest_grants)
+    )
     try:
-        minimum_packages = int(manifest.get("minimum_target_package_count", len(manifest_packages)) or 0)
-        minimum_grants = int(manifest.get("minimum_target_grant_count", len(manifest_grants)) or 0)
+        minimum_packages = int(manifest.get("minimum_target_package_count", source_package_count) or 0)
+        minimum_grants = int(manifest.get("minimum_target_grant_count", source_grant_count) or 0)
     except (TypeError, ValueError):
         return None, {"code": 1, "message": "fork_manifest 的最低 package/grant 数量必须是非负整数"}
     if minimum_packages < 0 or minimum_grants < 0:
         return None, {"code": 1, "message": "fork_manifest 的最低 package/grant 数量必须是非负整数"}
     reduction_reason = str(manifest.get("credential_count_reduction_reason") or "").strip()
     if (
-        minimum_packages < len(manifest_packages)
-        or minimum_grants < len(manifest_grants)
+        minimum_packages < source_package_count
+        or minimum_grants < source_grant_count
     ) and not reduction_reason:
         return None, {
             "code": 1,
@@ -2118,7 +2117,6 @@ def cmd_upload(params):
                 force=bool(params.get("verify_packages")),
                 publish_out=out,
             )
-        out = _attach_thumbnail_if_requested(out, params)
         if out.get("code") == 0:
             _attach_agent_reply_contract(out, operation="upload")
     return out
@@ -2178,7 +2176,6 @@ def cmd_update(params):
                 force=bool(params.get("verify_packages")),
                 publish_out=out,
             )
-        out = _attach_thumbnail_if_requested(out, params)
         if out.get("code") == 0:
             _attach_agent_reply_contract(out, operation="update")
     return out
@@ -2330,13 +2327,389 @@ def _attach_progress_result(out, state, params=None):
     return out
 
 
+_ROUTING_CREDENTIAL_VERSION = "routing_credential_v1"
+_ROUTING_CREDENTIAL_FILE = "routing-credential.json"
+_ROUTING_DECISION_VERSION = "routing_decision_v1"
+_ROUTING_FORK_REASON_CODES = {
+    "same_paradigm_different_asset",
+    "same_paradigm_different_scope",
+    "user_requests_template_changes",
+}
+_ROUTING_UNMATCHED_REASON_CODES = {
+    "no_relevant_candidate",
+    "paradigm_mismatch",
+    "page_shape_mismatch",
+    "required_capability_missing",
+    "user_requires_bespoke",
+}
+
+
+def _routing_task_id(params):
+    """路由门禁用的 task_id：先看显式参数，再看 QBV_TASK_ID 环境变量
+    （Agent harness 跨进程传递 trace 的通道）。刻意不读进程内 ambient trace，
+    避免单测里残留的全局 task_id 误触门禁。"""
+    params = params if isinstance(params, dict) else {}
+    return str(params.get("task_id") or os.environ.get("QBV_TASK_ID", "") or "").strip()
+
+
+def _routing_credential_path(task_id, *, create_parent=False):
+    return str(C.task_temp_path(task_id, _ROUTING_CREDENTIAL_FILE, create_parent=create_parent))
+
+
+def _read_routing_credential(task_id):
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None, "", None
+    try:
+        path = _routing_credential_path(task_id)
+    except (OSError, ValueError) as exc:
+        return None, "", {"code": 1, "error": "ROUTING_CREDENTIAL_INVALID", "message": str(exc)}
+    if not os.path.isfile(path):
+        return None, path, None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            cred = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, path, {
+            "code": 1,
+            "error": "ROUTING_CREDENTIAL_INVALID",
+            "message": f"范式路由凭据读取失败：{exc}",
+        }
+    if not isinstance(cred, dict) or cred.get("version") != _ROUTING_CREDENTIAL_VERSION:
+        return None, path, {
+            "code": 1,
+            "error": "ROUTING_CREDENTIAL_INVALID",
+            "message": "范式路由凭据版本无效",
+        }
+    if str(cred.get("task_id") or "") != task_id:
+        return None, path, {
+            "code": 1,
+            "error": "ROUTING_CREDENTIAL_INVALID",
+            "message": "范式路由凭据不属于当前任务",
+        }
+    return cred, path, None
+
+
+def _write_routing_credential_record(cred):
+    task_id = str((cred or {}).get("task_id") or "").strip()
+    if not task_id:
+        return None, {"code": 1, "error": "ROUTING_CREDENTIAL_WRITE_FAILED", "message": "范式路由凭据缺少 task_id"}
+    try:
+        path = _routing_credential_path(task_id, create_parent=True)
+        payload = (json.dumps(cred, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        _atomic_write_bytes(path, payload)
+    except (OSError, ValueError) as exc:
+        return None, {
+            "code": 1,
+            "error": "ROUTING_CREDENTIAL_WRITE_FAILED",
+            "message": f"写入范式路由凭据失败：{exc}",
+        }
+    return path, None
+
+
+def _write_routing_credential(task_id, recommend_scope, item_count, templates_full_sha256):
+    """templates 成功后落盘一份范式路由凭据，供 new_page 门禁确认已查过完整范式池。
+    仅记录非凭证信息（scope/数量/sha），失败时静默跳过：凭据缺失本身会被门禁拦下。"""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return
+    cred = {
+        "version": _ROUTING_CREDENTIAL_VERSION,
+        "task_id": task_id,
+        "recommend_scope": str(recommend_scope or ""),
+        "item_count": int(item_count or 0),
+        "templates_full_sha256": str(templates_full_sha256 or ""),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_routing_credential_record(cred)
+
+
+def _routing_credential_error(params):
+    """new_page 前置门禁：确认当前任务已用 recommend="all" 查过范式卡。
+    无 task_id（legacy/单测/非任务流）时放行；否则要求凭据存在、属于本任务、scope=all。
+    返回 error dict 拦截，None 放行。"""
+    task_id = _routing_task_id(params)
+    if not task_id:
+        return None
+    cred, _, read_error = _read_routing_credential(task_id)
+    if read_error:
+        return {
+            "code": 1,
+            "error": "ROUTING_TEMPLATES_REQUIRED",
+            "message": read_error.get("message") or "范式路由凭据读取失败，请用当前 task_id 重新运行 templates(recommend=\"all\")。",
+            "task_id": task_id,
+        }
+    if not cred:
+        return {
+            "code": 1,
+            "error": "ROUTING_TEMPLATES_REQUIRED",
+            "message": "建页前必须先查范式卡 templates(recommend=\"all\") 判定 fork/自建，禁止先 new_page 后补查模板造成自建惯性。",
+            "task_id": task_id,
+        }
+    if str(cred.get("recommend_scope") or "") != "all":
+        return {
+            "code": 1,
+            "error": "ROUTING_TEMPLATES_REQUIRED",
+            "message": "只查了单一推荐池，请用 templates(recommend=\"all\") 合并官方精选+社区后再判定 fork/自建。",
+            "task_id": task_id,
+            "recommend_scope": str(cred.get("recommend_scope") or ""),
+        }
+    return None
+
+
+def _routing_candidates(task_id, cred):
+    try:
+        path = str(C.task_temp_path(task_id, "templates-full.json"))
+        with open(path, "rb") as handle:
+            payload = handle.read()
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        expected_sha256 = str((cred or {}).get("templates_full_sha256") or "").strip().lower()
+        if not expected_sha256 or actual_sha256 != expected_sha256:
+            raise ValueError("templates 完整候选 SHA256 与路由凭据不一致")
+        envelope = json.loads(payload.decode("utf-8-sig"))
+        if envelope.get("version") != _TEMPLATES_FULL_RESULT_VERSION:
+            raise ValueError("templates 完整候选版本无效")
+        if str(envelope.get("task_id") or "") != task_id:
+            raise ValueError("templates 完整候选不属于当前 task_id")
+        items = _extract_template_items(envelope.get("result") or {})
+        if items is None:
+            raise ValueError("templates 完整候选缺少 data.items")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, {
+            "code": 1,
+            "error": "ROUTING_CANDIDATES_INVALID",
+            "message": f"无法核验本次范式候选：{exc}",
+        }
+
+    index = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        hint = item.get("agent_reply_hint") if isinstance(item.get("agent_reply_hint"), dict) else {}
+        source_id = str(
+            hint.get("source_template_id")
+            or item.get("template_id")
+            or item.get("page_id")
+            or ""
+        ).strip()
+        if not source_id:
+            continue
+        candidate = {
+            "source_template_id": source_id,
+            "snapshot": _compact_template_item(item),
+        }
+        for alias in (source_id, item.get("template_id"), item.get("page_id")):
+            alias = str(alias or "").strip()
+            if alias:
+                index[alias] = candidate
+    return {"item_count": len(items), "sha256": actual_sha256, "index": index}, None
+
+
+def _routing_decision_required_error(task_id):
+    return {
+        "code": 1,
+        "error": "ROUTING_DECISION_REQUIRED",
+        "message": "templates 后调用 new_page 必须显式提交 routing_decision，说明本次选择 fork 还是 unmatched；语义由 Agent 判断，脚本负责校验候选与留痕。",
+        "task_id": task_id,
+        "examples": {
+            "fork": {
+                "mode": "fork",
+                "source_template_id": "page_xxx",
+                "reason_code": "same_paradigm_different_asset",
+            },
+            "unmatched": {
+                "mode": "unmatched",
+                "closest_template_id": "page_xxx",
+                "reason_code": "required_capability_missing",
+                "reason": "候选模板缺少用户要求的核心能力",
+            },
+        },
+    }
+
+
+def _validate_routing_decision(params):
+    task_id = _routing_task_id(params)
+    if not task_id:
+        return None, None
+    routing_error = _routing_credential_error(params)
+    if routing_error:
+        return None, routing_error
+    decision = params.get("routing_decision")
+    if not isinstance(decision, dict):
+        return None, _routing_decision_required_error(task_id)
+
+    cred, _, read_error = _read_routing_credential(task_id)
+    if read_error or not cred:
+        return None, read_error or _routing_decision_required_error(task_id)
+    if str(cred.get("page_id") or "").strip():
+        return None, {
+            "code": 1,
+            "error": "ROUTING_PAGE_ALREADY_CREATED",
+            "message": "当前 task_id 已经创建过首链，请复用已记录的 page_id，不要重复 new_page。",
+            "task_id": task_id,
+            "page_id": str(cred.get("page_id") or ""),
+        }
+    candidates, candidates_error = _routing_candidates(task_id, cred)
+    if candidates_error:
+        return None, candidates_error
+
+    mode = str(decision.get("mode") or "").strip().lower()
+    reason_code = str(decision.get("reason_code") or "").strip()
+    if mode == "direct":
+        return None, {
+            "code": 1,
+            "error": "ROUTING_DIRECT_MUST_NOT_CREATE_PAGE",
+            "message": "direct 命中不创建新页面，请使用 direct_deliver。",
+        }
+    if mode == "fork":
+        source_id = str(decision.get("source_template_id") or "").strip()
+        candidate = candidates["index"].get(source_id)
+        if not source_id:
+            return None, {"code": 1, "error": "ROUTING_SOURCE_TEMPLATE_REQUIRED", "message": "fork 必须提供 source_template_id"}
+        if not candidate:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_SOURCE_NOT_IN_CANDIDATES",
+                "message": "source_template_id 不属于本次 templates 候选",
+                "source_template_id": source_id,
+            }
+        if reason_code not in _ROUTING_FORK_REASON_CODES:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_FORK_REASON_INVALID",
+                "message": "fork 的 reason_code 不在允许范围",
+                "allowed_reason_codes": sorted(_ROUTING_FORK_REASON_CODES),
+            }
+        return {
+            "version": _ROUTING_DECISION_VERSION,
+            "mode": "fork",
+            "source_template_id": candidate["source_template_id"],
+            "reason_code": reason_code,
+            "candidate_snapshot": candidate["snapshot"],
+            "templates_full_sha256": candidates["sha256"],
+        }, None
+
+    if mode == "unmatched":
+        closest_id = str(decision.get("closest_template_id") or "").strip()
+        reason = str(decision.get("reason") or "").strip()
+        candidate = candidates["index"].get(closest_id) if closest_id else None
+        if candidates["item_count"] > 0 and not closest_id:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_CLOSEST_CANDIDATE_REQUIRED",
+                "message": "存在范式候选时，unmatched 必须指出最接近的 closest_template_id 并说明实质能力缺口。",
+            }
+        if closest_id and not candidate:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_CLOSEST_CANDIDATE_INVALID",
+                "message": "closest_template_id 不属于本次 templates 候选",
+                "closest_template_id": closest_id,
+            }
+        if reason_code in _ROUTING_FORK_REASON_CODES:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_SCOPE_DIFFERENCE_REQUIRES_FORK",
+                "message": "范式相同、仅标的或范围不同应选择 fork；如有实质能力缺口，请改用对应 unmatched reason_code 并说明原因。",
+                "suggested_mode": "fork",
+                "suggested_source_template_id": candidate["source_template_id"] if candidate else "",
+            }
+        if reason_code not in _ROUTING_UNMATCHED_REASON_CODES:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_UNMATCHED_REASON_INVALID",
+                "message": "unmatched 的 reason_code 不在允许范围",
+                "allowed_reason_codes": sorted(_ROUTING_UNMATCHED_REASON_CODES),
+            }
+        if candidates["item_count"] > 0 and not reason:
+            return None, {
+                "code": 1,
+                "error": "ROUTING_UNMATCHED_REASON_REQUIRED",
+                "message": "存在范式候选时，unmatched 必须说明最接近候选无法满足的核心要求。",
+            }
+        return {
+            "version": _ROUTING_DECISION_VERSION,
+            "mode": "unmatched",
+            "closest_template_id": candidate["source_template_id"] if candidate else "",
+            "reason_code": reason_code,
+            "reason": reason,
+            "candidate_snapshot": candidate["snapshot"] if candidate else None,
+            "templates_full_sha256": candidates["sha256"],
+        }, None
+
+    return None, {
+        "code": 1,
+        "error": "ROUTING_MODE_INVALID",
+        "message": "routing_decision.mode 只能是 fork 或 unmatched",
+    }
+
+
+def _record_routing_decision(params, decision, page_id):
+    task_id = _routing_task_id(params)
+    if not task_id or not decision:
+        return {"mode": "legacy_untracked", "recorded": False}, None
+    cred, _, read_error = _read_routing_credential(task_id)
+    if read_error or not cred:
+        return None, read_error or {
+            "code": 1,
+            "error": "ROUTING_CREDENTIAL_INVALID",
+            "message": "记录 routing_decision 时范式路由凭据丢失",
+        }
+    cred["routing_decision"] = decision
+    cred["page_id"] = str(page_id or "")
+    cred["decision_revision"] = int(cred.get("decision_revision") or 0) + 1
+    cred["decision_recorded_at"] = datetime.now(timezone.utc).isoformat()
+    cred["status"] = "page_created"
+    binding_file, write_error = _write_routing_credential_record(cred)
+    if write_error:
+        return None, write_error
+    return {
+        "mode": decision.get("mode"),
+        "source_template_id": decision.get("source_template_id") or "",
+        "closest_template_id": decision.get("closest_template_id") or "",
+        "reason_code": decision.get("reason_code") or "",
+        "recorded": True,
+        "revision": cred["decision_revision"],
+        "binding_file": binding_file,
+    }, None
+
+
+def _routing_next_step(task_id, page_id, decision):
+    if (decision or {}).get("mode") == "fork":
+        return {
+            "action": "fork_prepare",
+            "required_params": {
+                "task_id": task_id,
+                "source_template_id": decision.get("source_template_id") or "",
+                "target_page_id": str(page_id or ""),
+                "target_asset": "<当前目标标的>",
+            },
+        }
+    return {"action": "build_dashboard_or_bespoke", "publish_command": "publish_final"}
+
+
 def cmd_new_page(params):
+    params = dict(params or {})
+    routing_decision, routing_error = _validate_routing_decision(params)
+    if routing_error:
+        return routing_error
+    params.pop("routing_decision", None)
     validation_error = _validate_progress_params(params)
     if validation_error:
         return validation_error
     state, html = _progress_state_and_html(params)
     payload = _progress_publish_payload(params, html, require_page_id=False)
     out = cmd_upload(payload)
+    if not (isinstance(out, dict) and out.get("code") == 0):
+        return out
+    routing_binding, binding_error = _record_routing_decision(params, routing_decision, out.get("page_id"))
+    if binding_error:
+        binding_error["created_page_id"] = out.get("page_id") or ""
+        binding_error["created_url"] = _record_url(out)
+        return binding_error
+    if routing_decision:
+        out["routing_decision"] = routing_binding
+        out["next_step"] = _routing_next_step(_routing_task_id(params), out.get("page_id"), routing_decision)
     return _attach_progress_result(out, state, params)
 
 
@@ -2440,10 +2813,164 @@ def _publish_final_validation_error(params, update_out, template_resolution, fin
     return ""
 
 
+def _routing_publish_error(error, message, *, page_id="", **extra):
+    out = {
+        "code": 1,
+        "error": error,
+        "message": message,
+        "recoverable": True,
+    }
+    if page_id:
+        out["page_id"] = page_id
+    out.update(extra)
+    return out
+
+
+def _apply_routing_override(cred, override):
+    current = cred.get("routing_decision") if isinstance(cred.get("routing_decision"), dict) else {}
+    if not isinstance(override, dict):
+        return None, _routing_publish_error(
+            "ROUTING_RECONFIRM_REQUIRED",
+            "new_page 已记录为 fork，但当前任务没有 fork_prepare 绑定。请继续 fork，或用 routing_override 明确说明模板为何不适用后改判 unmatched。",
+            page_id=str(cred.get("page_id") or ""),
+            routing_decision=current,
+            allowed_actions=["fork_prepare", "publish_final_with_routing_override"],
+        )
+    from_mode = str(override.get("from_mode") or "").strip().lower()
+    to_mode = str(override.get("to_mode") or "").strip().lower()
+    reason_code = str(override.get("reason_code") or "").strip()
+    reason = str(override.get("reason") or "").strip()
+    if from_mode != "fork" or to_mode != "unmatched":
+        return None, _routing_publish_error(
+            "ROUTING_OVERRIDE_INVALID",
+            "routing_override 只允许把尚未 fork_prepare 的 fork 决定显式改判为 unmatched。",
+            page_id=str(cred.get("page_id") or ""),
+        )
+    if reason_code not in _ROUTING_UNMATCHED_REASON_CODES or not reason:
+        return None, _routing_publish_error(
+            "ROUTING_OVERRIDE_INVALID",
+            "routing_override 必须提供有效的 unmatched reason_code 和非空 reason。",
+            page_id=str(cred.get("page_id") or ""),
+            allowed_reason_codes=sorted(_ROUTING_UNMATCHED_REASON_CODES),
+        )
+    revised = {
+        "version": _ROUTING_DECISION_VERSION,
+        "mode": "unmatched",
+        "closest_template_id": current.get("source_template_id") or current.get("closest_template_id") or "",
+        "reason_code": reason_code,
+        "reason": reason,
+        "candidate_snapshot": current.get("candidate_snapshot"),
+        "templates_full_sha256": current.get("templates_full_sha256") or cred.get("templates_full_sha256") or "",
+        "overrode_prior_decision": True,
+    }
+    history = cred.get("routing_history") if isinstance(cred.get("routing_history"), list) else []
+    history.append({
+        "revision": int(cred.get("decision_revision") or 1),
+        "decision": current,
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+    })
+    cred["routing_history"] = history[-8:]
+    cred["routing_decision"] = revised
+    cred["decision_revision"] = int(cred.get("decision_revision") or 1) + 1
+    cred["decision_revised_at"] = datetime.now(timezone.utc).isoformat()
+    _, write_error = _write_routing_credential_record(cred)
+    if write_error:
+        return None, write_error
+    return revised, None
+
+
+def _check_publish_routing_consistency(params, fork_task_binding, routing_override=None):
+    task_id = _routing_task_id(params)
+    if not task_id:
+        return {"checked": False, "mode": "legacy_untracked"}, None
+    cred, _, read_error = _read_routing_credential(task_id)
+    if read_error:
+        return None, read_error
+    decision = cred.get("routing_decision") if isinstance((cred or {}).get("routing_decision"), dict) else None
+    if not cred or not decision:
+        # 兼容升级前已经创建的首链，以及不经 new_page 的旧发布调用。
+        return {"checked": False, "mode": "legacy_untracked"}, None
+
+    page_id = str(params.get("page_id") or "")
+    bound_page_id = str(cred.get("page_id") or "")
+    if bound_page_id and bound_page_id != page_id:
+        return None, _routing_publish_error(
+            "ROUTING_PAGE_CONFLICT",
+            "publish_final 的 page_id 与 new_page 路由记录不一致。",
+            page_id=page_id,
+            expected_page_id=bound_page_id,
+        )
+
+    fork_bound = isinstance(fork_task_binding, dict) and fork_task_binding.get("mode") == "task_binding"
+    decision_mode = str(decision.get("mode") or "").strip().lower()
+    if decision_mode == "fork":
+        if fork_bound:
+            expected_source = str(decision.get("source_template_id") or "")
+            actual_source = str(fork_task_binding.get("source_template_id") or "")
+            if expected_source and actual_source != expected_source:
+                return None, _routing_publish_error(
+                    "ROUTING_FORK_SOURCE_CONFLICT",
+                    "fork_prepare 绑定的来源模板与 new_page 路由决定不一致。",
+                    page_id=page_id,
+                    expected_source_template_id=expected_source,
+                    actual_source_template_id=actual_source,
+                )
+            if routing_override is not None:
+                return None, _routing_publish_error(
+                    "ROUTING_OVERRIDE_NOT_ALLOWED",
+                    "当前任务已经完成 fork_prepare 绑定，不能在 publish_final 阶段改判为 unmatched。",
+                    page_id=page_id,
+                )
+            return {
+                "checked": True,
+                "decision_mode": "fork",
+                "effective_mode": "fork",
+                "source_template_id": actual_source,
+                "decision_revision": int(cred.get("decision_revision") or 1),
+            }, None
+
+        revised, override_error = _apply_routing_override(cred, routing_override)
+        if override_error:
+            return None, override_error
+        return {
+            "checked": True,
+            "decision_mode": "fork",
+            "effective_mode": "unmatched",
+            "revised": True,
+            "reason_code": revised.get("reason_code") or "",
+            "decision_revision": int(cred.get("decision_revision") or 1),
+        }, None
+
+    if decision_mode == "unmatched":
+        if routing_override is not None:
+            return None, _routing_publish_error(
+                "ROUTING_OVERRIDE_NOT_APPLICABLE",
+                "当前路由已经是 unmatched，不需要 routing_override。",
+                page_id=page_id,
+            )
+        return {
+            "checked": True,
+            "decision_mode": "unmatched",
+            "effective_mode": "fork" if fork_bound else "unmatched",
+            "source_template_id": (
+                str(fork_task_binding.get("source_template_id") or "") if fork_bound else ""
+            ),
+            "decision_revision": int(cred.get("decision_revision") or 1),
+        }, None
+
+    return None, _routing_publish_error(
+        "ROUTING_DECISION_INVALID",
+        "路由记录中的 mode 无效，拒绝据此发布。",
+        page_id=page_id,
+    )
+
+
 def cmd_publish_final(params):
+    params = dict(params or {})
     if not params.get("page_id"):
         return {"code": 1, "message": "publish_final 需要 page_id（要发布到哪个活页链接）"}
 
+    routing_override = params.pop("routing_override", None)
     params, fork_task_binding, binding_error = _apply_fork_task_binding(params)
     if binding_error:
         binding_error.setdefault("page_id", params.get("page_id"))
@@ -2452,6 +2979,15 @@ def cmd_publish_final(params):
             "task_id": _fork_task_id(params),
         }
         return binding_error
+
+    routing_consistency, routing_error = _check_publish_routing_consistency(
+        params,
+        fork_task_binding,
+        routing_override=routing_override,
+    )
+    if routing_error:
+        routing_error.setdefault("page_id", params.get("page_id"))
+        return routing_error
 
     final_html, final_html_error = _read_html(params)
     if final_html_error:
@@ -2516,8 +3052,11 @@ def cmd_publish_final(params):
             update_out.pop("agent_reply_template_file", None)
         else:
             _attach_agent_reply_contract(update_out, operation="publish_final")
+            _attach_reply_data_contract(update_out, params)
             update_out["progress_update"] = progress_update
             update_out["agent_reply_template_resolution"] = template_resolution
+            if isinstance(routing_consistency, dict) and routing_consistency.get("checked"):
+                update_out["routing_consistency"] = routing_consistency
             if fork_manifest_resolution:
                 update_out["fork_manifest_validation"] = {
                     "ok": True,
@@ -2675,6 +3214,9 @@ def cmd_publish_verified(params):
                     )
                     _apply_delivery_policy(result_contract)
                 result["agent_reply_contract"] = result_contract
+                for key in ("reply_data_evidence_file", "reply_data_evidence_sha256", "reply_data_availability"):
+                    if result_contract.get(key) not in (None, ""):
+                        result[key] = result_contract[key]
             if stages["publish_final"].get("agent_reply_template_file"):
                 result["agent_reply_template_file"] = stages["publish_final"]["agent_reply_template_file"]
             if isinstance(result.get("agent_reply_contract"), dict):
@@ -2717,8 +3259,7 @@ def _atomic_write_bytes(path, data_bytes):
 
 def _publish_verified_cli_result(result, task_id):
     result = result if isinstance(result, dict) else {"code": 1, "message": str(result)}
-    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "unknown")).strip("._-") or "unknown"
-    report_file = os.path.join(tempfile.gettempdir(), f"qbv_{safe_task}_publish_verified_report.json")
+    report_file = str(C.task_temp_path(task_id, "publish-verified-report.json", create_parent=True))
     with open(report_file, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(result, handle, ensure_ascii=False, indent=2)
 
@@ -2737,6 +3278,8 @@ def _publish_verified_cli_result(result, task_id):
             "code", "published", "verified", "page_id", "public_url", "timing",
             "agent_reply_contract_file", "agent_reply_contract_sha256",
             "reply_draft_file", "reply_validation_params_file", "reply_validation_command",
+            "reply_validation_env",
+            "reply_data_evidence_file", "reply_data_evidence_sha256", "reply_data_availability",
             "agent_reply_template_file", "contract_artifact_error",
         )
         if result.get(key) is not None
@@ -2799,6 +3342,27 @@ def _fetch_public_bytes(url):
             return resp.read(), None
     except Exception as exc:
         return None, {"code": 1, "error": "PAGE_ASSET_NOT_AVAILABLE", "message": f"下载来源托管图片失败: {exc}", "url": url}
+
+
+def _upgrade_runtime_share_poster_contract(html):
+    source = str(html or "")
+    pattern = re.compile(r'<img\b(?=[^>]*\bid\s*=\s*["\']sharePosterImage["\'])[^>]*>', re.I)
+
+    repairs = 0
+
+    def replace(match):
+        nonlocal repairs
+        tag = match.group(0)
+        if re.search(r"\bdata-qb-runtime-src\b", tag, re.I):
+            return tag
+        self_closing = bool(re.search(r"/\s*>$", tag))
+        repairs += 1
+        body = re.sub(r"/?\s*>$", "", tag).rstrip()
+        closing = " />" if self_closing else ">"
+        return f"{body} data-qb-runtime-src{closing}"
+
+    upgraded = pattern.sub(replace, source, count=1)
+    return upgraded, repairs
 
 
 def _prepare_fork_managed_images(html, output_dir):
@@ -2911,7 +3475,6 @@ def cmd_download(params):
         "owner": meta.get("owner"),
         "title": meta.get("title"),
         "description": meta.get("description"),
-        "thumbnail_url": meta.get("thumbnail_url") or "",
         "url": meta.get("url"),
         "size": len(html.encode("utf-8")),
         "sha256": sha,
@@ -3150,7 +3713,7 @@ def cmd_revoke(params):
 
 
 def _http_multipart(url, api_key, fields, file_field, file_bytes, file_name, file_type):
-    """发一个 multipart/form-data POST（带文件的接口用，如缩略图上传）。
+    """发一个 multipart/form-data POST（带文件的接口用，如页面图片上传）。
 
     common.http_json 只发 JSON，无法带文件；这里手搓 multipart 包体，复用同一套
     无代理 opener / 版本渠道头 / 错误体兜底解析。
@@ -3182,30 +3745,6 @@ def _http_multipart(url, api_key, fields, file_field, file_bytes, file_name, fil
                     "error": {"message": getattr(e, "reason", str(e))}}
     except Exception as e:
         return {"code": 1, "success": False, "error": {"message": str(e)}}
-
-
-def cmd_thumbnail(params):
-    cfg = C.load_config_require_key()
-    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
-    if not params.get("page_id"):
-        return {"code": 1, "message": "thumbnail 需要 page_id（给哪个页面设置缩略图）"}
-    img_path = params.get("image_file") or params.get("image") or params.get("file")
-    if not img_path:
-        return {"code": 1, "message": "thumbnail 需要 image_file（本地图片路径，PNG/JPG）"}
-    if not os.path.isabs(img_path):
-        img_path = os.path.join(C.SKILL_ROOT, img_path)
-    if not os.path.exists(img_path):
-        return {"code": 1, "message": f"image_file 不存在: {img_path}"}
-    with open(img_path, "rb") as f:
-        img_bytes = f.read()
-    if len(img_bytes) > _MAX_THUMB_BYTES:
-        return {"code": 1, "message": f"缩略图体积 {len(img_bytes)} 字节，超过上限 2MB"}
-    ext = os.path.splitext(img_path)[1].lower()
-    content_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-    file_name = os.path.basename(img_path)
-    return _http_multipart(C.api_url(endpoint, _PATH["thumbnail"]), api_key,
-                           {"page_id": params["page_id"]},
-                           "file", img_bytes, file_name, content_type)
 
 
 def _resolve_local_image_file(params):
@@ -3380,7 +3919,7 @@ def _write_templates_full_result(task_id, normalized, item_count):
     }
     payload = json.dumps(envelope, ensure_ascii=False, indent=2).encode("utf-8")
     sha256 = hashlib.sha256(payload).hexdigest()
-    final_path = os.path.join(tempfile.gettempdir(), f"qbv_{safe_task}_templates_full.json")
+    final_path = str(C.task_temp_path(task_id, "templates-full.json", create_parent=True))
     _atomic_write_bytes(final_path, payload)
     return final_path, sha256, len(payload)
 
@@ -3462,6 +4001,16 @@ def cmd_templates(params):
             "error": "TEMPLATES_PERSIST_FAILED",
             "message": f"范式候选完整结果落盘失败：{exc}；未落盘前禁止继续路由判断，也不要把完整结果直接打印",
         }
+
+    # 落盘范式路由凭据，供 new_page 门禁确认已查过完整范式池。include_community 时 scope=all
+    # （官方精选+社区合并）；单池查询记为 official/community，new_page 会要求改用 recommend="all"。
+    if include_community:
+        recommend_scope = "all"
+    elif rec_norm == "社区":
+        recommend_scope = "community"
+    else:
+        recommend_scope = "official"
+    _write_routing_credential(task_id, recommend_scope, len(items), sha256)
 
     items_summary = [_compact_template_item(it) for it in items]
     data = normalized.get("data") or {}
@@ -3639,9 +4188,8 @@ def _direct_reply_data_availability(package_results, grant_results):
 
 
 def _write_direct_grant_result(task_id, grant_id, result):
-    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-") or "task"
     safe_grant = re.sub(r"[^0-9A-Za-z._-]+", "_", str(grant_id or "")).strip("._-") or "grant"
-    path = os.path.join(tempfile.gettempdir(), f"qbv_{safe_task}_grant_{safe_grant}.json")
+    path = str(C.task_temp_path(task_id, f"grant-{safe_grant}.json", create_parent=True))
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(_redact_direct_payload(result), handle, ensure_ascii=False, indent=2)
     return path
@@ -3654,10 +4202,10 @@ def _write_agent_reply_artifacts(task_id, finalized):
     if not safe_task or not isinstance(contract, dict) or contract.get("terminal") is not True:
         raise ValueError("direct_deliver 缺少可持久化的 terminal agent_reply_contract")
 
-    temp_root = tempfile.gettempdir()
-    contract_file = os.path.join(temp_root, f"qbv_{safe_task}_agent_contract.json")
-    draft_file = os.path.join(temp_root, f"qbv_{safe_task}_draft.md")
-    params_file = os.path.join(temp_root, f"qbv_{safe_task}_validate.json")
+    temp_root = C.task_temp_dir(task_id, create=True)
+    contract_file = str(temp_root / "agent-contract.json")
+    draft_file = str(temp_root / "reply-draft.md")
+    params_file = str(temp_root / "reply-validate.json")
     contract_bytes = json.dumps(contract, ensure_ascii=False, indent=2).encode("utf-8")
     contract_sha256 = hashlib.sha256(contract_bytes).hexdigest()
     with open(contract_file, "wb") as handle:
@@ -3671,12 +4219,20 @@ def _write_agent_reply_artifacts(task_id, finalized):
     }
     with open(params_file, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(validator_params, handle, ensure_ascii=False, indent=2)
+    # validator 是独立子进程，进程内的 api_key 覆盖不会跟过去；没有它就会兜底到 config.json 的默认
+    # 账号，终态埋点便记成了错的用户。这里显式把本次任务的 key 带出来，让调用方作为 env 传入。
+    # 只放 env、不拼进命令串：exec 日志里 env 会被脱敏，命令串是原样记录的，拼进去等于泄露凭证。
+    validation_env = {}
+    task_api_key = str(C.load_config().get("api_key") or "").strip()
+    if task_api_key:
+        validation_env["QBV_API_KEY"] = task_api_key
     return {
         "agent_reply_contract_file": contract_file,
         "agent_reply_contract_sha256": contract_sha256,
         "reply_draft_file": draft_file,
         "reply_validation_params_file": params_file,
-        "reply_validation_command": f'python scripts/validate_agent_reply.py "@{params_file}"',
+        "reply_validation_command": _command_string([sys.executable, os.path.join(C.SCRIPT_DIR, "validate_agent_reply.py"), f"@{params_file}"]),
+        "reply_validation_env": validation_env,
     }
 
 
@@ -3756,6 +4312,21 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
             "result_file": _write_direct_grant_result(task_id, grant_id, result),
         })
 
+    template_meta = record.get("agent_reply_template") if isinstance(record.get("agent_reply_template"), dict) else {}
+    template_ref = str(template_meta.get("template_ref") or "").strip()
+    reply_evidence_contract = {}
+    if RDE.get_policy(template_ref):
+        try:
+            reply_evidence_contract = RDE.build_direct(
+                task_id, template_ref, package_results, grant_query_results
+            ) or {}
+        except (OSError, ValueError, TypeError) as exc:
+            return _direct_failure("DIRECT_REPLY_EVIDENCE_FAILED", str(exc))
+        if not reply_evidence_contract.get("reply_data_evidence_file"):
+            return _direct_failure(
+                "DIRECT_REPLY_EVIDENCE_FAILED", "严格回复模板未生成证据产物"
+            )
+
     finalized = cmd_direct_finalize({
         "task_id": task_id,
         "page_id": page_id,
@@ -3767,10 +4338,16 @@ def _run_direct_deliver(task_id, page_id, expected_revision):
     out = dict(finalized)
     out["operation"] = "direct_finalize"
     out["orchestration"] = "direct_deliver"
-    availability = _direct_reply_data_availability(package_results, grant_query_results)
     contract = out.get("agent_reply_contract")
     if isinstance(contract, dict):
-        contract["reply_data_availability"] = availability
+        if reply_evidence_contract:
+            for key, value in reply_evidence_contract.items():
+                contract[key] = value
+                out[key] = value
+        else:
+            contract["reply_data_availability"] = _direct_reply_data_availability(
+                package_results, grant_query_results
+            )
     out["direct_data_evidence"] = {
         "package_results": package_results,
         "grant_results": grant_results,
@@ -3803,7 +4380,10 @@ def cmd_direct_deliver(params):
     try:
         return _run_direct_deliver(task_id, page_id, expected_revision)
     finally:
-        C.set_trace_context(previous_context.get("task_id"), previous_context.get("user_query"))
+        # configure_trace_context（不是 set_trace_context）：恢复原 task_id/user_query 时同样不能把
+        # 当前已生效的 api_key 覆盖清空——这次临时切换全程本就没改过它（上面的 configure_trace_context
+        # 调用同样没带 api_key，按同一条规则保留），这里用 set_trace_context 会在切回来的一刻把它冲掉。
+        C.configure_trace_context({"task_id": previous_context.get("task_id"), "user_query": previous_context.get("user_query")})
 
 
 def _exchange_for_code(code):
@@ -3815,7 +4395,288 @@ def _exchange_for_code(code):
     return "SZ"
 
 
-def _expand_asset_replacements(replacements):
+_TARGET_IDENTITY_RE = re.compile(
+    r"^\s*(?P<name>[^\s(（]*?)\s*[（(]?\s*"
+    r"(?:(?P<ex1>SH|SZ|BJ|HK)\s*[:：.．]?\s*)?"
+    r"(?P<num>\d{4,6})"
+    r"(?:\s*[.．]\s*(?P<ex2>SH|SZ|BJ))?"
+    r"\s*[）)]?\s*$",
+    re.I,
+)
+_US_TICKER_RE = re.compile(r"^\s*(?P<name>.*?)\s*[（(]?\s*(?P<code>[A-Z]{1,6}\.[NOA])\s*[）)]?\s*$", re.I)
+
+
+def _parse_target_asset(target_asset):
+    """把 Agent 传来的 target_asset 归一成 {name, code, exchange, raw}。
+
+    Agent 会用各种写法表达同一只股票：`"工业富联(SH:601138)"` / `"工业富联 SH601138"` /
+    `"601138.SH"` / `"工业富联"` / `{"name":...,"code":...}`。fork 的语义就是换标的，所以
+    这个参数本来就该驱动替换，而不是像以前那样只被记进 manifest。
+    """
+    name = code = exchange = ""
+    raw = ""
+    if isinstance(target_asset, dict):
+        raw = str(target_asset.get("raw") or "").strip()
+        name = str(target_asset.get("name") or target_asset.get("symbol") or "").strip()
+        code = str(target_asset.get("code") or target_asset.get("ticker") or "").strip()
+        if not (name or code) and raw:
+            return _parse_target_asset(raw)
+    elif target_asset is not None:
+        raw = str(target_asset).strip()
+        text = raw
+        match = _TARGET_IDENTITY_RE.match(text)
+        us_match = _US_TICKER_RE.match(text)
+        if match:
+            name = (match.group("name") or "").strip()
+            exchange = (match.group("ex1") or match.group("ex2") or "").strip().upper()
+            code = match.group("num")
+        elif us_match:
+            name = (us_match.group("name") or "").strip()
+            code = us_match.group("code").strip().upper()
+        else:
+            name = text
+    if code and not exchange:
+        head = re.match(r"^(SH|SZ|BJ|HK)", code, re.I)
+        tail = re.search(r"[.．](SH|SZ|BJ)$", code, re.I)
+        if head:
+            exchange = head.group(1).upper()
+        elif tail:
+            exchange = tail.group(1).upper()
+    digits = re.sub(r"\D", "", code)
+    if exchange and re.fullmatch(r"\d{4,6}", digits):
+        code = digits
+    return {"name": name, "code": code, "exchange": exchange, "raw": raw or name or code}
+
+
+def _assets_db_dir():
+    """同级 quant-buddy-skill 的资产库目录，口径与 qbs_bridge._qbs_root() 一致。"""
+    override = os.environ.get("QBS_SKILL_ROOT", "").strip()
+    root = override or os.path.join(os.path.dirname(C.SKILL_ROOT), "quant-buddy-skill")
+    return os.path.join(root, "presets", "assets_db")
+
+
+def _normalize_ticker(code):
+    """把 601138.SH / SH:601138 / sh601138 统一成 SH601138；美股 AAPL.O 保留点号原样。"""
+    text = str(code or "").strip().upper().replace("：", ":").replace("．", ".")
+    if re.fullmatch(r"[A-Z]{1,6}\.[NOA]", text):
+        return text
+    text = text.replace(":", "").replace(".", "").replace(" ", "")
+    match = re.fullmatch(r"(\d{4,6})(SH|SZ|BJ|HK)", text)
+    if match:
+        return match.group(2) + match.group(1)
+    return text
+
+
+def _lookup_asset_name_by_ticker(code):
+    """按代码反查资产名。查不到/资产库缺失一律返回 ""，绝不因此让 fork 失败。
+
+    只做 ticker→name 这一个方向：实测 10553 条 ticker 零冲突，而 name→ticker 有 195 条
+    跨市场同名（如「民生银行」同时是 SH600016 和 HK1988），反方向不可靠。
+    """
+    key = _normalize_ticker(code)
+    if not key:
+        return ""
+    candidates = [key]
+    if key.isdigit():
+        candidates = [prefix + key for prefix in ("SH", "SZ", "BJ", "HK")]
+    try:
+        directory = _assets_db_dir()
+        for filename in sorted(os.listdir(directory)):
+            if not filename.endswith((".yaml", ".yml")):
+                continue
+            with open(os.path.join(directory, filename), "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if "|" not in line:
+                        continue
+                    parts = [part.strip() for part in line.split("|")]
+                    if len(parts) >= 3 and parts[0] in ("stock", "index", "future") and parts[2] in candidates:
+                        return parts[1]
+    except OSError:
+        return ""
+    return ""
+
+
+def _code_variant_candidates(code, exchange=""):
+    """枚举同一个代码在页面里可能的书写形态（长度降序，供掩码扫描使用）。"""
+    digits = re.sub(r"\D", "", str(code or ""))
+    if not re.fullmatch(r"\d{6}", digits):
+        text = str(code or "").strip()
+        return [text] if text else []
+    market = (exchange or _exchange_for_code(digits)).upper()
+    variants = [
+        f"{market}{digits}", f"{market.lower()}{digits}",
+        f"{digits}.{market}", f"{digits}.{market.lower()}",
+        f"{market}:{digits}", f"{market}.{digits}",
+        digits,
+    ]
+    return sorted(_unique_strings(variants), key=len, reverse=True)
+
+
+def _source_code_variants_present(code, html, exchange=""):
+    """只返回**确实出现在来源 HTML 里**的代码写法，这样后续替换永远不会「找不到替换项」。
+
+    必须按长度降序 + 命中即掩码：裸 600900 是 SH600900 的子串，直接 count 会把同一处
+    重复统计成两处，进而把一个其实并不独立存在的写法当成必须替换项——这正是线上那次
+    「未在来源 HTML 找到替换项: 600900.SH」连撞三次的同类陷阱。
+    """
+    probe = str(html or "")
+    present = []
+    for candidate in _code_variant_candidates(code, exchange):
+        if candidate and probe.count(candidate):
+            present.append(candidate)
+            probe = probe.replace(candidate, "\x00" * len(candidate))
+    return present
+
+
+def _derive_source_asset_identity(record, source_html, hint=None):
+    """确定来源模板的主资产：Agent 显式指定优先，其次按公式标的词频自动推导。
+
+    Agent 优先是有意的——个股/指数/多资产范式语义差别太大，没法用一套代码统一判定主资产。
+    自动推导只在「词频唯一最高且该名字出现在标题里」时才认为可信，否则 fail-closed。
+    """
+    formulas = [
+        formula
+        for package in (record.get("packages") or [])
+        if isinstance(package, dict)
+        for formula in (package.get("formulas") or [])
+    ]
+    counter = Counter()
+    for formula in formulas:
+        counter.update(FRC.formula_asset_refs(formula))
+    title = str(record.get("title") or "")
+    description = str(record.get("description") or "")
+
+    codes = []
+    for grant in (record.get("grants") or []):
+        if not isinstance(grant, dict):
+            continue
+        payload = grant.get("payload")
+        if payload is None:
+            continue
+        for token in re.findall(r"(?:SH|SZ|BJ|HK)\d{4,6}|\d{6}\.(?:SH|SZ|BJ)|[A-Z]{1,6}\.[NOA]",
+                                json.dumps(payload, ensure_ascii=False), re.I):
+            codes.append(token)
+
+    hint_parsed = _parse_target_asset(hint) if hint else None
+    if hint_parsed and (hint_parsed.get("name") or hint_parsed.get("code")):
+        name = hint_parsed.get("name") or ""
+        code = hint_parsed.get("code") or (codes[0] if codes else "")
+        exchange = hint_parsed.get("exchange") or ""
+        if not name and code:
+            name = _lookup_asset_name_by_ticker(code)
+        peers = [token for token in counter if token != name]
+        return {
+            "name": name,
+            "code": code,
+            "exchange": exchange,
+            "peers": peers,
+            "confident": bool(name and name in source_html),
+            "reason": "agent_specified" if name and name in source_html else "agent_specified_name_absent_in_html",
+            "candidates": [token for token, _ in counter.most_common()],
+            "present_code_variants": _source_code_variants_present(code, source_html, exchange) if code else [],
+        }
+
+    ranked = counter.most_common()
+    top = [token for token, count in ranked if ranked and count == ranked[0][1]]
+    name = top[0] if len(top) == 1 else ""
+    if not ranked:
+        reason = "no_formula_asset_tokens"
+    elif len(top) > 1:
+        reason = "multiple_top_candidates"
+    elif name not in title and name not in description:
+        reason = "top_candidate_not_in_title"
+        name = ""
+    elif name not in source_html:
+        reason = "top_candidate_not_in_html"
+        name = ""
+    else:
+        reason = "derived_from_formulas"
+
+    code = ""
+    exchange = ""
+    for token in codes:
+        parsed = _parse_target_asset(token)
+        if _source_code_variants_present(parsed.get("code"), source_html, parsed.get("exchange")):
+            code, exchange = parsed.get("code"), parsed.get("exchange")
+            break
+    return {
+        "name": name,
+        "code": code,
+        "exchange": exchange,
+        "peers": [token for token, _ in ranked if token != name],
+        "confident": bool(name),
+        "reason": reason,
+        "candidates": [token for token, _ in ranked],
+        "present_code_variants": _source_code_variants_present(code, source_html, exchange) if code else [],
+    }
+
+
+def _derive_asset_replacements(identity, target, source_html):
+    """由「来源身份 + 目标身份」派生替换映射，只包含来源 HTML 里真实存在的写法。"""
+    derived = {}
+    if identity.get("name") and target.get("name") and identity["name"] != target["name"]:
+        derived[identity["name"]] = target["name"]
+    source_code = identity.get("code")
+    target_code = target.get("code")
+    if source_code and target_code:
+        target_market = (target.get("exchange") or "").upper()
+        source_digits = re.sub(r"\D", "", source_code)
+        target_digits = re.sub(r"\D", "", target_code)
+        if re.fullmatch(r"\d{6}", source_digits) and re.fullmatch(r"\d{6}", target_digits):
+            if not target_market:
+                target_market = _exchange_for_code(target_digits)
+            source_market = (identity.get("exchange") or _exchange_for_code(source_digits)).upper()
+            mapping = {
+                f"{source_market}{source_digits}": f"{target_market}{target_digits}",
+                f"{source_market.lower()}{source_digits}": f"{target_market.lower()}{target_digits}",
+                f"{source_digits}.{source_market}": f"{target_digits}.{target_market}",
+                f"{source_digits}.{source_market.lower()}": f"{target_digits}.{target_market.lower()}",
+                f"{source_market}:{source_digits}": f"{target_market}:{target_digits}",
+                f"{source_market}.{source_digits}": f"{target_market}.{target_digits}",
+                source_digits: target_digits,
+            }
+            for variant in _source_code_variants_present(source_code, source_html, identity.get("exchange")):
+                if variant in mapping:
+                    derived[variant] = mapping[variant]
+        elif source_code in source_html:
+            derived[source_code] = target_code
+    return derived
+
+
+def _fork_identity_error(error_code, message, identity, target, source_template_id):
+    """所有资产身份类失败都必须自带答案：把已探测到的来源身份和可照抄的正确调用一并返回。"""
+    example = {
+        "task_id": "task_xxx",
+        "source_template_id": source_template_id,
+        "target_page_id": "page_xxx",
+        "target_asset": {"name": target.get("name") or "目标资产名", "code": target.get("code") or "目标资产代码"},
+    }
+    if not identity.get("confident"):
+        example["source_asset"] = {
+            "name": (identity.get("candidates") or ["来源模板主资产名"])[0],
+            "code": identity.get("code") or "来源资产代码",
+        }
+    return {
+        "code": 1,
+        "error": error_code,
+        "message": message,
+        "detected_source_asset": {
+            "name": identity.get("name") or "",
+            "candidates": identity.get("candidates") or [],
+            "code": identity.get("code") or "",
+            "code_forms_in_source_html": identity.get("present_code_variants") or [],
+            "reason": identity.get("reason") or "",
+        },
+        "target_asset_parsed": {"name": target.get("name") or "", "code": target.get("code") or ""},
+        "example_params": example,
+    }
+
+
+def _expand_asset_replacements(replacements, html=""):
+    """自动补全代码大小写/交易所前后缀等常见变体。html 非空时，只补那些确实出现在来源 HTML 里的
+    变体——fork_prepare 随后会对每一项做「找不到就拒绝」的强校验，若在这里无脑补全一个来源 HTML
+    根本不含的变体（如模板只写 SH600900，却自动多补一个 600900.SH），会导致明明只是自动推测出的
+    变体、却把整次 fork_prepare 拖累到失败。不传 html（如单测）时保持旧的无条件补全行为。"""
     expanded = dict(replacements or {})
     for source, target in list(expanded.items()):
         source_code = str(source or "").strip()
@@ -3831,7 +4692,11 @@ def _expand_asset_replacements(replacements):
             f"{source_exchange}.{source_code}": f"{target_exchange}.{target_code}",
         }
         for variant, replacement in variants.items():
-            expanded.setdefault(variant, replacement)
+            if variant in expanded:
+                continue
+            if html and variant not in html:
+                continue
+            expanded[variant] = replacement
     return expanded
 
 
@@ -3844,6 +4709,12 @@ def cmd_fork_prepare(params):
     if not (isinstance(template_result, dict) and template_result.get("code") == 0):
         return template_result
     record = _template_record(template_result)
+
+    asset_replacements_param = params.get("asset_replacements") or {}
+    if not isinstance(asset_replacements_param, dict):
+        return {"code": 1, "message": "fork_prepare.asset_replacements 必须是对象"}
+    target_identity = _parse_target_asset(params.get("target_asset"))
+
     source_url = record.get("download_url") or record.get("public_url") or record.get("url") or ""
     if not source_url:
         return {"code": 1, "message": "来源范式没有 download_url/public_url，无法准备 fork"}
@@ -3853,25 +4724,97 @@ def cmd_fork_prepare(params):
         return error
     source_sha = hashlib.sha256(source_html.encode("utf-8")).hexdigest()
 
+    # 资产身份必须在拿到来源 HTML 之后才能定：只有此刻才知道代码在页面里究竟写成
+    # SH600900 还是 600900.SH 还是裸 600900。以前把这件事推给 Agent 去猜，是让它对着
+    # 一个自己从没见过、且流程明令禁止读取的文件做判断——线上因此连撞三次后退回自建。
+    if not target_identity.get("name") and target_identity.get("code"):
+        target_identity["name"] = _lookup_asset_name_by_ticker(target_identity["code"])
+    source_identity = _derive_source_asset_identity(record, source_html, hint=params.get("source_asset"))
+
+    derived_replacements = {}
+    # 同标的改版判定：推导出的主资产同名，或目标资产名本就出现在来源标题/描述里
+    # （后者覆盖「模板没有 packages、推导不出主资产」的纯静态改版）。
+    source_title = str(record.get("title") or "") + " " + str(record.get("description") or "")
+    same_asset = bool(
+        target_identity.get("name")
+        and (
+            source_identity.get("name") == target_identity["name"]
+            or target_identity["name"] in source_title
+        )
+    )
+    if same_asset or not (target_identity.get("name") or target_identity.get("code")):
+        pass  # 同标的改版 / 未声明目标资产的纯静态改造：不做资产替换
+    elif not source_identity.get("confident"):
+        if not asset_replacements_param:
+            return _fork_identity_error(
+                "FORK_SOURCE_ASSET_AMBIGUOUS",
+                "无法唯一确定来源模板的主资产（多资产/指数类范式常见）。"
+                "请显式传 source_asset 指明来源模板的主资产，或直接传 asset_replacements。"
+                "detected_source_asset 里已给出探测到的候选资产名与来源 HTML 中真实存在的代码写法。",
+                source_identity, target_identity, str(source_template_id),
+            )
+    elif not target_identity.get("name"):
+        return _fork_identity_error(
+            "TARGET_ASSET_NAME_REQUIRED",
+            f"来源模板主资产是「{source_identity.get('name')}」，但 target_asset 只给了代码、"
+            "资产库也没反查到对应名称，无法替换页面标题与正文文案。"
+            "请按 example_params 传 target_asset:{\"name\":...,\"code\":...}。",
+            source_identity, target_identity, str(source_template_id),
+        )
+    else:
+        derived_replacements = _derive_asset_replacements(source_identity, target_identity, source_html)
+
     safe_id = re.sub(r"[^0-9A-Za-z._-]+", "_", str(source_template_id)).strip("._-") or "source"
-    output_dir = _fork_path(params.get("output_dir") or os.path.join("output", "forks", safe_id))
+    task_id = _fork_task_id(params)
+    default_output_dir = (
+        str(C.task_temp_dir(task_id, create=True)) if task_id
+        else os.path.join("output", "forks", safe_id)
+    )
+    output_dir = _fork_path(params.get("output_dir") or default_output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    html_file = _fork_path(params.get("html_file") or f"{safe_id}.source.html", base=output_dir)
+    source_html_file = _fork_path(params.get("html_file") or f"{safe_id}.source.html", base=output_dir)
     working_html_file = _fork_path(params.get("working_html_file") or f"{safe_id}.fork.html", base=output_dir)
-    manifest_file = _fork_path(params.get("manifest_file") or f"{safe_id}.fork-manifest.json", base=output_dir)
-    os.makedirs(os.path.dirname(html_file) or output_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(working_html_file) or output_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(manifest_file) or output_dir, exist_ok=True)
-    with open(html_file, "w", encoding="utf-8", newline="\n") as handle:
+    manifest_file = _fork_path(params.get("manifest_file") or f"{safe_id}.fork-manifest-v2.json", base=output_dir)
+    review_file = _fork_path(params.get("review_file") or f"{safe_id}.fork-review.json", base=output_dir)
+    publish_plan_file = _fork_path(params.get("publish_plan_file") or f"{safe_id}.publish-plan.json", base=output_dir)
+    prepared_html_file = _fork_path(params.get("prepared_html_file") or f"{safe_id}.published.html", base=output_dir)
+    review_update_params_file = _fork_path(params.get("review_update_params_file") or f"{safe_id}.fork-review-update.json", base=output_dir)
+    review_receipt_file = _fork_path(params.get("review_receipt_file") or f"{safe_id}.fork-review-receipt.json", base=output_dir)
+    for path in (source_html_file, working_html_file, manifest_file, review_file, publish_plan_file, prepared_html_file, review_update_params_file, review_receipt_file):
+        os.makedirs(os.path.dirname(path) or output_dir, exist_ok=True)
+    with open(source_html_file, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(source_html)
 
-    replacements = params.get("asset_replacements") or {}
-    if not isinstance(replacements, dict):
-        return {"code": 1, "message": "fork_prepare.asset_replacements 必须是对象"}
-    replacements = _expand_asset_replacements(replacements)
-    working_html, source_managed_images, image_error = _prepare_fork_managed_images(source_html, output_dir)
+    # 派生映射打底，Agent 显式传的 asset_replacements 覆盖同名 key（向后兼容 + 额外文案替换）。
+    replacements = dict(derived_replacements)
+    replacements.update(_expand_asset_replacements(asset_replacements_param, source_html))
+    fork_source_html, runtime_share_poster_contract_repairs = _upgrade_runtime_share_poster_contract(source_html)
+    image_marker_html, source_managed_images, image_error = _prepare_fork_managed_images(fork_source_html, output_dir)
     if image_error:
         return image_error
+    try:
+        runtime = FRC.build_runtime_artifacts(
+            image_marker_html,
+            record,
+            replacements=replacements,
+            primary_sources=(
+                list(_unique_strings(params.get("source_markers")))
+                + list(replacements.keys())
+                + [token for token in [source_identity.get("name")] + list(source_identity.get("present_code_variants") or []) if token]
+            ),
+        )
+    except FRC.ForkRuntimeError as exc:
+        return exc.as_dict()
+
+    source_signature_hashes = _signature_hashes(source_html)
+    if set(source_signature_hashes) != set(runtime.get("source_signature_sha256") or []):
+        return {
+            "code": 1,
+            "error": "SOURCE_CREDENTIAL_UNPAIRED",
+            "message": "来源 HTML 存在未被 package/grant 合同配对的 signature",
+        }
+
+    working_html = runtime["working_html"]
     replacement_audit = []
     for source_value, target_value in sorted(replacements.items(), key=lambda item: len(str(item[0])), reverse=True):
         source_text = str(source_value or "")
@@ -3883,41 +4826,43 @@ def cmd_fork_prepare(params):
             return {"code": 1, "message": f"fork_prepare 未在来源 HTML 找到替换项: {source_text}"}
         working_html = working_html.replace(source_text, target_text)
         replacement_audit.append({"source": source_text, "target": target_text, "count": count})
+
+    # 建页时就把关，而不是等发布成功后再回头比对：一旦主资产还有残留，这里直接失败。
+    # 同业资产不在检查范围内——它们本来就该留到 review 阶段由 target_slots 决策替换。
+    if not same_asset and source_identity.get("name") and derived_replacements:
+        residual = [
+            token for token in [source_identity["name"]] + list(source_identity.get("present_code_variants") or [])
+            if token and token in working_html
+        ]
+        if residual:
+            return {
+                "code": 1,
+                "error": "FORK_SOURCE_ASSET_RESIDUAL",
+                "message": (
+                    f"替换后来源资产「{source_identity['name']}」仍残留在页面中："
+                    f"{residual}。已在写出工作 HTML 前中止，避免发布后才发现残留模板文案。"
+                ),
+                "residual_tokens": residual,
+                "replacement_audit": replacement_audit,
+            }
+
     with open(working_html_file, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(working_html)
 
     context = record.get("page_context") if isinstance(record.get("page_context"), dict) else {}
-    source_packages = _unique_strings(
-        list(_unique_strings(record.get("package_ids")))
-        + [item["package_id"] for item in _extract_package_credentials(source_html)]
-    )
-    source_grants = _unique_strings(
-        list(_unique_strings(record.get("grant_ids")))
-        + [item["grant_id"] for item in _extract_grant_credentials(source_html)]
-    )
-    source_signature_hashes = _signature_hashes(source_html)
+    active_packages = [role for role in runtime["runtime_roles"] if role.get("kind") == "package"]
+    active_grants = [role for role in runtime["runtime_roles"] if role.get("kind") == "grant"]
+    source_packages = _unique_strings(list(_unique_strings(record.get("package_ids"))) + runtime["source_package_ids"])
+    source_grants = _unique_strings(list(_unique_strings(record.get("grant_ids"))) + runtime["source_grant_ids"])
     source_h2 = [heading for heading in _html_headings(source_html, levels=(2,)) if heading not in ("分享海报",)]
     required_sections = _unique_strings(params.get("required_sections") or source_h2)
-    required_outputs = _unique_strings(params.get("required_outputs") or _template_required_outputs(record))
+    runtime_required_outputs = [
+        output for role in runtime["runtime_roles"]
+        for output in role.get("required_outputs") or []
+    ]
+    required_outputs = _unique_strings(params.get("required_outputs") or list(_unique_strings(record.get("card_required_outputs"))) + runtime_required_outputs)
     image_markers = [item["marker"] for item in source_managed_images]
     source_markers = _unique_strings(list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()) + image_markers)
-    formula_contract_packages = _template_formula_contract(
-        record,
-        primary_markers=list(_unique_strings(params.get("source_markers"))) + list(replacements.keys()),
-    )
-    grant_contracts = _template_grant_contract(record)
-    cross_asset_formula_refs = [
-        {"package_id": p["package_id"], "asset_refs": _unique_strings(
-            ref for item in p["other_asset_formulas"] for ref in item["asset_refs"]
-        )}
-        for p in formula_contract_packages if p["other_asset_formulas"]
-    ]
-    cross_asset_formula_warning = (
-        "以下公式包里存在引用了非主资产标的的公式（例如同业对比、行业分组），"
-        "不能直接照抄替换成目标资产：先判断目标资产自己的同业/行业范围，"
-        "拿不准就在 source_runtime_contract 里对照原公式逐条改写，或向用户确认同业/行业池后再注册。"
-        if cross_asset_formula_refs else ""
-    )
     card_runtime_required = bool(
         params.get("card_runtime_required")
         if "card_runtime_required" in params
@@ -3925,29 +4870,30 @@ def cmd_fork_prepare(params):
         or all(token in source_html for token in ("data-qb-card-template", "data-qb-card-manifest", "data-qb-card-runtime"))
     )
     try:
-        minimum_target_package_count = int(params.get("minimum_target_package_count", len(source_packages)))
-        minimum_target_grant_count = int(params.get("minimum_target_grant_count", len(source_grants)))
+        minimum_target_package_count = int(params.get("minimum_target_package_count", len(active_packages)))
+        minimum_target_grant_count = int(params.get("minimum_target_grant_count", len(active_grants)))
     except (TypeError, ValueError):
         return {"code": 1, "message": "fork_prepare 的 minimum_target_package_count/minimum_target_grant_count 必须是非负整数"}
     if minimum_target_package_count < 0 or minimum_target_grant_count < 0:
         return {"code": 1, "message": "fork_prepare 的 minimum_target_package_count/minimum_target_grant_count 必须是非负整数"}
     reduction_reason = str(params.get("credential_count_reduction_reason") or "").strip()
-    if (
-        minimum_target_package_count < len(source_packages)
-        or minimum_target_grant_count < len(source_grants)
-    ) and not reduction_reason:
-        return {
-            "code": 1,
-            "message": "fork_prepare 下调最低凭证数量时必须提供 credential_count_reduction_reason",
-        }
+    if (minimum_target_package_count < len(active_packages) or minimum_target_grant_count < len(active_grants)) and not reduction_reason:
+        return {"code": 1, "message": "fork_prepare 下调最低凭证数量时必须提供 credential_count_reduction_reason"}
 
+    trace = C.current_trace_context()
+    user_query = str(params.get("user_query") or trace.get("user_query") or "").strip()
+    target_page_id = str(params.get("target_page_id") or "").strip()
     manifest = {
         "version": _FORK_MANIFEST_VERSION,
         "prepared_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "source_template_id": str(record.get("template_id") or record.get("page_id") or source_template_id),
         "source_url": source_url,
-        "source_html_file": html_file,
+        "source_html_file": source_html_file,
         "working_html_file": working_html_file,
+        "review_file": review_file,
+        "publish_plan_file": publish_plan_file,
+        "prepared_html_file": prepared_html_file,
+        "runtime_share_poster_contract_repairs": runtime_share_poster_contract_repairs,
         "source_html_sha256": source_sha,
         "source_package_ids": source_packages,
         "source_grant_ids": source_grants,
@@ -3961,61 +4907,225 @@ def cmd_fork_prepare(params):
         "source_headings": _html_headings(source_html),
         "source_markers": source_markers,
         "replacement_audit": replacement_audit,
-        "target_asset": str(params.get("target_asset") or ""),
+        # target_asset 保持字符串：_bind_fork_task 会 str() 它，传 dict 会被错误 stringify。
+        "target_asset": str(target_identity.get("raw") or params.get("target_asset") or ""),
+        "target_asset_identity": target_identity,
+        "source_asset_identity": source_identity,
         "card_runtime_required": card_runtime_required,
         "agent_reply_template": record.get("agent_reply_template"),
         "page_context_reference": context or None,
         "source_managed_images": source_managed_images,
-        "source_runtime_contract": {
-            "packages": formula_contract_packages,
-            "grants": grant_contracts,
-        },
-        "cross_asset_formula_refs": cross_asset_formula_refs,
-        "cross_asset_formula_warning": cross_asset_formula_warning,
+        "runtime_roles": runtime["runtime_roles"],
+        "contract_fingerprint": FRC.contract_fingerprint([
+            {"role_id": role["role_id"], "fingerprint": role["contract_fingerprint"]}
+            for role in runtime["runtime_roles"]
+        ]),
     }
-    with open(manifest_file, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(manifest, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+    review = runtime["review"]
+    review_bytes = (json.dumps(review, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    review_base_sha256 = hashlib.sha256(review_bytes).hexdigest()
+    manifest["review_base_sha256"] = review_base_sha256
+    publish_verified = {
+        "page_id": target_page_id,
+        "source_template_id": manifest["source_template_id"],
+        "fork_manifest_file": manifest_file,
+        "title": params.get("title") or record.get("title"),
+        "page_context": params.get("page_context") if isinstance(params.get("page_context"), dict) else None,
+        "agent_reply_template": record.get("agent_reply_template"),
+        "require_agent_reply_template": True,
+    }
+    publish_plan = FRC.build_publish_plan(
+        task_id=task_id,
+        user_query=user_query,
+        manifest_file=manifest_file,
+        review_file=review_file,
+        working_html_file=working_html_file,
+        prepared_html_file=prepared_html_file,
+        target_page_id=target_page_id,
+        images=source_managed_images,
+        publish_verified=publish_verified,
+    )
+    for path, payload in ((manifest_file, manifest), (publish_plan_file, publish_plan)):
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+    _atomic_write_bytes(review_file, review_bytes)
+    review_update_params = {
+        "task_id": task_id,
+        "target_page_id": target_page_id,
+        "source_template_id": manifest["source_template_id"],
+        "manifest_file": manifest_file,
+        "review_file": review_file,
+        "working_html_file": working_html_file,
+        "publish_plan_file": publish_plan_file,
+        "review_update_params_file": review_update_params_file,
+        "review_receipt_file": review_receipt_file,
+        "review_base_sha256": review_base_sha256,
+        "decisions": FRC.build_decisions_skeleton(review),
+    }
+    _atomic_write_bytes(review_update_params_file, (json.dumps(review_update_params, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    review_state = FRC.review_state(manifest, review, working_html)
+    review_state["review_base_sha256"] = review_base_sha256
 
     fork_task_binding, binding_error = _bind_fork_task(params, manifest, manifest_file)
     if binding_error:
-        binding_error.update({
-            "source_template_id": manifest["source_template_id"],
-            "manifest_file": manifest_file,
-        })
+        binding_error.update({"source_template_id": manifest["source_template_id"], "manifest_file": manifest_file})
         return binding_error
 
     out = {
         "code": 0,
+        "manifest_version": manifest["version"],
+        "task_temp_dir": output_dir,
         "source_template_id": manifest["source_template_id"],
-        "source_url": source_url,
-        "html_file": html_file,
         "working_html_file": working_html_file,
         "manifest_file": manifest_file,
-        "source_html_sha256": source_sha,
-        "source_package_ids": source_packages,
-        "source_grant_ids": source_grants,
+        "review_file": review_file,
+        "review_state": review_state,
+        "review_update_params_file": review_update_params_file,
+        "review_update_command": _command_string([sys.executable, os.path.abspath(__file__), "fork_review_update", f"@{review_update_params_file}"]),
+        "review_receipt_file": review_receipt_file,
+        "publish_plan_file": publish_plan_file,
+        "prepared_html_file": prepared_html_file,
         "required_sections": required_sections,
         "required_outputs": required_outputs,
+        "runtime_role_count": len(runtime["runtime_roles"]),
+        "package_role_count": len(active_packages),
+        "grant_role_count": len(active_grants),
         "card_runtime_required": card_runtime_required,
         "replacement_audit": replacement_audit,
         "images": source_managed_images,
         "page_context": context or None,
         "agent_reply_template": record.get("agent_reply_template"),
         "fork_task_binding": fork_task_binding,
-        "source_runtime_contract": manifest["source_runtime_contract"],
-        "cross_asset_formula_refs": cross_asset_formula_refs,
-        "cross_asset_formula_warning": cross_asset_formula_warning,
-        "next_step": (
-            "先读 source_runtime_contract.packages[].formulas：这是模板当初注册的公式原文，"
-            "照着它的写法把资产替换成目标资产改写新公式，不要凭 required_outputs 的变量名反推语法。"
-            "cross_asset_formula_refs 非空时，对应公式引用了非主资产标的（同业/行业对比一类），"
-            "必须先判断目标资产自己的同业/行业范围再改写，不能把原资产的同业列表直接照抄。"
-            "改完先用 quant-buddy-skill 的 runMultiFormulaBatchStream 验证出数，再注册自己的 package/grant 并替换 working_html_file 里的凭证；"
-            "同 task 的 publish_final 会自动恢复绑定，仍应显式传 source_template_id 与 fork_manifest_file"
-        ),
+        "publish_command": _command_string([sys.executable, os.path.join(C.SCRIPT_DIR, "publish_workflow.py"), f"@{publish_plan_file}"]),
+        "next_step": "review_update_params_file.decisions 已按角色预生成嵌套占位骨架，只需要在骨架里补全空值；不要新增/改写顶层字段，也不要照抄 required_decisions 里的 decision_id 当 key。填完后运行 review_update_command；收到 complete receipt 后运行 publish_command。不要直接编辑 HTML/review 或创建辅助脚本。",
     }
     return _attach_agent_reply_hint(out, resource_role="source_template")
+
+
+def _read_json_object(path, label):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        raise ValueError(f"读取 {label} 失败: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} 必须是 JSON 对象")
+    return payload
+
+
+def cmd_fork_review_update(params):
+    task_id = _fork_task_id(params)
+    if not task_id:
+        return {"code": 1, "error": "QBV_TRACE_CONTEXT_REQUIRED", "message": "fork_review_update 需要 task_id"}
+    required_paths = {
+        "manifest_file": params.get("manifest_file"),
+        "review_file": params.get("review_file"),
+        "working_html_file": params.get("working_html_file"),
+        "publish_plan_file": params.get("publish_plan_file"),
+        "review_receipt_file": params.get("review_receipt_file"),
+    }
+    if any(not str(value or "").strip() for value in required_paths.values()):
+        return {
+            "code": 1,
+            "error": "FORK_REVIEW_FILES_REQUIRED",
+            "message": "fork_review_update 缺少生成的 manifest/review/html/plan/receipt 路径",
+        }
+    paths = {key: os.path.abspath(str(value)) for key, value in required_paths.items()}
+    try:
+        manifest = _read_json_object(paths["manifest_file"], "manifest_file")
+        review = _read_json_object(paths["review_file"], "review_file")
+        plan = _read_json_object(paths["publish_plan_file"], "publish_plan_file")
+        if plan.get("version") != FRC.PLAN_VERSION:
+            raise ValueError(f"publish plan.version 必须是 {FRC.PLAN_VERSION}")
+        expected_plan_paths = {
+            "fork_manifest_file": paths["manifest_file"],
+            "fork_review_file": paths["review_file"],
+            "html_template_file": paths["working_html_file"],
+        }
+        for key, expected in expected_plan_paths.items():
+            if os.path.abspath(str(plan.get(key) or "")) != expected:
+                raise ValueError(f"publish plan.{key} 与 fork_prepare 产物不一致")
+        with open(paths["working_html_file"], "r", encoding="utf-8") as handle:
+            working_html = handle.read()
+        with open(paths["review_file"], "rb") as handle:
+            current_review_sha256 = hashlib.sha256(handle.read()).hexdigest()
+        expected_review_sha256 = str(params.get("review_base_sha256") or "").strip()
+        if not expected_review_sha256 or current_review_sha256 != expected_review_sha256:
+            return {
+                "code": 1,
+                "error": "FORK_REVIEW_STALE",
+                "message": "review 文件已脱离 fork_prepare/review_update 基线，请重新运行 fork_prepare",
+            }
+        updated = FRC.apply_review_decisions(review, params.get("decisions") or {})
+        updated_bytes = (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        updated_sha256 = hashlib.sha256(updated_bytes).hexdigest()
+        state = FRC.review_state(manifest, updated, working_html)
+        _atomic_write_bytes(paths["review_file"], updated_bytes)
+        params["review_base_sha256"] = updated_sha256
+        params["decisions"] = FRC.build_decisions_skeleton(updated)
+        update_params_file = str(params.get("review_update_params_file") or "")
+        if update_params_file:
+            _atomic_write_bytes(
+                update_params_file,
+                (json.dumps(params, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            )
+        if state["status"] != "complete":
+            plan["review_receipt_file"] = ""
+            plan["review_receipt_sha256"] = ""
+            _atomic_write_bytes(
+                paths["publish_plan_file"],
+                (json.dumps(plan, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            )
+            try:
+                os.unlink(paths["review_receipt_file"])
+            except OSError:
+                pass
+            return {
+                "code": 0,
+                "review_state": {**state, "review_base_sha256": updated_sha256},
+                "receipt_created": False,
+                "review_update_params_file": update_params_file,
+            }
+        with open(paths["manifest_file"], "rb") as handle:
+            manifest_sha256 = hashlib.sha256(handle.read()).hexdigest()
+        with open(paths["working_html_file"], "rb") as handle:
+            html_sha256 = hashlib.sha256(handle.read()).hexdigest()
+        page_id = str(params.get("target_page_id") or (plan.get("publish_verified") or {}).get("page_id") or "")
+        receipt = FRC.build_review_receipt(
+            task_id=task_id,
+            page_id=page_id,
+            source_template_id=params.get("source_template_id") or manifest.get("source_template_id"),
+            manifest_sha256=manifest_sha256,
+            review_sha256=updated_sha256,
+            working_html_sha256=html_sha256,
+            review_base_sha256=str(manifest.get("review_base_sha256") or ""),
+            resolved_contract_sha256=state["resolved_contract_sha256"],
+        )
+        receipt_bytes = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        _atomic_write_bytes(paths["review_receipt_file"], receipt_bytes)
+        plan["review_receipt_file"] = paths["review_receipt_file"]
+        plan["review_receipt_sha256"] = receipt_sha256
+        _atomic_write_bytes(
+            paths["publish_plan_file"],
+            (json.dumps(plan, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        )
+        return {
+            "code": 0,
+            "review_state": {**state, "review_base_sha256": updated_sha256},
+            "review_receipt_file": paths["review_receipt_file"],
+            "review_receipt_sha256": receipt_sha256,
+            "publish_plan_file": paths["publish_plan_file"],
+            "publish_command": _command_string([
+                sys.executable, os.path.join(C.SCRIPT_DIR, "publish_workflow.py"),
+                f"@{paths['publish_plan_file']}",
+            ]),
+        }
+    except (OSError, ValueError, json.JSONDecodeError, FRC.ForkRuntimeError) as exc:
+        if isinstance(exc, FRC.ForkRuntimeError):
+            return exc.as_dict()
+        return {"code": 1, "error": "FORK_REVIEW_UPDATE_FAILED", "message": str(exc)}
 
 
 def _expected_template_metadata(params):
@@ -4538,7 +5648,6 @@ _COMMANDS = {
     "list": cmd_list,
     "init_reply_metadata": cmd_init_reply_metadata,
     "revoke": cmd_revoke,
-    "thumbnail": cmd_thumbnail,
     "image_upload": cmd_image_upload,
     "image_list": cmd_image_list,
     "tags": cmd_tags,
@@ -4550,6 +5659,7 @@ _COMMANDS = {
     "direct_deliver": cmd_direct_deliver,
     "direct_finalize": cmd_direct_finalize,
     "fork_prepare": cmd_fork_prepare,
+    "fork_review_update": cmd_fork_review_update,
     "fork_validate": cmd_fork_validate,
     "update_template": cmd_update_template,
     "retrofit_card_runtime": cmd_retrofit_card_runtime,
@@ -4558,7 +5668,7 @@ _COMMANDS = {
 
 _TRACE_REQUIRED_COMMANDS = {
     "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate", "image_upload",
-    "templates",
+    "templates", "fork_prepare", "fork_review_update",
 }
 
 

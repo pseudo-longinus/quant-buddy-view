@@ -1,98 +1,103 @@
-# publish_workflow — 验证、注册、凭证替换与发布的一次性编排
+# publish_workflow — Manifest 驱动的 fork 发布器
 
-## `images[]` 正文图片绑定
+新 fork 默认使用 `publish_workflow_v2`。`fork_prepare` 已生成完整 plan，Agent 不再手写 packages、grants、Marker 或完整 workflow JSON。
 
-图片与 package/grant marker 一起在任何网络写入前预检：文件必须存在、扩展名合法、≤5MB；所有单独 marker 字符串都必须全局唯一，并在 HTML 中恰好出现一次。
+## 新 fork 调用
 
-```json
-{
-  "images": [{
-    "name": "business-model",
-    "image_file": "output/images/business-model.png",
-    "logical_name": "business-model",
-    "marker": "__QB_IMAGE_BUSINESS_MODEL__"
-  }]
-}
-```
-
-顺序固定为 marker/图片静态预检 → 用假凭证执行 Card Runtime 结构预检 → package-set 验证 → package/grant 注册并向全部 marker 扇出替换 → 图片上传到 `publish_verified.page_id` 并替换 marker → 写 prepared HTML → 单次 `publish_verified`。图片上传或发布失败不会自动删除资产；重试依赖确定性 `asset_id` 复用，未引用资产在后台显示为 unused。
-
-`scripts/publish_workflow.py` 用于 fork/unmatched 的多公式包页面。它按固定顺序执行：
-
-> 硬门槛：fork manifest 里 source package+grant 总数 ≥1 时（即只要 fork 涉及任何一个凭证），`static_page.py publish_verified` 都会拒绝未经本脚本的手工分步调用（返回 `error:"PUBLISH_WORKFLOW_REQUIRED"`）。只有零凭证的纯静态改造允许直接调 `publish_verified`。看到这个错误码，说明该走本脚本而不是自己写脚本拼 marker 替换/多次发布——凭证数少也不例外，仓库里没有第二个专门做这件事的工具。
-
-1. 在任何网络写入前检查模板文件、图片和全部 marker。`markers.package_id`、`markers.grant_id`、`markers.signature` 均可为单个字符串或非空字符串数组；数组中的每个 marker 仍必须非空、全局互不重复，并且在 HTML 中恰好出现一次。
-2. 若 HTML 含 Card Runtime artifact，先把 marker 替换为确定性的假凭证、图片 marker 替换为 data URL，再运行 `verify_page.mjs --card-runtime-structure-only`。这一步只解析静态结构，不查询公式包、不 hydrate、不启动浏览器。
-3. 用同一 `task_id` 调 `qbs_bridge.py validate_package_set`，按 package 顺序验证，每包 1..20 条公式，自动完成 deferred/resume 并汇总收据。每包 validation/registration 共用同一个 `begin_date`；可在 package 内任一侧或工作流顶层提供，缺省固定为 `20150101`，harness 会同时写入验证和注册参数。
-4. 顺序注册公式包和数据授权；每个注册项只注册一次，取得真实 ID/signature 后替换到该字段声明的全部 marker。
-5. 把结果写到新的 `prepared_html_file`，不覆盖来源模板。
-6. 只调用一次 `publish_verified`；任一步失败立即短路。
-
-## 调用
-
-参数建议保存为 UTF-8 JSON，避免 PowerShell 转义和中文编码问题：
+先创建目标页，再把目标 `page_id` 作为 `target_page_id` 传给 `fork_prepare`：
 
 ```powershell
-python scripts/publish_workflow.py '@D:\temp\qbv-publish-workflow.json'
+python scripts/static_page.py fork_prepare '@D:\temp\fork-prepare.json'
 ```
 
-示例参数：
+命令生成：
+
+- `*.fork.html`：脱敏工作 HTML；
+- `*.fork-manifest-v2.json`：私有运行合同与 Marker 绑定；
+- `*.fork-review.json`：Agent 审查接口；
+- `*.publish-plan.json`：发布参数骨架。
+
+Agent只编辑 `*.fork.html` 和 `*.fork-review.json`。审查文件只填写主资产确认、目标同业槽位、复杂跨资产公式和允许的 Grant 资产范围，不添加来源 ID/signature、Marker、reads 或完整 Grant payload。
+
+直接执行返回的 `publish_command`：
+
+```powershell
+python scripts/publish_workflow.py '@D:\path\page.publish-plan.json'
+```
+
+> **`publish-plan.json` 按设计不含凭证（credential-free）**：这个文件里没有 `api_key`。如果这次任务的
+> `page_id` 是用调用方自带的 api_key（比如 Playground 场景，而不是 `config.json` 里的默认 key）建的，
+> 必须让 `publish_command` 这次调用也拿到同一个 key，否则 `publish_workflow.py` 会退回 `config.json`
+> 的默认身份注册/发布，服务端会报 `无权操作他人的页面`。**不要**为此设置 `QUANT_BUDDY_API_KEY` 环境
+> 变量——它只在 `config.json` 也为空时才生效，`config.json` 已有默认 key 时设它不会有任何效果（这是
+> 已经复现过两次的真实故障模式）。正确做法二选一：
+> 1. 设置环境变量 `QBV_API_KEY=<本次 key>` 后再执行 `publish_command`（推荐，不用改 plan 文件）；
+> 2. 或者把 `api_key` 合并进这次调用的顶层参数（如果不是走 `@file`，直接在 JSON 里加一个
+>    `"api_key"` 字段）。
+> 两种方式效果一致：`scripts/common.py::configure_trace_context()` 全程保留这个覆盖，
+> `publish_workflow.py` 内部多次切换 task_id 上下文也不会把它冲掉。
+
+`fork_manifest_v2` 存在时，手工传入 `packages`、`grants` 或 runtime markers 会返回：
+
+```text
+MANUAL_RUNTIME_BINDINGS_FORBIDDEN
+```
+
+## 固定执行顺序
+
+所有下列结构检查均发生在第一次网络写入之前：
+
+1. 读取 manifest、review 和脱敏 HTML；检查 review 完整性。
+2. 检查来源凭证残留、runtime role、Marker 数量与全局唯一性。
+3. 从同一 package 合同检查公式左值、reads、required outputs 和 `begin_date`。
+4. 检查水位语义：PE/PB 水位输出必须使用带明确正整数窗口的 `排序水位` 或 `数值水位` 公式；fork 可继承来源模板已经声明且能通过 QBS 的窗口口径，不强制改成固定250日。
+5. 检查 Grant 仅修改声明的资产范围；`kind/query_type/fields/dimensions/window_days/result_mode` 及 CSV/inline 合同默认继承。改变非资产合同必须填写 `contract_change_reason`。
+6. 以假凭证执行 Card Runtime `structure-only` 预检。图片空 `src` 规则保持现状。
+7. 用 canonical package 合同调用 `validate_package_set`；用 canonical `kind + payload` 调用 `validate_grant_set`。 严格数据回复模板会在此阶段复用公式验证返回的 `data_id`，按相同 `read_mode/mode_params` 每批最多10个调用 `readData`；Grant直接压缩验证响应。单批失败只记录 warning，不重算公式、不重查 package/grant。
+8. 每个 runtime role 只注册一次，并把一个注册结果扇出到页面/Card的全部 Marker。
+9. 上传 manifest 声明的图片，写 prepared HTML，单次调用 `publish_verified`。
+
+Manifest 中 package 明确保留两层合同：`source_contract.formulas/nodes` 是模板详情接口原始结构，`target_registration_contract.formulas/reads/begin_date` 是新公式包的请求结构。发布器只从后者派生验证与注册；来源 `nodes[].data_id` 不得进入目标请求。`fork-review.json` 仍只投影公式语义与只读输出摘要。
+
+最终验证/注册使用的 Package合同只有一个：
 
 ```json
-{
-  "task_id": "task_xxx",
-  "user_query": "生成昭衍新药估值活页",
-  "begin_date": 20150101,
-  "html_template_file": "output/forks/page_source/working.html",
-  "prepared_html_file": "output/pages/final.html",
-  "packages": [
-    {
-      "name": "valuation",
-      "validation": {
-        "formulas": [
-          "pe_ttm=\"A股市盈率（PE, TTM）〔估值数据〕\"*取出(昭衍新药)",
-          "pe_pctile=排序水位(\"pe_ttm\",250)"
-        ]
-      },
-      "registration": {
-        "formulas": [
-          "pe_ttm=\"A股市盈率（PE, TTM）〔估值数据〕\"*取出(昭衍新药)",
-          "pe_pctile=排序水位(\"pe_ttm\",250)"
-        ],
-        "reads": [
-          {"output": "pe_ttm", "read_mode": "last_day_stats"},
-          {"output": "pe_pctile", "read_mode": "last_day_stats"}
-        ]
-      },
-      "markers": {
-        "package_id": [
-          "__PKG_VALUATION_PAGE_ID__",
-          "__PKG_VALUATION_CARD_ID__"
-        ],
-        "signature": [
-          "__PKG_VALUATION_PAGE_SIGNATURE__",
-          "__PKG_VALUATION_CARD_SIGNATURE__"
-        ]
-      }
-    }
-  ],
-  "grants": [],
-  "publish_verified": {
-    "page_id": "page_xxx",
-    "title": "昭衍新药估值活页",
-    "source_template_id": "page_source",
-    "fork_manifest_file": "output/forks/page_source/page_source.fork-manifest.json"
-  }
-}
+{"formulas": [], "reads": [], "begin_date": 20150101}
 ```
 
-## 输出与失败契约
+验证请求取其中的 `formulas + begin_date`，注册请求使用同一完整合同。Grant只有一个 `kind + payload` 合同；验证收据与注册前都检查同一 SHA256 fingerprint。
 
-- stdout 只包含 package/grant 数量、收据、prepared HTML 和精简后的发布阶段结果；完整 `publish_verified` 结果写入其返回的 `full_report_file`。
-- 返回值只列出注册后的 package/grant ID，不回显 signature。
-- 页面正文与 Card Runtime 共用同一凭证时，使用同一注册项中的 marker 数组；不要把 Card manifest 凭证留空，也不要为同一公式/读取合同额外注册重复 package。
-- Card Runtime 结构预检失败返回 `error:"CARD_RUNTIME_PREFLIGHT_FAILED"`。该错误发生在 Trace Context 设置、QBS 验证、package/grant 注册、图片上传与发布之前，因此保证没有网络写副作用。
-- marker、QBS 验证、注册或发布前门禁失败时，不继续后续步骤。
-- validation 与 registration 的 `begin_date` 不一致时在任何网络调用前失败；不要靠 Agent 在报空值后手工补日期。
-- 发布成功但公网 `public-smoke` 失败时，沿用 `publish_verified` 契约：`published:true, verified:false`，并保留公开 URL。
-- 最终回复必须使用发布器返回的 `reply_validation_command`；contract 文件的 SHA256 不匹配时 validator 会拒绝。
+`validate_grant_set` 映射：
+
+| Grant kind | quant-buddy-skill 工具 |
+|---|---|
+| `fast_query` | `fast_query` |
+| `stock_profile` | `stockProfile` |
+| `composition_select` | `selectByComposition` |
+
+## 图片
+
+`images[]` 仍由 `fork_prepare` 从来源托管图片生成。发布器在网络调用前检查本地文件、类型、大小和 Marker；Card Runtime 结构预检时临时替换为 data URI。发布到目标 `page_id` 后再写入同页 WebP URL。本次升级没有放宽或新增图片门禁。
+
+## 输出与耗时
+
+CLI stdout只返回阶段摘要、package/grant/image 数量、耗时和完整报告路径。完整逐角色结果写入 `output/publish_reports/`。
+
+耗时至少包含：
+
+- `manifest_preflight_ms`
+- `package_validation_ms`
+- `grant_validation_ms`
+- `reply_evidence_ms`（含公式结果补读与本地投影/落盘）
+- `package_registration_ms`
+- `grant_registration_ms`
+- `image_upload_ms`
+- `browser_validation_ms`
+- `publish_ms`
+- `public_smoke_ms`
+
+任一预检失败时，QBS、注册、图片上传和发布均不会被调用。注册失败后的幂等/checkpoint不属于本版本。
+
+## v1兼容
+
+已准备的 `fork_manifest_v1` 和旧式 workflow JSON继续走原分支；新 `fork_prepare` 只生成 v2。不要把 v1任务人工改写成半套 v2。

@@ -20,12 +20,14 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 SKILL_NAME = "quant-buddy-view"
 
@@ -83,8 +85,10 @@ if hasattr(sys.stderr, "buffer"):
 # ────────────────────────────────────────────────
 
 def load_config():
-    """加载 config.json，叠加 config.local.json 覆盖，再叠加 QUANT_BUDDY_API_KEY 环境变量。
+    """加载 config.json，叠加 config.local.json 覆盖；env var 兜底；params 里的 api_key 优先级最高。
 
+    优先级（高到低）：调用方 params 里的 api_key（见 configure_trace_context）> config.json /
+    config.local.json > QUANT_BUDDY_API_KEY 环境变量（仅前两者都为空时兜底，不常规依赖）。
     缺 endpoint 抛 FileNotFoundError/ValueError；api_key 缺失只在需要时由调用方决定是否报错。
     """
     config_path = os.path.join(SKILL_ROOT, "config.json")
@@ -101,9 +105,12 @@ def load_config():
                         cfg[k] = v
         except Exception:
             pass
-    env_key = os.environ.get("QUANT_BUDDY_API_KEY", "").strip()
-    if env_key:
-        cfg["api_key"] = env_key
+    if not cfg.get("api_key"):
+        env_key = os.environ.get("QUANT_BUDDY_API_KEY", "").strip()
+        if env_key:
+            cfg["api_key"] = env_key
+    if _API_KEY_OVERRIDE:
+        cfg["api_key"] = _API_KEY_OVERRIDE
     return cfg
 
 
@@ -148,13 +155,15 @@ def api_url(endpoint, path):
 
 _TRACE_TASK_ID = None
 _TRACE_USER_QUERY = None
+_API_KEY_OVERRIDE = None  # 调用方（如 Playground）本次调用传入的 api_key，仅本进程生效，不落盘
 
 
-def set_trace_context(task_id=None, user_query=None):
+def set_trace_context(task_id=None, user_query=None, api_key_override=None):
     """设置当前进程的 Trace Context；供 read_params / trace_context.py 共用。"""
-    global _TRACE_TASK_ID, _TRACE_USER_QUERY
+    global _TRACE_TASK_ID, _TRACE_USER_QUERY, _API_KEY_OVERRIDE
     _TRACE_TASK_ID = str(task_id).strip() if task_id else None
     _TRACE_USER_QUERY = str(user_query).strip() if user_query else None
+    _API_KEY_OVERRIDE = str(api_key_override).strip() if api_key_override else None
     return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
 
 
@@ -164,20 +173,78 @@ def configure_trace_context(params=None):
     nested = params.get("trace_context") if isinstance(params.get("trace_context"), dict) else {}
     task_id = params.get("task_id") or nested.get("task_id") or os.environ.get("QBV_TASK_ID")
     user_query = params.get("user_query") or nested.get("user_query") or os.environ.get("QBV_USER_QUERY")
-    return set_trace_context(task_id, user_query)
+    # 调用方可在 params 里附带 api_key，本次调用临时覆盖 config.json，优先级最高；pop 掉避免
+    # 混进后续以 params 为请求体转发的调用里。这次调用没提 api_key 字段（跟"显式传空值清空"不是一回事）
+    # 时优先保留当前已生效的覆盖，不清空——避免同一进程内的重入调用（如 cmd_direct_deliver 内部临时切
+    # task_id）把本次任务已经生效的 api_key 覆盖悄悄冲掉，导致同一个任务后半段悄悄改用 config.json 的
+    # 默认身份。
+    #
+    # QBV_API_KEY 环境变量：跟 QBV_TASK_ID/QBV_USER_QUERY 同一档，是"这次调用要用哪个 key"的显式覆盖
+    # 通道——调用方如果拿到一大份 @file 形式的既有参数（比如 publish_workflow.py 的 publish-plan.json,
+    # 按设计不含凭证）、不方便/不想现改这份文件去塞 api_key，可以直接用这个环境变量传，效果等价于在
+    # 顶层参数里传了 api_key，不会被 config.json 里已有的默认 key 悄悄盖掉。
+    # 只在进程内还没有任何已生效覆盖时读取一次（当前调用/更早调用如果已经显式定了覆盖，那个更权威，不会
+    # 被这里覆盖回环境变量的值）。
+    #
+    # 注意区分：这跟仅作最低优先级兜底的 QUANT_BUDDY_API_KEY（只在 config.json 也为空时才生效，见
+    # load_config()）是两回事——不要混用，也不要因为加了这个就误以为改了 QUANT_BUDDY_API_KEY 的语义。
+    if "api_key" in params or "api_key" in nested:
+        api_key_override = params.pop("api_key", None) or nested.get("api_key")
+    elif _API_KEY_OVERRIDE:
+        api_key_override = _API_KEY_OVERRIDE
+    else:
+        api_key_override = os.environ.get("QBV_API_KEY", "").strip() or None
+    return set_trace_context(task_id, user_query, api_key_override)
 
 
 def current_trace_context():
     return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
 
 
+def safe_task_id(task_id):
+    """Return the filesystem-safe task id used by all QBV temporary artifacts."""
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
+
+
+def task_temp_dir(task_id, create=False):
+    """Return this task's isolated cross-platform system temporary directory."""
+    safe_task = safe_task_id(task_id)
+    if not safe_task:
+        raise ValueError("task_id 不能为空")
+    path = Path(tempfile.gettempdir()).resolve() / f"qbv_{safe_task}"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def task_temp_path(task_id, name, create_parent=False):
+    """Return a contained path below task_temp_dir; absolute/traversal names are rejected."""
+    relative = Path(str(name or ""))
+    if not str(name or "").strip() or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("任务临时文件名必须是 task_temp_dir 下的相对路径")
+    root = task_temp_dir(task_id, create=create_parent)
+    path = (root / relative).resolve()
+    if path != root and root not in path.parents:
+        raise ValueError("任务临时文件路径越界")
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def cleanup_task_temp_files(task_id):
-    """删除本任务按 qbv_<task_id>_* 命名的参数/草稿文件，只允许操作系统临时目录。"""
-    safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", str(task_id or "")).strip("._-")
+    """删除任务目录，并兼容清理旧版平铺 qbv_<task_id>_*.json/.md 文件。"""
+    safe_task = safe_task_id(task_id)
     if not safe_task:
         return []
     temp_root = os.path.realpath(tempfile.gettempdir())
     deleted = []
+    task_root = os.path.realpath(os.path.join(temp_root, f"qbv_{safe_task}"))
+    if os.path.dirname(task_root) == temp_root and os.path.isdir(task_root):
+        try:
+            shutil.rmtree(task_root)
+            deleted.append(task_root)
+        except OSError:
+            pass
     for name in os.listdir(temp_root):
         if not (name.startswith(f"qbv_{safe_task}_") and os.path.splitext(name)[1].lower() in {".json", ".md"}):
             continue
@@ -198,7 +265,7 @@ EXPIRED_TEMP_CHECK_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".expired_tem
 
 
 def cleanup_expired_task_temp_files(max_age_seconds=None):
-    """Best-effort 清理系统临时目录根下超过 max_age_seconds 的 qbv_*.json/.md 残留文件。
+    """Best-effort 清理系统临时目录下超过 TTL 的 qbv_* 任务目录与旧版平铺文件。
 
     只扫根目录（不递归）、只按前缀+后缀白名单匹配、realpath 校验不逃逸出 temp 根目录、
     任何异常都吞掉不向上抛——这是给任务中断/异常退出兜底的最后一道清理，不依赖具体 task_id。
@@ -211,10 +278,12 @@ def cleanup_expired_task_temp_files(max_age_seconds=None):
         for name in os.listdir(temp_root):
             if not name.startswith("qbv_"):
                 continue
-            if os.path.splitext(name)[1].lower() not in {".json", ".md"}:
-                continue
             path = os.path.realpath(os.path.join(temp_root, name))
             if os.path.dirname(path) != temp_root:
+                continue
+            is_task_dir = os.path.isdir(path)
+            is_legacy_file = os.path.isfile(path) and os.path.splitext(name)[1].lower() in {".json", ".md"}
+            if not (is_task_dir or is_legacy_file):
                 continue
             try:
                 age = now - os.path.getmtime(path)
@@ -223,7 +292,10 @@ def cleanup_expired_task_temp_files(max_age_seconds=None):
             if age < max_age:
                 continue
             try:
-                os.remove(path)
+                if is_task_dir:
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
                 deleted.append(path)
             except OSError:
                 continue
@@ -268,6 +340,9 @@ def require_trace_context():
         "message": (
             "发布/更新活页前必须先运行 scripts/trace_context.py begin，"
             "并把返回的 task_id 传给本次任务的每个 quant-buddy-view 命令。"
+            "begin 本身也是后端写入调用，必须带和后续命令相同的身份"
+            "（QBV_API_KEY 环境变量，或参数里的 api_key）——重试时别只补 begin 而漏掉它的 key，"
+            "否则这条记录会归到 config.json 的默认账号。"
         ),
     }
 

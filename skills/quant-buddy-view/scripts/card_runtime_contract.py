@@ -9,6 +9,8 @@ CARD_RUNTIME_VERSION = "1.1.0"
 ARTIFACT_BLOCK_SEPARATOR = "\n--QB-CARD-BLOCK--\n"
 READY_ATTRIBUTE = "data-qb-card-ready"
 READY_VALUE = "true"
+# manifest 不得内联服务端图片地址。thumbnail_url 对应的整页缩略图能力已下线，
+# 但历史脏 manifest 仍可能带它，因此保留在禁止项里。
 FORBIDDEN_MANIFEST_IMAGE_FIELDS = frozenset(("card_snapshot_url", "thumbnail_url"))
 
 

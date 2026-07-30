@@ -73,6 +73,14 @@ python scripts/static_page.py upload '{"html_file":"output/pages/沪深300监控
 
 ## 4. 后续维护
 
+- **只是想改页面里某一个图表**（加/删一条线、改时间窗口、查真实数据）：优先走
+  [edit-existing-chart.md](edit-existing-chart.md) + `scripts/chart_edit.py`，只动被要求的那一处，不要
+  把页面上其它无关的公式/面板也重新验证一遍。只有目标页面是 legacy（`chart_edit.py inspect` 会标出）
+  或改动本质上要求整页重算/换版式，才用下面这条整页重建。
+- **legacy 页面是 bespoke（手写 canvas/SVG）页面**：折线/柱状/双轴/雷达图这类图表不必回落整页重建——
+  用 `build_dashboard.py`（`emit=panel_block`）把这张图重新生成成局部嵌入的声明式图表块，替换掉原来
+  手写的那部分，之后就能用 `chart_edit.py` 定点编辑，见 [guides/bespoke-page.md](../guides/bespoke-page.md)
+  「图表类可视化」一节。仪表盘/水位条这类非图表指标组件不受影响。
 - **页面已分享、想改内容但保留原链接**（最常见）：重跑第 2 步生成新 HTML，再用 `update` 替换同一个 `page_id`——URL 不变，访问者刷新即见新内容，也不占新的活跃页配额：
   ```bash
   python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/沪深300监控-xxxx.html"}'

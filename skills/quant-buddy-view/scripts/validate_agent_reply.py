@@ -9,6 +9,7 @@ import sys
 
 import common as C
 import reply_template_registry as RTR
+import session_complete as SC
 
 
 _HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -173,6 +174,142 @@ def _render_policy_errors(template_ref, policy, draft, sections):
     return policy, errors
 
 
+def _read_hashed_evidence(contract):
+    evidence_file = str(contract.get("reply_data_evidence_file") or "").strip()
+    expected_sha256 = str(contract.get("reply_data_evidence_sha256") or "").strip().lower()
+    if not evidence_file or not expected_sha256:
+        return None, {
+            "code": "REPLY_DATA_EVIDENCE_REQUIRED",
+            "message": "严格数据回复模板缺少 reply_data_evidence_file / SHA256",
+        }
+    try:
+        with open(evidence_file, "rb") as handle:
+            payload = handle.read()
+    except OSError as exc:
+        return None, {"code": "REPLY_DATA_EVIDENCE_UNREADABLE", "message": str(exc)}
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        return None, {
+            "code": "REPLY_DATA_EVIDENCE_HASH_MISMATCH",
+            "message": "回复证据文件哈希不匹配",
+            "expected_sha256": expected_sha256,
+            "actual_sha256": actual_sha256,
+        }
+    try:
+        evidence = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, {"code": "REPLY_DATA_EVIDENCE_INVALID", "message": str(exc)}
+    if not isinstance(evidence, dict) or evidence.get("version") != "reply_data_evidence_v1":
+        return None, {"code": "REPLY_DATA_EVIDENCE_INVALID", "message": "回复证据版本无效"}
+    if evidence.get("template_ref") != contract.get("template_ref"):
+        return None, {"code": "REPLY_DATA_EVIDENCE_TEMPLATE_MISMATCH", "message": "回复证据与模板不匹配"}
+    return evidence, None
+
+
+def _section_line_candidates(body, label):
+    label = str(label or "").strip().lower()
+    if not label:
+        return []
+    return [line for line in str(body or "").splitlines() if label in line.lower()]
+
+
+def _render_token_in_line(token, line):
+    token = str(token or "").strip()
+    if not token:
+        return False
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", token):
+        normalized = token.rstrip("0").rstrip(".") if "." in token else token
+        number = re.escape(normalized)
+        if "." in normalized:
+            pattern = rf"(?<![\d.]){number}0*(?![\d.A-Za-z])"
+        else:
+            pattern = rf"(?<![\d.]){number}(?:\.0+)?(?![\d.A-Za-z])"
+        return re.search(pattern, line) is not None
+    return token in line
+
+
+def _data_coverage_errors(contract, sections):
+    if not RTR.get_reply_data_policy(contract.get("template_ref")):
+        return None, []
+    evidence, evidence_error = _read_hashed_evidence(contract)
+    if evidence_error:
+        return None, [evidence_error]
+    errors = []
+    section_map = {item["heading"]: item["body"] for item in sections}
+    fields_by_section = {}
+    for field in evidence.get("fields") or []:
+        if isinstance(field, dict):
+            fields_by_section.setdefault(field.get("section"), []).append(field)
+    for heading, metadata in (evidence.get("sections") or {}).items():
+        body = section_map.get(heading)
+        if body is None:
+            continue
+        section_fields = fields_by_section.get(heading) or []
+        if not section_fields and heading != "七、综合观察":
+            expected = str((metadata or {}).get("no_data_text") or "").strip()
+            if expected and expected not in body:
+                errors.append({
+                    "code": "NO_DATA_SECTION_TEXT_REQUIRED",
+                    "message": f"无数据章节必须使用标准说明：## {heading}",
+                    "section": heading,
+                    "expected_text": expected,
+                })
+    for field in evidence.get("fields") or []:
+        if not isinstance(field, dict):
+            continue
+        section = str(field.get("section") or "")
+        label = str(field.get("row_label") or "")
+        candidates = _section_line_candidates(section_map.get(section, ""), label)
+        if not candidates:
+            errors.append({
+                "code": "AVAILABLE_DATA_OMITTED",
+                "message": f"有可用数据但未输出指标：{label}",
+                "field_id": field.get("field_id"),
+                "section": section,
+            })
+            continue
+        tokens = [str(token) for token in field.get("render_tokens") or [] if str(token)]
+        if any(any(_render_token_in_line(token, line) for token in tokens) for line in candidates):
+            continue
+        if any(re.search(r"(?:^|[|\s])(?:--|—)(?:$|[|\s])", line) for line in candidates):
+            errors.append({
+                "code": "AVAILABLE_VALUE_REPLACED_WITH_PLACEHOLDER",
+                "message": f"指标已有值，不能用 -- 代替：{label}",
+                "field_id": field.get("field_id"),
+                "section": section,
+            })
+        else:
+            errors.append({
+                "code": "AVAILABLE_DATA_OMITTED",
+                "message": f"指标行未包含可用值：{label}",
+                "field_id": field.get("field_id"),
+                "section": section,
+            })
+    return evidence, errors
+
+
+def _delivery_constraint_errors(contract, draft):
+    policy = contract.get("delivery_policy")
+    if not isinstance(policy, dict) or "max_markdown_tables" not in policy:
+        return [], None
+    max_tables = policy.get("max_markdown_tables")
+    if isinstance(max_tables, bool) or not isinstance(max_tables, int) or max_tables < 0:
+        return [{
+            "code": "DELIVERY_POLICY_INVALID",
+            "message": "delivery_policy.max_markdown_tables 必须是非负整数",
+        }], None
+    table_count = len(_markdown_tables(draft))
+    if table_count <= max_tables:
+        return [], table_count
+    return [{
+        "code": "MARKDOWN_TABLE_LIMIT_EXCEEDED",
+        "message": f"当前渠道最多允许 {max_tables} 张 Markdown 表格，实际为 {table_count} 张",
+        "channel": policy.get("channel"),
+        "max_tables": max_tables,
+        "actual_tables": table_count,
+    }], table_count
+
+
 def validate_reply(contract_payload, draft):
     contract_payload = contract_payload if isinstance(contract_payload, dict) else {}
     contract = contract_payload.get("agent_reply_contract") if isinstance(contract_payload.get("agent_reply_contract"), dict) else contract_payload
@@ -209,6 +346,11 @@ def validate_reply(contract_payload, draft):
                 continue
             cursor = index
 
+    evidence, evidence_errors = _data_coverage_errors(contract, sections)
+    errors.extend(evidence_errors)
+    delivery_errors, markdown_table_count = _delivery_constraint_errors(contract, draft)
+    errors.extend(delivery_errors)
+
     unresolved = _UNRESOLVED_FIELD_RE.findall(draft)
     if unresolved:
         errors.append({
@@ -234,6 +376,15 @@ def validate_reply(contract_payload, draft):
             "present_sections": actual,
             "omitted_optional_sections": [heading for heading in optional if heading not in set(actual)],
         })
+    if evidence is not None:
+        result["reply_data_evidence_version"] = evidence.get("version")
+        result["validated_field_count"] = len(evidence.get("fields") or [])
+    if markdown_table_count is not None:
+        result["markdown_table_count"] = markdown_table_count
+        result["max_markdown_tables"] = contract.get("delivery_policy", {}).get("max_markdown_tables")
+    if result["valid"]:
+        result["validated_markdown"] = draft
+        result["validated_markdown_sha256"] = hashlib.sha256(draft.encode("utf-8")).hexdigest()
     return result
 
 
@@ -258,6 +409,21 @@ def _read_hashed_contract(params):
     return json.loads(payload.decode("utf-8")), None
 
 
+def _report_session_complete(contract_payload, params):
+    """validator 通过即任务终态：上报一次埋点。best-effort，失败不影响校验结果。"""
+    try:
+        payload = contract_payload if isinstance(contract_payload, dict) else {}
+        contract = payload.get("agent_reply_contract") if isinstance(payload.get("agent_reply_contract"), dict) else payload
+        SC.report(
+            params.get("task_id") or C.current_trace_context().get("task_id"),
+            public_url=contract.get("public_url") or "",
+            user_query=C.current_trace_context().get("user_query") or "",
+            operation=contract.get("operation") or "",
+        )
+    except Exception:
+        pass
+
+
 def main():
     params = C.read_params(sys.argv[1:], env_var="REPLY_PARAMS")
     try:
@@ -269,6 +435,8 @@ def main():
             result = {"code": 1, "valid": False, "errors": [{"code": "INPUT_REQUIRED", "message": "需要 contract/contract_file 和 draft/draft_file"}]}
         else:
             result = validate_reply(contract, draft)
+            if result.get("valid"):
+                _report_session_complete(contract, params)
             if result.get("valid") and params.get("cleanup_task_id"):
                 result["cleaned_temp_files"] = C.cleanup_task_temp_files(params.get("cleanup_task_id"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:

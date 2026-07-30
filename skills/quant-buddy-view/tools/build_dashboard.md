@@ -55,10 +55,7 @@ BD_PARAMS='{"title":"...","panels":[...],"upload":true}' python scripts/build_da
 | `update_page_id` | string | ❌ | 替换已发布页面，URL/page_id 不变 |
 | `verify_packages` | bool | ❌ | 上传/替换后强制解析页面内 package_id + signature 做一次轻量 query 校验；默认仅服务端提示公式包异常时触发 |
 | `ttl_days` | number | ❌ | 配合 upload 透传 |
-| `thumbnail_file` | string | ❌ | 现成 PNG/JPG 缩略图；HTML upload/update 成功后自动上传封面，失败只返回 warning |
-| `thumbnail` | bool/object/string | ❌ | `true` 或对象表示自动生成 1200×675 封面；字符串表示现成文件路径。封面是自包含 SVG 海报，用系统 Edge/Chrome 无头栅格化成 PNG；无浏览器时直接产出 SVG，均不影响 HTML |
 | `live_card` | bool/object | ❌ | 在同页产出独立 card runtime artifact（`embedded-card-v1`）宽宝活卡；对象可传 `title`、`description`、`theme`、`primary`、`metrics`、`tags`、`date_output` |
-| `series` / `chart_series` | array | ❌ | 自动生成封面时可选的真实曲线数据；不传则优先从构建期公式包取数结果里的 line/bar 面板抽取 |
 | `brand` | object | ❌ | 统一分享外壳配置，见下 |
 | `official_url` | string | ❌ | 官网入口，默认 `https://www.quantbuddy.cn` |
 | `show_qr` | bool | ❌ | 是否显示页面二维码，默认 `true` |
@@ -101,7 +98,7 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 | `output` | ✅* | 对应公式包 `reads` 的产出名（= query 返回 outputs 的 key）。`text` 面板不需要；数据授权面板改填 `grant_id`，二者其一 |
 | `grant_id` | ✅* | 数据授权面板：填 `dg_...`，构建期自动补 signature、运行时走 `queryDataGrant`（普通 JSON）。与 `output` 互斥，可与公式包面板同页混用 |
 | `title` | ❌ | 面板标题，缺省用 `output` |
-| `type` | ❌ | `line` / `bar` / `table`（默认） / `number` / `text` / `raw` |
+| `type` | ❌ | `line` / `bar` / `radar`（雷达图） / `table`（默认） / `number` / `text` / `raw` |
 | `x` | ❌ | line/bar 横轴字段（缺省取首列；range_data 自动取 dates） |
 | `y` | ❌ | line/bar 纵轴字段数组（缺省取除 x 外的数值列） |
 | `columns` | ❌ | table 指定列（缺省自动推断） |
@@ -109,8 +106,12 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 | `unit` | ❌ | number 单位 |
 | `description` | ❌ | 面板说明；number 面板会显示在数值下方，其它面板显示在标题下方 |
 | `span` | ❌ | `full` / `wide` / `auto`；line/bar 默认 `full`，number/table 默认 `auto` |
-| `height` | ❌ | 图表高度，单位 px；仅 line/bar 有效 |
+| `height` | ❌ | 图表高度，单位 px；仅 line/bar/radar 有效 |
 | `text` | ❌ | `text` 面板正文，用于摘要、解读、风险提示等无取数输出的说明块 |
+| `dual_axis` / `right_series` | ❌ | line/bar 双轴：`dual_axis:true` + `right_series:["output名",...]` 声明哪些系列归右轴，其余归左轴；单 output 面板用 `chart_edit.py add_series` 的 `axis:"right"` 追加第二条线时自动写入 |
+| `sparkline` | ❌ | line/bar 面板传 `true` 时去掉坐标轴/图例/网格留白，只画曲线本身（迷你走势图场景） |
+| `max` | ❌ | radar 面板每个维度的满分刻度，缺省 `1`（比例型 0..1 分数） |
+| `target_selector` | ❌ | 仅 `emit=panel_block` 局部产出模式使用，见下 |
 
 > 渲染器会自动把公式包各 read_mode 的 `data` 归一为 {列, 行}：
 > `range_data.{dates,values}` → 折线；`last_day_stats` 对 1 维序列返回的 `last_value.{date,value}` → 数值；
@@ -170,27 +171,32 @@ Default brand logo: standard pages inline `assets/logo.svg` into the share heade
 { "code": 0, "out_file": "output/pages/xxx.html", "mode": "live",
   "package_id": "pkg_...", "panels": 3, "size": 12345,
   "manifest": "output/pages/xxx.manifest.json",
-  "thumbnail_file": "output/thumbnails/xxx.png",
-  "thumbnail_generation_status": "generated",
   "facts": {"px":{"value": 166.41, "date": 20260616}},
   "url": "https://pages.quantbuddy.cn/..."  // 仅 upload=true 且成功时 }
 ```
 
-同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间、验证结果，以及
-`thumbnail_file`、`thumbnail_url`、`thumbnail_generation_status`。不会记录 API key 或 signature。
+同名 `*.manifest.json` 会记录 `page_id`、URL、HTML sha256、endpoint、公式包角色、package_id、构建时间与验证结果。不会记录 API key 或 signature。
 
-> **产物目录约定（本 skill 所有脚本共用）**：一切生成物——看板 HTML、manifest、缩略图、公式包/数据授权凭证、临时预览与 demo——**只落在 `output/` 下**（`output/pages/`、`output/thumbnails/`、`output/formula_packages/`、`output/data_grants/`；随手的试验/demo 放 `output/_demo/`）。`output/` 已在 `.gitignore` 里，属会话级 scratch。**不要在 skill 根目录另建 `_demo`、`tmp`、`preview` 等顶层文件夹**——顶层只保留 `SKILL.md / scripts / tools / guides / workflows / templates / reply-templates / tests / assets / config.json` 这套固定骨架。本地预览也从 `output/` 起服务（如 `python -m http.server 8899 --bind 127.0.0.1`，cwd 指向 `output/_demo/`）。
+> **产物目录约定（本 skill 所有脚本共用）**：一切生成物——看板 HTML、manifest、公式包/数据授权凭证、临时预览与 demo——**只落在 `output/` 下**（`output/pages/`、`output/formula_packages/`、`output/data_grants/`；随手的试验/demo 放 `output/_demo/`）。`output/` 已在 `.gitignore` 里，属会话级 scratch。**不要在 skill 根目录另建 `_demo`、`tmp`、`preview` 等顶层文件夹**——顶层只保留 `SKILL.md / scripts / tools / guides / workflows / templates / reply-templates / tests / assets / config.json` 这套固定骨架。本地预览也从 `output/` 起服务（如 `python -m http.server 8899 --bind 127.0.0.1`，cwd 指向 `output/_demo/`）。
 
-### 缩略图生成与上传
+## 局部产出模式（`emit: "panel_block"`）
 
-- 缩略图接口限 PNG/JPG、≤2MB；**封面尺寸不固定**（默认整页截图为竖图），后台可再裁。
-- 传 `thumbnail_file` 时，脚本不处理图片内容，只在 HTML upload/update 成功后调用 `static_page.py thumbnail` 上传。
-- 传 `"thumbnail": true` 或 `{ "enabled": true }` 时自动生成封面。`thumbnail.cover_mode` 选风格：
-  - **`page`（默认）= 真实页面整页截图**：用系统 Edge/Chrome 无头打开一个"封面模式页"（隐藏页头/页尾/分享按钮、强制浅色），截取**除页头页尾外的整页内容**（hero + 数字卡 + 真实 ECharts 图表 + 表格），最贴近"所见即所得"。数据用**构建期已校验产出离线渲染**（不实时取数、不闪）；ECharts 从本地缓存 `assets/vendor/echarts.min.js` 引入（缺失时一次性从 CDN 下载落盘），**封面页无需联网、秒加载，截图前页面已完全渲染**。窗口高度按 panel 估算，宁底部留白不裁切。
-  - `chart` = 合成全幅裸图（白底蓝色真实数据曲线，单图、轻量）。
-  - `poster` = 品牌海报（深色品牌栏 + 标题 + 信息卡 + 右图）。
-- **降级链（任一失败都不阻断 HTML 上传）**：`page` 无浏览器/截图失败/超 2MB 压不下 → 回退合成封面；合成封面再按 系统浏览器 → 纯 Python(cairosvg/svglib) → 裸 SVG 三层兜底。超 2MB 时若装了 Pillow 会自动降采样/转 JPEG，否则回退合成图保证可上传。
-- `page` 模式曲线/表格直接来自构建期校验产出；`chart`/`poster` 的曲线从产出抽首个 line/bar 序列，也可显式传 `series`。
-- manifest 的 `thumbnail_generation` 记录 `mode`（page/chart-fallback/...）、`rasterizer`（`edge-page`/`edge`/`svglib`/`svg` 等）、`width/height`、`bytes`。
+不生成整页 HTML，只生成一段带 `QBV_RENDER_JS_START/END` marker 的 `<script>` 片段，供 bespoke（手写）页面把某几个图表交给标准声明式引擎画。用法：
+
+```bash
+python scripts/build_dashboard.py '{
+  "emit": "panel_block",
+  "package_id": "pkg_xxx", "signature": "sig_xxx",
+  "panels": [
+    { "title": "价格趋势与均线", "type": "line", "target_selector": "#priceChart", "outputs": ["px","ma20","ma60"] }
+  ]
+}'
+```
+
+- 每个 panel 必须传 `target_selector`：bespoke 页面里已经排好版、已有自己样式的容器选择器（如 `#priceChart`）。运行时会把这个 panel 直接渲染进该容器，不包卡片外壳（无标题/边框/间距），bespoke 布局不受影响；选择器命中不到时退化为标准网格卡片（不整页报错，但需要页面里存在 `#grid`）。
+- `panels`/`package_id`/`signature`/`formulas`/`reads`/`grant_id` 与整页模式同源，不需要 `title`/`out_file`/`upload` 等整页专属字段。
+- 返回 `{code, script_html, package_id, panels, size}`；`script_html` 是完整字符串，粘贴进 bespoke 页面 `<body>`（放在对应容器**之后**）即可。默认带 ECharts CDN `<script>` 标签，若 bespoke 页面已引入 ECharts 可传 `"include_echarts_cdn": false` 跳过。
+- 生成的图表带标准 marker，之后可用 `chart_edit.py` 的 `add_series`/`remove_series`/`set_window`/`query_data` 对其定点编辑（`chart_edit.py inspect`/`_patch_page` 会自动识别这是嵌入式启动、编辑后不会误换成接管整页的引导逻辑）。
+- 详见 [guides/bespoke-page.md](../guides/bespoke-page.md) 「图表类可视化」一节。
 
 > 端到端示例：[workflows/dashboard-end-to-end.md](../workflows/dashboard-end-to-end.md)。

@@ -21,6 +21,69 @@ bespoke 页面不得直接引用本地路径、HTTP 图片或其他 page_id 的�
 > 所以单独抽了一份同口径的 **取数内核** `assets/data-kernel.js` 给手搓页用——**别再自己抄 `fetch`/解包逻辑**。
 > 手搓只负责主体内容。公共 shell 不是页面模板；不要复制 demo 样式或另起一套页头、页尾、二维码、刷新按钮。
 
+## 统一原则：配置活在声明式结构里，不要写死进某次 JS 调用参数
+
+不管接下来选哪种呈现方式，判断"这段以后好不好定点编辑"只看一件事：**这个组件用哪个 output、显示哪些行/颜色/参数这类绑定关系，是不是能从结构化的地方（BOOT.packages/panels 或 HTML 的 `data-*` 属性）读出来，而不是硬编码在某一次 JS 函数调用的参数里**。按组件类型分两种做法：
+
+### 折线/柱状/双轴/雷达图这类"图表"：优先局部嵌入声明式引擎，不要手写 SVG/canvas
+
+`build_dashboard.py` 现在支持 `emit=panel_block`：只生成一段带 `QBV_RENDER_JS_START/END` marker 的 `<script>`（不是整页 HTML），可以直接嵌进 bespoke 页面已经排好版的容器里。用法：
+
+```bash
+python scripts/build_dashboard.py '{
+  "emit": "panel_block",
+  "package_id": "pkg_xxx", "signature": "sig_xxx",
+  "panels": [
+    {
+      "title": "价格趋势与均线", "type": "line", "target_selector": "#priceChart",
+      "outputs": ["px", "ma20", "ma60"]
+    },
+    {
+      "title": "估值水位", "type": "line", "target_selector": "#valuationChart",
+      "outputs": ["pe", "pb"], "dual_axis": true, "right_series": ["pb"]
+    }
+  ]
+}'
+```
+
+返回的 `script_html` 粘贴进 bespoke 页面 `<body>`（放在 `#priceChart`/`#valuationChart` 这些容器**之后**）即可——页面布局、颜色、间距完全由你的 bespoke 布局决定，脚本只负责把图画进你指定的容器，不包卡片外壳。`panel.type` 支持 `line`/`bar`/`radar`（雷达图）/`table`/`number`/`text`/`image`；折线图额外支持 `dual_axis:true` + `right_series:[output名...]` 做双轴；`sparkline:true` 出无坐标轴/图例的迷你走势图。
+
+这样生成的图表带着标准 marker，之后可以用 `chart_edit.py` 的 `add_series`/`remove_series`/`set_window`/`query_data` 定点编辑，不用再手写 `svg.innerHTML = grid + paths` 这类拼接逻辑，也不用现场重新理解一段陌生的绘图函数。
+
+**只有 `emit=panel_block` 目前还表达不出的可视化（仪表盘、分位水位条、现金流对比条、行业排名榜这类非"图表"型指标组件）才继续手写**——这些多数时候本来就不需要 SVG/canvas，见下一节。
+
+### 仪表盘/水位条/排名榜这类指标组件：纯 HTML+CSS+JS 就够，但绑定关系必须走 `data-*` 属性
+
+这类组件的视觉本质是"改一个 `<div>` 的宽度百分比"或"拼几行 `<span>/<b>`"，不需要 SVG，也不需要 ECharts。但同一个渲染函数完全可能同时有"好"和"坏"两种调用方式，只有"好"的这种才好定点编辑：
+
+```html
+<!-- 好：绑定关系写在 data-* 属性里，JS 是通用遍历渲染，不含任何具体业务数据 -->
+<div id="valuationBars" data-qb-bar-list>
+  <div data-qb-bar-row data-output="pe_pctile" data-label="PE一年水位" data-color="var(--red)"></div>
+  <div data-qb-bar-row data-output="pb_pctile" data-label="PB一年水位" data-color="var(--blue)"></div>
+</div>
+```
+
+```js
+// 通用渲染函数，跨页面复用，函数体里不含任何具体图表的绑定信息
+function renderBarList(container, outputs) {
+  container.querySelectorAll('[data-qb-bar-row]').forEach(row => {
+    const value = QB.lastValue(outputs, row.getAttribute('data-output'));
+    setBar(row.querySelector('.bar-fill'), value);
+  });
+}
+```
+
+```js
+// 坏：禁止这种写法——加一条新水位条要去找到这次调用、改数组字面量，跟手写 SVG 是同一类问题
+setBar($("valuationBars"), [
+  { label: "PE一年水位", value: peRank, color: "var(--red)" },
+  { label: "PB一年水位", value: pbRank, color: "var(--blue)" },
+]);
+```
+
+一句话判断标准：**渲染函数的参数列表里不应该出现"这一行具体是什么"（label/value/color 这些），只应该出现"容器"和"通用取数上下文"（outputs）；具体是哪几行、每行绑定什么，必须能从 DOM 的 `data-*` 属性读出来。** 改动"加一条新行"就变成"往 HTML 里加一个 `data-qb-bar-row` 节点"，不用碰 JS、不用理解渲染函数内部逻辑。
+
 ## 核心原则：分层
 
 - **公共外壳（固定统一）**：页头、页尾、刷新按钮、分享海报弹层、复制/下载 PNG —— 全交给 `assets/share-shell/`。

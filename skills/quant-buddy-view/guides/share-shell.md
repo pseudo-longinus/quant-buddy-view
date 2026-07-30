@@ -131,4 +131,5 @@ python scripts/retrofit_share_shell.py '{"page_id":"page_xxx","update":true,"the
 - Verify the old body QR block (`手机扫码查看`) is absent.
 - Verify share modal generates a `900x1400` PNG poster.
 - Verify copy image works, or degrades to a clear fallback message when Clipboard permissions are unavailable.
+- For browser-feedback maintenance, run `verify_page.mjs --profile ui-refinement --require-browser`; add the user's exact screenshot size with `--extra-viewport [name:]WIDTHxHEIGHT` and manually confirm clipboard/download results in the target browser.
 - For public pages, use `static_page.py update` when preserving an already shared URL.

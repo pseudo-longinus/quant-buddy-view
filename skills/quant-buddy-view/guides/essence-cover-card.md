@@ -4,7 +4,7 @@
 > 新版实现是**独立 card runtime artifact**（`embedded-card-v1`）：在页面里内嵌一份「卡片模板 + 样式 + 取数清单 + runtime」，官网卡片流 / 截图工具能在空白宿主里 `QBCardRuntimeV1.mount()` 独立 hydrate 出这张卡，而不依赖旧的 `?cover=1` 整页 URL 模式。
 > 功能和对外称呼仍可叫「宽宝活卡」；卡片左上角只预留官网统一注入的标签位，不内置固定品牌文案。「精华卡 / 封面卡 / 范式卡」作为开发/路由别名保留。
 
-三种资源必须分开理解：Card Runtime artifact 是可执行的 HTML/CSS/manifest/runtime 契约；`card_snapshot_url` 是 `skill_server` 针对某个 `card_artifact_hash` 生成的不可变静态首帧；`thumbnail_url` 是整页封面。范式卡加载不得拿 `thumbnail_url` 兜底，manifest 也不得写入这两个图片字段。
+两种资源必须分开理解：Card Runtime artifact 是可执行的 HTML/CSS/manifest/runtime 契约；`card_snapshot_url` 是 `skill_server` 针对某个 `card_artifact_hash` 生成的不可变静态首帧，也是页面封面的唯一来源。manifest 不得写入任何服务端图片字段（`card_snapshot_url` / 历史的 `thumbnail_url`）。
 
 ## 触发词
 
@@ -53,7 +53,7 @@
 - Worker 在 720×540 空白宿主中取数并 hydrate，等 `data-qb-card-ready="true"` 和字体 ready 后截图，写入 `pages/card-snapshots/{page_id}/{hash}.png`。
 - 浏览官网、硬刷新、切换筛选、进入/离开视口、行情数据更新都不创建快照任务；这些动作只读取静态首帧并在前端 hydrate 实时卡片。
 - 快照失败不阻断页面发布；旧 hash 的任务通过条件更新不能覆盖新 artifact。
-- `thumbnail_url` 的整页封面生成和刷新流程独立存在，不属于本契约。
+- 整页缩略图（`thumbnail_url`）能力已下线：页面封面只有本契约产出的 `card_snapshot_url` 这一个来源，没有其它兜底图。
 
 ## 必须满足的契约
 
@@ -163,7 +163,7 @@
 ## 内容口径
 
 - 左上角：`data-qb-live-card-brand` 官方标签预留位，默认不显示固定文案。
-- 日期：实时数据口径对应更新日期，`YYYY-MM-DD`。
+- 日期：模板只放“待更新”与空 `datetime`，不内置历史日期；hydrate 按实时数据口径从所有 required outputs 的嵌套记录和有效值序列中选择最新可用日期，回填为 `YYYY-MM-DD`。
 - 标题：一句重点结论；与外层标题重复时改判断句。
 - 主指标：全页最重要的 1 个分数/价格/热度/风险等级。
 - 标志性小图：保留原页最能被记住的可视化语言（泡沫场、涨跌停结构、估值水位、净值曲线）。

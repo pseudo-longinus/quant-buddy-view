@@ -12,12 +12,31 @@ import common as C
 
 REGISTRY_PATH = os.path.join(C.SKILL_ROOT, "reply-templates", "index.json")
 POLICY_VERSION = "reply_render_policy_v1"
+DATA_POLICY_VERSION = "reply_data_policy_v1"
 _HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _FENCED_MARKDOWN_RE = re.compile(r"```markdown\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
 def _template_path(entry):
     return os.path.join(C.SKILL_ROOT, "reply-templates", str(entry.get("file") or ""))
+
+
+def _reply_data_policy(entry, template_id):
+    relative = str(entry.get("reply_data_policy_file") or "").strip()
+    if not relative:
+        return None
+    path = os.path.abspath(os.path.join(C.SKILL_ROOT, relative))
+    root = os.path.abspath(C.SKILL_ROOT) + os.sep
+    if not path.startswith(root) or not os.path.isfile(path):
+        raise ValueError(f"{template_id}.reply_data_policy_file 不存在或越界")
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        policy = json.load(handle)
+    if not isinstance(policy, dict) or policy.get("version") != DATA_POLICY_VERSION:
+        raise ValueError(f"{template_id}.reply_data_policy.version 必须是 {DATA_POLICY_VERSION}")
+    if policy.get("template_ref") != template_id:
+        raise ValueError(f"{template_id}.reply_data_policy.template_ref 不一致")
+    policy["policy_file"] = path
+    return policy
 
 
 def _headings_from_file(path):
@@ -100,6 +119,7 @@ def _load_registry_cached():
             template_id,
             entry["template_headings"],
         )
+        entry["reply_data_policy"] = _reply_data_policy(raw, template_id)
         by_id[template_id] = entry
     return {"registry": registry, "by_id": by_id}
 
@@ -121,3 +141,8 @@ def get_reply_render_policy(template_ref):
 def get_template_headings(template_ref):
     entry = get_template_entry(template_ref)
     return entry.get("template_headings") if entry else []
+
+
+def get_reply_data_policy(template_ref):
+    entry = get_template_entry(template_ref)
+    return entry.get("reply_data_policy") if entry else None

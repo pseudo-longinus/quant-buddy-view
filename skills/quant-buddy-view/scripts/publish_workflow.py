@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Deterministic QBV workflow: validate packages, register credentials, bind HTML, publish once."""
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import common as C
 import data_grant as DG
 import formula_package as FP
+import fork_runtime_contract as FRC
+import reply_data_evidence as RDE
 import static_page as SP
 
 
@@ -75,14 +79,15 @@ def _marker_specs(packages, grants, images=None):
     return normalized
 
 
-def _run_qbs_package_set(task_id, user_query, packages):
+def _run_qbs_package_set(task_id, user_query, packages, template_ref=""):
     payload = {
         "task_id": task_id,
         "user_query": user_query,
+        "template_ref": template_ref,
         "packages": [
             {
                 "name": str(item.get("name") or "").strip(),
-                **dict(item.get("validation") or {}),
+                **dict(item.get("contract") or item.get("validation") or {}),
             }
             for item in packages
         ],
@@ -112,6 +117,44 @@ def _run_qbs_package_set(task_id, user_query, packages):
             pass
 
 
+
+def _run_qbs_grant_set(task_id, user_query, grants, template_ref=""):
+    payload = {
+        "task_id": task_id,
+        "user_query": user_query,
+        "template_ref": template_ref,
+        "grants": [
+            {
+                "name": str(item.get("name") or item.get("role_id") or "").strip(),
+                "contract": dict(item.get("contract") or {}),
+                "contract_fingerprint": str(item.get("contract_fingerprint") or ""),
+            }
+            for item in grants
+        ],
+    }
+    fd, params_file = tempfile.mkstemp(prefix="qbv_grant_set_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        completed = subprocess.run(
+            [sys.executable, str(BRIDGE), "validate_grant_set", f"@{params_file}"],
+            cwd=SCRIPT_DIR.parent,
+            env=dict(os.environ),
+            capture_output=True,
+            check=False,
+        )
+        try:
+            result = json.loads(completed.stdout.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return _failure("QBS_INVALID_RESPONSE", f"grant-set 验证未返回合法 JSON: {exc}")
+        if completed.returncode != 0 or not isinstance(result, dict) or result.get("code") != 0:
+            return result if isinstance(result, dict) else _failure("QBS_GRANT_SET_FAILED", "grant-set 验证失败")
+        return result
+    finally:
+        try:
+            os.unlink(params_file)
+        except OSError:
+            pass
 def _replace_once(html, marker, value, label):
     count = html.count(marker)
     if count != 1:
@@ -249,7 +292,7 @@ def _normalize_package_begin_dates(packages, workflow_begin_date=None):
     return normalized
 
 
-def run_workflow(params):
+def _run_workflow_v1(params):
     params = dict(params or {})
     task_id = str(params.get("task_id") or "").strip()
     user_query = str(params.get("user_query") or "").strip()
@@ -306,7 +349,10 @@ def run_workflow(params):
     except (OSError, ValueError) as exc:
         return _failure("WORKFLOW_PREFLIGHT_FAILED", str(exc))
 
-    C.set_trace_context(task_id, user_query)
+    # configure_trace_context（不是 set_trace_context）：本次调用没带 api_key 字段时会保留
+    # 当前进程已生效的覆盖，不会把顶层 params 里传入的用户 api_key 悄悄清空——publish_workflow.py
+    # 中途多次切换 task_id/user_query 上下文，覆盖必须原样带到 package/grant 注册和最终 publish。
+    C.configure_trace_context({"task_id": task_id, "user_query": user_query})
     validation = _run_qbs_package_set(task_id, user_query, packages)
     if not isinstance(validation, dict) or validation.get("code") != 0:
         return _failure("PACKAGE_SET_VALIDATION_FAILED", "QBS package-set 验证失败", validation=validation)
@@ -394,21 +440,335 @@ def run_workflow(params):
     }
 
 
+
+def _read_json_file(path, label):
+    resolved = Path(str(path or "")).resolve()
+    if not resolved.is_file():
+        raise ValueError(f"{label} 不存在: {resolved}")
+    payload = json.loads(resolved.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} 必须是 JSON 对象")
+    return resolved, payload
+
+
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _validate_review_receipt(params, manifest_path, review_path, template_file, manifest):
+    receipt_file = str(params.get("review_receipt_file") or "").strip()
+    receipt_sha256 = str(params.get("review_receipt_sha256") or "").strip()
+    if not receipt_file or not receipt_sha256:
+        return None, _failure(
+            "FORK_REVIEW_RECEIPT_REQUIRED",
+            "publish_workflow_v2 必须由 fork_review_update 生成 review_receipt_file 与 review_receipt_sha256",
+        )
+    try:
+        receipt_path, receipt = _read_json_file(receipt_file, "review_receipt_file")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, _failure("FORK_REVIEW_RECEIPT_INVALID", str(exc))
+    if _sha256_file(receipt_path) != receipt_sha256:
+        return None, _failure("FORK_REVIEW_RECEIPT_INVALID", "review receipt 文件哈希不匹配")
+    if receipt.get("version") != FRC.REVIEW_RECEIPT_VERSION:
+        return None, _failure("FORK_REVIEW_RECEIPT_INVALID", f"review receipt.version 必须是 {FRC.REVIEW_RECEIPT_VERSION}")
+    if receipt.get("status") != "complete":
+        return None, _failure("FORK_REVIEW_INCOMPLETE", "review receipt 尚未完成")
+    publish_params = params.get("publish_verified") or {}
+    expected = {
+        "task_id": str(params.get("task_id") or ""),
+        "page_id": str(publish_params.get("page_id") or ""),
+        "source_template_id": str(manifest.get("source_template_id") or publish_params.get("source_template_id") or ""),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "review_sha256": _sha256_file(review_path),
+        "working_html_sha256": _sha256_file(template_file),
+        "review_base_sha256": str(manifest.get("review_base_sha256") or ""),
+    }
+    stale = {
+        key: {"expected": value, "actual": str(receipt.get(key) or "")}
+        for key, value in expected.items()
+        if value != str(receipt.get(key) or "")
+    }
+    if stale:
+        return None, _failure(
+            "FORK_REVIEW_STALE",
+            "review receipt 与当前 task/page/manifest/review/HTML 不一致",
+            stale_fields=stale,
+        )
+    return receipt, None
+
+
+def _run_workflow_v2(params):
+    params = dict(params or {})
+    if any(key in params for key in ("packages", "grants", "markers", "runtime_markers")):
+        return _failure(
+            "MANUAL_RUNTIME_BINDINGS_FORBIDDEN",
+            "fork_manifest_v2 禁止手工传入 packages、grants 或 runtime markers",
+        )
+    task_id = str(params.get("task_id") or "").strip()
+    user_query = str(params.get("user_query") or "").strip()
+    publish_params = params.get("publish_verified")
+    if not task_id or not user_query:
+        return _failure("QBV_TRACE_CONTEXT_REQUIRED", "task_id 和 user_query 必填")
+    if not isinstance(publish_params, dict) or not str(publish_params.get("page_id") or "").strip():
+        return _failure("PUBLISH_PARAMS_REQUIRED", "publish_verified.page_id 必填；fork_prepare 时应传 target_page_id")
+    reply_template = publish_params.get("agent_reply_template") if isinstance(publish_params.get("agent_reply_template"), dict) else {}
+    template_ref = str(reply_template.get("template_ref") or "").strip()
+
+    timings = {}
+    stages = {}
+    started = time.perf_counter()
+    try:
+        manifest_path, manifest = _read_json_file(params.get("fork_manifest_file"), "fork_manifest_file")
+        review_path, review = _read_json_file(params.get("fork_review_file"), "fork_review_file")
+        template_file = Path(str(params.get("html_template_file") or "")).resolve()
+        prepared_file = Path(str(params.get("prepared_html_file") or "")).resolve()
+        if not template_file.is_file() or not str(params.get("prepared_html_file") or "").strip():
+            return _failure("HTML_FILES_REQUIRED", "html_template_file 必须存在，prepared_html_file 必填")
+        if template_file == prepared_file:
+            return _failure("SOURCE_HTML_IMMUTABLE", "prepared_html_file 不能覆盖 html_template_file")
+        html = template_file.read_text(encoding="utf-8")
+        review_receipt, receipt_error = _validate_review_receipt(
+            params, manifest_path, review_path, template_file, manifest
+        )
+        if receipt_error:
+            return receipt_error
+        stages["manifest"] = FRC.validate_manifest_html(manifest, html)
+        resolved = FRC.resolve_review(manifest, review, html)
+        resolved_contract_sha256 = FRC.contract_fingerprint({
+            "packages": resolved["packages"],
+            "grants": resolved["grants"],
+            "html_sha256": hashlib.sha256(resolved["html"].encode("utf-8")).hexdigest(),
+        })
+        if review_receipt.get("resolved_contract_sha256") != resolved_contract_sha256:
+            return _failure("FORK_REVIEW_STALE", "review receipt 的已解析合同哈希已过期")
+        html = resolved["html"]
+        stages["contracts"] = FRC.validate_resolved_contracts(manifest, resolved)
+        packages = resolved["packages"]
+        grants = resolved["grants"]
+        images = params.get("images") or []
+        if not isinstance(images, list):
+            return _failure("INVALID_IMAGES", "images 必须是数组")
+        marker_specs = _marker_specs(packages, grants, images)
+        for label, marker in marker_specs:
+            if html.count(marker) != 1:
+                raise ValueError(f"{label} 必须在 HTML 中恰好出现一次")
+        prepared_images = []
+        for index, item in enumerate(images):
+            logical_name = str(item.get("logical_name") or item.get("name") or "").strip()
+            if not logical_name:
+                raise ValueError(f"images[{index}].logical_name 必填")
+            path, image_error = SP._resolve_local_image_file(item)
+            if image_error:
+                raise ValueError(image_error.get("message") or f"images[{index}] 图片预检失败")
+            prepared_images.append({**item, "logical_name": logical_name, "resolved_image_file": path})
+        preview_html = _card_runtime_preview_html(html, packages, grants, images)
+        card_runtime_preflight = _run_card_runtime_preflight(preview_html)
+        if not isinstance(card_runtime_preflight, dict) or card_runtime_preflight.get("code") != 0:
+            return _failure(
+                "CARD_RUNTIME_PREFLIGHT_FAILED",
+                "Card Runtime 发布前结构预检失败；尚未执行公式/Grant验证或任何注册",
+                card_runtime_preflight=card_runtime_preflight,
+                timing=timings,
+            )
+        stages["card_runtime"] = card_runtime_preflight
+    except (OSError, ValueError, json.JSONDecodeError, FRC.ForkRuntimeError) as exc:
+        if isinstance(exc, FRC.ForkRuntimeError):
+            return exc.as_dict()
+        return _failure("WORKFLOW_PREFLIGHT_FAILED", str(exc))
+    timings["manifest_preflight_ms"] = round((time.perf_counter() - started) * 1000)
+
+    # configure_trace_context（不是 set_trace_context）：本次调用没带 api_key 字段时会保留
+    # 当前进程已生效的覆盖，不会把顶层 params 里传入的用户 api_key 悄悄清空——publish_workflow.py
+    # 中途多次切换 task_id/user_query 上下文，覆盖必须原样带到 package/grant 注册和最终 publish。
+    C.configure_trace_context({"task_id": task_id, "user_query": user_query})
+    started = time.perf_counter()
+    package_validation = (
+        _run_qbs_package_set(task_id, user_query, packages, template_ref)
+        if packages else {"code": 0, "validation_receipt_files": [], "packages": []}
+    )
+    timings["package_validation_ms"] = round((time.perf_counter() - started) * 1000)
+    if not isinstance(package_validation, dict) or package_validation.get("code") != 0:
+        return _failure("PACKAGE_SET_VALIDATION_FAILED", "QBS package-set 验证失败", validation=package_validation, timing=timings)
+    receipts = package_validation.get("validation_receipt_files") or []
+    if len(receipts) != len(packages):
+        return _failure("PACKAGE_SET_RECEIPTS_INCOMPLETE", "package-set 收据数量与公式包数量不一致", timing=timings)
+
+    started = time.perf_counter()
+    grant_validation = (
+        _run_qbs_grant_set(task_id, user_query, grants, template_ref)
+        if grants else {"code": 0, "validation_receipt_files": [], "grants": []}
+    )
+    timings["grant_validation_ms"] = round((time.perf_counter() - started) * 1000)
+    if not isinstance(grant_validation, dict) or grant_validation.get("code") != 0:
+        return _failure("GRANT_SET_VALIDATION_FAILED", "QBS grant-set 验证失败", validation=grant_validation, timing=timings)
+    grant_validation_by_name = {item.get("name"): item for item in grant_validation.get("grants") or []}
+    for grant in grants:
+        receipt = grant_validation_by_name.get(grant.get("name")) or {}
+        if receipt.get("contract_fingerprint") != grant.get("contract_fingerprint"):
+            return _failure("GRANT_FINGERPRINT_MISMATCH", f"Grant验证与注册合同不一致: {grant.get('name')}", timing=timings)
+
+    reply_evidence_contract = {}
+    if RDE.get_policy(template_ref):
+        started = time.perf_counter()
+        evidence_stats = dict(package_validation.get("reply_evidence_stats") or {})
+        evidence_stats.update({
+            "formula_read_batch_count": evidence_stats.get("batch_count", 0),
+            "formula_read_success_count": evidence_stats.get("success_field_count", 0),
+            "formula_read_failure_count": evidence_stats.get("failed_field_count", 0),
+            "grant_validation_result_count": len(grant_validation.get("grants") or []),
+            "extra_package_query_count": 0,
+            "extra_grant_query_count": 0,
+            "formula_recompute_count": 0,
+        })
+        try:
+            reply_evidence_contract = RDE.build_from_validations(
+                task_id, template_ref, package_validation, grant_validation, stats=evidence_stats
+            ) or {}
+        except (OSError, ValueError, TypeError) as exc:
+            return _failure("REPLY_EVIDENCE_FAILED", str(exc), timing=timings)
+        timings["reply_evidence_ms"] = evidence_stats.get("read_elapsed_ms", 0) + round((time.perf_counter() - started) * 1000)
+        if not reply_evidence_contract.get("reply_data_evidence_file"):
+            return _failure("REPLY_EVIDENCE_FAILED", "严格回复模板未生成证据产物", timing=timings)
+        stages["reply_evidence"] = reply_evidence_contract.get("reply_data_availability") or {}
+
+    registered_packages = []
+    registered_grants = []
+    started = time.perf_counter()
+    for index, item in enumerate(packages):
+        registration = dict(item["contract"])
+        registration.update({"task_id": task_id, "user_query": user_query})
+        result = FP.cmd_register(registration)
+        if not (isinstance(result, dict) and result.get("code") == 0 and result.get("package_id") and result.get("signature")):
+            return _failure("PACKAGE_REGISTER_FAILED", f"公式包注册失败: {item.get('name') or index}", failed_index=index, timing=timings)
+        markers = item["markers"]
+        html = _replace_marker_field(html, markers["package_id"], result["package_id"], f"packages[{index}].package_id")
+        html = _replace_marker_field(html, markers["signature"], result["signature"], f"packages[{index}].signature")
+        registered_packages.append({"name": item["name"], "package_id": result["package_id"], "contract_fingerprint": item["contract_fingerprint"]})
+    timings["package_registration_ms"] = round((time.perf_counter() - started) * 1000)
+
+    started = time.perf_counter()
+    for index, item in enumerate(grants):
+        contract = item["contract"]
+        registration = {"kind": contract["kind"], "payload": contract["payload"], "task_id": task_id, "user_query": user_query}
+        result = DG.cmd_register(registration)
+        if not (isinstance(result, dict) and result.get("code") == 0 and result.get("grant_id") and result.get("signature")):
+            return _failure("GRANT_REGISTER_FAILED", f"数据授权注册失败: {item.get('name') or index}", failed_index=index, timing=timings)
+        markers = item["markers"]
+        html = _replace_marker_field(html, markers["grant_id"], result["grant_id"], f"grants[{index}].grant_id")
+        html = _replace_marker_field(html, markers["signature"], result["signature"], f"grants[{index}].signature")
+        registered_grants.append({"name": item["name"], "grant_id": result["grant_id"], "contract_fingerprint": item["contract_fingerprint"]})
+    timings["grant_registration_ms"] = round((time.perf_counter() - started) * 1000)
+
+    uploaded_images = []
+    started = time.perf_counter()
+    for index, item in enumerate(prepared_images):
+        result = SP.cmd_image_upload({
+            "task_id": task_id,
+            "page_id": publish_params["page_id"],
+            "image_file": item["resolved_image_file"],
+            "logical_name": item["logical_name"],
+        })
+        image_url = result.get("url") if isinstance(result, dict) else ""
+        if not (isinstance(result, dict) and result.get("code") == 0 and result.get("asset_id") and image_url):
+            return _failure("IMAGE_UPLOAD_FAILED", f"正文图片上传失败: {item.get('name') or index}", failed_index=index, timing=timings)
+        html = _replace_once(html, item["marker"], image_url, f"images[{index}].marker")
+        uploaded_images.append({"name": item["logical_name"], "asset_id": result["asset_id"], "url": image_url})
+    timings["image_upload_ms"] = round((time.perf_counter() - started) * 1000)
+
+    prepared_file.parent.mkdir(parents=True, exist_ok=True)
+    prepared_file.write_text(html, encoding="utf-8", newline="\n")
+    verified_params = dict(publish_params)
+    verified_params.update({
+        "task_id": task_id,
+        "user_query": user_query,
+        "html_file": str(prepared_file),
+        "fork_manifest_file": str(manifest_path),
+        "validation_receipt_files": receipts,
+        "_via_publish_workflow": SP._VIA_PUBLISH_WORKFLOW_SENTINEL,
+    })
+    verified_params.update(reply_evidence_contract)
+    started = time.perf_counter()
+    published = SP.cmd_publish_verified(verified_params)
+    timings["publish_verified_total_ms"] = round((time.perf_counter() - started) * 1000)
+    publish_timing = published.get("timing") if isinstance(published, dict) and isinstance(published.get("timing"), dict) else {}
+    timings["browser_validation_ms"] = publish_timing.get("local_browser_ms", 0)
+    timings["publish_ms"] = publish_timing.get("publish_final_ms", 0)
+    timings["public_smoke_ms"] = publish_timing.get("public_smoke_ms", 0)
+    return {
+        "code": published.get("code", 1) if isinstance(published, dict) else 1,
+        "success": bool(isinstance(published, dict) and published.get("code") == 0),
+        "workflow_version": FRC.PLAN_VERSION,
+        "task_id": task_id,
+        "package_count": len(registered_packages),
+        "grant_count": len(registered_grants),
+        "image_count": len(uploaded_images),
+        "registered_packages": registered_packages,
+        "registered_grants": registered_grants,
+        "uploaded_images": uploaded_images,
+        "validation_receipt_files": receipts,
+        "grant_validation_receipt_files": grant_validation.get("validation_receipt_files") or [],
+        "card_runtime_preflight": card_runtime_preflight,
+        "timing": timings,
+        "stages": stages,
+        "prepared_html_file": str(prepared_file),
+        "publish_verified": published,
+        "manifest_file": str(manifest_path),
+        "review_file": str(review_path),
+        "reply_data_evidence_file": reply_evidence_contract.get("reply_data_evidence_file"),
+        "reply_data_evidence_sha256": reply_evidence_contract.get("reply_data_evidence_sha256"),
+        "reply_data_availability": reply_evidence_contract.get("reply_data_availability"),
+    }
+
+
+def run_workflow(params):
+    params = dict(params or {})
+    if params.get("version") == FRC.PLAN_VERSION:
+        return _run_workflow_v2(params)
+    manifest_file = params.get("fork_manifest_file")
+    if manifest_file:
+        try:
+            _, manifest = _read_json_file(manifest_file, "fork_manifest_file")
+        except (OSError, ValueError, json.JSONDecodeError):
+            manifest = {}
+        if manifest.get("version") == FRC.MANIFEST_VERSION and any(key in params for key in ("packages", "grants", "markers", "runtime_markers")):
+            return _failure("MANUAL_RUNTIME_BINDINGS_FORBIDDEN", "fork_manifest_v2 禁止手工传入 runtime bindings")
+    return _run_workflow_v1(params)
+
+
+def _persist_workflow_report(result, task_id):
+    path = C.task_temp_path(task_id, "publish-workflow-report.json", create_parent=True)
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+
 def main():
     params = C.read_params(sys.argv[1:], env_var="QBV_WORKFLOW_PARAMS")
     try:
         result = run_workflow(params)
     except (FileNotFoundError, OSError, ValueError) as exc:
         result = _failure("WORKFLOW_ERROR", str(exc))
-    emitted = dict(result)
-    if isinstance(emitted.get("publish_verified"), dict):
-        emitted["publish_verified"] = SP._publish_verified_cli_result(
-            emitted["publish_verified"],
-            params.get("task_id"),
-        )
+    try:
+        report_file, report_sha256 = _persist_workflow_report(result, params.get("task_id"))
+    except OSError as exc:
+        report_file, report_sha256 = "", ""
+        result.setdefault("report_warning", str(exc))
+    emitted = {
+        "code": result.get("code", 1),
+        "success": bool(result.get("success")),
+        "workflow_version": result.get("workflow_version") or "publish_workflow_v1",
+        "task_id": result.get("task_id") or params.get("task_id"),
+        "package_count": result.get("package_count", 0),
+        "grant_count": result.get("grant_count", 0),
+        "image_count": result.get("image_count", 0),
+        "timing": result.get("timing") or {},
+        "report_file": report_file,
+        "report_sha256": report_sha256,
+    }
+    if result.get("error"):
+        emitted.update({"error": result.get("error"), "message": result.get("message")})
+    if isinstance(result.get("publish_verified"), dict):
+        emitted["publish_verified"] = SP._publish_verified_cli_result(result["publish_verified"], params.get("task_id"))
     C.emit(emitted, out_name="qbv_publish_workflow_out.txt")
     raise SystemExit(0 if result.get("code") == 0 else 1)
-
 
 if __name__ == "__main__":
     main()

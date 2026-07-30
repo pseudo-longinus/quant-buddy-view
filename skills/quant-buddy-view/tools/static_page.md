@@ -11,12 +11,12 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 
 `image_upload` 参数为 `task_id/page_id/image_file/logical_name`。本地只预检文件存在、扩展名为 PNG/JPEG/WebP 和 5MB 上限；真实 magic bytes、尺寸、转码和配额以服务端为准。成功响应的 `url` 是同页、同域、immutable WebP，必须用该绝对 URL 写入 HTML。
 
-`image_list` 用于确认目标页资产为 active。Agent 不提供删除命令；发布失败遗留的 unused 图片由 growthX 后台两段式安全删除。公共 multipart helper 从 `common.headers()` 继承 `x-task-id/x-skill-version/x-skill-name/x-skill-channel` 后只覆盖 `Content-Type`，缩略图和正文图片的审计上下文一致。
+`image_list` 用于确认目标页资产为 active。Agent 不提供删除命令；发布失败遗留的 unused 图片由 growthX 后台两段式安全删除。公共 multipart helper 从 `common.headers()` 继承 `x-task-id/x-skill-version/x-skill-name/x-skill-channel` 后只覆盖 `Content-Type`，正文图片的审计上下文与其它接口一致。
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
 > **首链进度页**：新会话先查官方精选+社区范式卡；普通渠道 direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize，fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护并发送同一首链。`config.json._channel=feishu-group` 时内部流程不变，但所有非终态链接都禁止发送，只交付 terminal contract 的 playground URL。
-> 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 `config.json` 的 API Key 认身份（归属由 api_key 推定）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`，后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
+> 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 API Key 认身份（归属由 api_key 推定，优先级：参数 `api_key` > `QBV_API_KEY` > `config.json`）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`——该步同样是后端写入、同样按 api_key 归属，必须与后续命令带同一个 key，否则整条链路的第一条记录会归到 `config.json` 的默认账号；后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
 
@@ -30,7 +30,6 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 | 下载 | `GET /skill/getStaticPage?page_id=&url=` （返回公开链接 + 元信息，不含字节） |
 | 列表 | `GET /skill/listStaticPages?page=&page_size=&scope=` |
 | 撤销 | `POST /skill/revokeStaticPage` |
-| 缩略图 | `POST /skill/setPageThumbnail` （multipart：`file`=PNG/JPG + `page_id`） |
 | 标签列表 | `GET /skill/listPageTags?tag_type=`（`scene` / `paradigm`；不传返回两类） |
 | 自动打标 | `POST /skill/autoTagStaticPage`（LLM 识别场景/范式标签并落库；`dry_run` 只读预览、`force` 忽略缓存重打） |
 | 发布到社区 | `POST /skill/publishStaticPageToCommunity` |
@@ -56,17 +55,18 @@ python scripts/static_page.py update_progress '{"task_id":"task_xxx","page_id":"
 # 用户回复后复用同一 task_id/page_id，从原步骤恢复
 python scripts/static_page.py update_progress '{"task_id":"task_xxx","page_id":"page_xxx","current_step":"formula_validation","page_status":"running","message":"已确认市场口径，继续验证实时数据"}'
 
-# fork 来源准备：下载来源 HTML 并生成 fork_manifest_v1
-python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
+# fork 来源准备：自动脱敏凭证并生成 manifest v2、review 与 publish plan
+# 资产替换由 target_asset 驱动；来源主资产与其在页面中的实际代码写法由脚本推导，不需要（也不该）自己猜
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","target_page_id":"page_xxx","target_asset":{"name":"新标的名","code":"新代码"}}'
 
-# fork 首链分级验收并发布：仍是同一个 page_id / URL
-python scripts/static_page.py publish_verified '{"task_id":"task_xxx","page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","validation_receipt_files":["receipt.json"]}'
+# decisions 已按角色预生成嵌套占位骨架（{"roles":{"<role_id>":{...}}}），只在骨架里填空；
+# 不要新增/改写顶层字段，也不要把 required_decisions 里的扁平 decision_id 当 key 用。
+# 先运行 review_update_command，再运行 publish_command
+python scripts/publish_workflow.py '@D:\path\page.publish-plan.json'
 
 # 上传（推荐用 build_dashboard 产物文件）
 python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板"}'
 
-# 上传 HTML 成功后顺带设置缩略图（缩略图失败只返回 warning，不回滚 HTML）
-python scripts/static_page.py upload '{"html_file":"output/pages/dash.html","title":"沪深300异动看板","thumbnail_file":"output/thumbnails/dash.png"}'
 
 # 也可直接传 HTML 全文（中文走 @file/SP_PARAMS 防 GBK 截断）
 SP_PARAMS='{"html":"<!doctype html>...","title":"..."}' python scripts/static_page.py upload
@@ -74,8 +74,6 @@ SP_PARAMS='{"html":"<!doctype html>...","title":"..."}' python scripts/static_pa
 # 替换已发布页面内容（链接不变；page_id 来自上次 upload/list）
 python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html"}'
 
-# 替换 HTML 成功后顺带替换缩略图
-python scripts/static_page.py update '{"page_id":"page_xxx","html_file":"output/pages/dash.html","thumbnail_file":"output/thumbnails/dash.png"}'
 
 # 下载已发布页面的 HTML 再编辑（落盘到本地）
 python scripts/static_page.py download '{"page_id":"page_xxx","save":"output/pages/back.html"}'
@@ -84,8 +82,6 @@ python scripts/static_page.py download '{"page_id":"page_xxx","save":"output/pag
 python scripts/static_page.py list   '{"page":1,"page_size":20}'
 python scripts/static_page.py revoke '{"page_id":"page_xxx"}'
 
-# 给页面设置/替换缩略图（纯展示封面，直传 PNG/JPG）
-python scripts/static_page.py thumbnail '{"page_id":"page_xxx","image_file":"output/pages/cover.png"}'
 
 # 如需打标签，可查询当前可用标签（场景/范式）
 python scripts/static_page.py tags '{}'
@@ -126,8 +122,10 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 - 不包含 `setTimeout` / `setInterval` / `location.replace` / `meta refresh` / `postMessage`；
 - 默认接入 QuantBuddy 公共页头页尾，并套浅色 share shell theme；如内部调试确实不要页头页尾，可显式传 `ensure_share_shell:false`；
 - 首链流程的最终正式活页默认走 `publish_final`，保留普通 `update` 的 share shell 门禁。
+- `new_page` 在当前 task 完成 `templates(recommend:"all")` 后，要求 Agent 显式传 `routing_decision`：fork 引用本次候选的 `source_template_id`，unmatched 指出最接近候选、受控 `reason_code` 与实质能力缺口。脚本校验并把决定与 `page_id` 写入 task-scoped `routing-credential.json`。
 - `publish_final` 会先把进度推进到 `final_publish`；若正式 HTML 更新失败，它会把同一个 `page_id` 回写成 `failed` 进度页，避免用户刷新后长期停在上一阶段。
-- 复用在线模板时，用同一 `task_id` 调 `fork_prepare` 生成 `fork_manifest_v1` 和任务级 `fork_task_binding_v1`，`publish_final` 仍应同时传 `source_template_id + fork_manifest_file`。若 Agent 漏传，脚本会按 task 自动恢复；若显式值与绑定冲突则 fail-closed。脚本继承来源模板的 `agent_reply_template`，但不会复制来源 `page_context`；manifest 负责校验来源 HTML SHA、来源凭证残留、核心栏目、必需输出与 Card Runtime。
+- `publish_final` 在进度更新和正式上传前复核路由：已选 fork 但没有 `fork_prepare` task binding 时返回可恢复的 `ROUTING_RECONFIRM_REQUIRED`；确认模板不适用时可传一次 `routing_override` 改判 unmatched。该检查不限制 `build_dashboard`，旧任务无决定记录时保持兼容。
+- 复用在线模板时，用同一 `task_id` 调 `fork_prepare` 生成 `fork_manifest_v2`、脱敏 HTML、`fork-review.json`、`publish-plan.json` 和任务级 `fork_task_binding_v1`。新流程由 publish plan 调用 `publish_workflow.py`；已准备的 v1 manifest 仍兼容。脚本继承来源模板的 `agent_reply_template`，manifest 负责校验来源 HTML SHA、来源凭证残留、核心栏目、必需输出与 Card Runtime。
 - 个股估值、宏观事件、行业主题、多资产比较、资金量化、基金产品、海外资产会按高置信 metadata 匹配专业骨架；无法匹配的新活页使用 `generic_live_page_delivery_v1`，不再退化成一句发布摘要。
 - `reply_template_v2 + hybrid` 必须同时具备当前活页 `page_context` 和 `hybrid_composition`，缺一项正式发布直接失败；旧 v1 hybrid 兼容。
 - `update_progress` 优先只传 `current_step + message`，脚本会自动把前序阶段标为 `done`、当前阶段标为 `running`、后序阶段标为 `pending`；不要在每次更新里复制一份可能过期的完整 `steps`。
@@ -141,6 +139,7 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 | 字段 | 命令 | 必填 | 说明 |
 |---|---|---|---|
 | `page_id` | `update_progress` | ✅ | 要覆盖的进度页 ID |
+| `routing_decision` | `new_page` | 带 `task_id` 时必填 | Agent 的显式路由决定。fork：`{mode:"fork",source_template_id,reason_code}`；unmatched：`{mode:"unmatched",closest_template_id,reason_code,reason}`。候选 ID 必须来自本次 `items_summary` |
 | `title` | `new_page` / `update_progress` | ❌ | 页面标题，默认 `活页生成中` |
 | `message` | `new_page` / `update_progress` | ❌ | 当前状态文案 |
 | `current_step` | `new_page` / `update_progress` | ❌ | 当前阶段 ID，默认 `plan` |
@@ -155,8 +154,9 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 | `progress_message` / `final_publish_message` / `publish_message` | ❌ | 进入 `final_publish` 时的用户可见文案，默认 `正在完成活页生成` |
 | `failure_message` / `progress_failure_message` | ❌ | 正式发布失败时回写到进度页的用户可见文案，默认 `活页生成遇到问题，请稍后重试。` |
 | `source_template_id` | ❌ | 本页复用的在线模板 `template_id/page_id`；继承回复骨架，不复制来源 `page_context` |
-| `fork_manifest_file` / `fork_manifest` | `source_template_id` 存在时必填 | `fork_prepare` 生成的 `fork_manifest_v1` 文件或内联对象；发布前 fail-closed 校验来源 HTML、package/grant/signature、栏目、输出和 Card Runtime |
+| `fork_manifest_file` / `fork_manifest` | `source_template_id` 存在时必填 | v1/v2 均可读取；新 `fork_prepare` 只生成 v2。发布前 fail-closed 校验来源 HTML、凭证、栏目、输出和 Card Runtime |
 | `require_agent_reply_template` | ❌ | `true` 时启用 fail-closed 门禁；无法解析 Agent 回复模板则不发布正式页 |
+| `routing_override` | ❌ | 仅用于已记录 fork、但尚未 `fork_prepare` 且确认模板有实质能力缺口时，显式传 `{from_mode:"fork",to_mode:"unmatched",reason_code,reason}`；已完成 fork binding 后不允许改判 |
 
 默认步骤固定为：
 
@@ -165,27 +165,28 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 典型流程：
 
 ```bash
-python scripts/static_page.py new_page '{"title":"中证500异动监控","message":"正在选择活页方案"}'
+python scripts/static_page.py new_page '{"task_id":"task_xxx","title":"中证500异动监控","message":"正在选择活页方案","routing_decision":{"mode":"fork","source_template_id":"page_template_xxx","reason_code":"same_paradigm_different_scope"}}'
 python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"template","message":"已选择中证500异动监控活页"}'
 python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"verify","message":"活页内容已生成，正在检查展示效果"}'
-python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","source_markers":["贵州茅台","SH600519"],"target_asset":"SZ300209"}'
-python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"目标标的估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_template_xxx","target_page_id":"page_xxx","target_asset":{"name":"行云科技","code":"300209"}}'
+python scripts/publish_workflow.py '@output/forks/page_template_xxx/page_template_xxx.publish-plan.json'
 ```
 
 新 fork 默认改用 `publish_verified`，由脚本一次完成发布前后验收。它在启动浏览器前完成 fork 来源、凭证 tuple、最终公式包输出和分位语义预检。manifest 的 `required_outputs` 必须真实存在于最终 HTML 所绑定公式包的输出 union 中；仅在 HTML 中声明 `QB_REQUIRED_OUTPUTS` 或其他同名字符串不能通过。若同一 `package_id` 对应多个 signature，则以 `credential_ambiguity` 拒绝发布。
 
-成功结果会返回 `agent_reply_contract_file + agent_reply_contract_sha256`、`reply_draft_file`、`reply_validation_params_file` 和 `reply_validation_command`。只把最终 Markdown 写入 draft 并执行返回的命令一次；validator 不接受手工重建的 contract。CLI stdout 只保留阶段摘要，完整结果写入返回的 `full_report_file`。
+成功结果会返回 `agent_reply_contract_file + agent_reply_contract_sha256`、`reply_draft_file`、`reply_validation_params_file` 和 `reply_validation_command`。严格数据模板还返回 `reply_data_evidence_file + reply_data_evidence_sha256 + reply_data_availability`。只把最终 Markdown 写入 draft 并执行返回的命令一次；validator 不接受手工重建的 contract。`valid=true` 时使用返回的 `validated_markdown` 原样交付。CLI stdout 只保留阶段摘要，完整结果写入返回的 `full_report_file`。
 
 浏览器 profile：
 
 - `full`：1440 / 390 / 320，结构或 CSS 大改时单独运行。
 - `fork-local`：发布前 1440 / 320，检查布局、占位符、控制台和可选 Card Runtime。
 - `public-smoke`：发布后单视口检查公网可达、核心内容、控制台和实时 hydrate，不重复完整布局验收。
+- `ui-refinement`：标准三视口加公共分享弹层交互门禁；单独运行 `verify_page.mjs` 时，批注来自特殊宽高可追加 `--extra-viewport [name:]WIDTHxHEIGHT`，明确字号下限可追加 `--min-visible-font-px N`。详细流程见 [browser-feedback-refinement.md](../guides/browser-feedback-refinement.md)。
 - `live-only`：direct/certified 页面只检查 Card Runtime hydrate。
 
 发布前失败返回 `published:false` 且不会调用 `publish_final`；发布成功后公网冒烟失败返回 `published:true, verified:false` 并保留最终公开 URL。
 
-包含多个公式包和数据授权时，使用 [publish_workflow.md](publish_workflow.md) 的单命令编排，把 package-set 验证、注册、marker 替换和 `publish_verified` 串联起来，避免 Agent 分步拼接。
+fork 只要含任一公式包或数据授权，就使用 [publish_workflow.md](publish_workflow.md) 返回的 publish plan；Agent 不再拼 package/grant、Marker 或完整 workflow JSON。
 
 ## 公共页头页尾门禁
 
@@ -283,10 +284,10 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 
 - `templates` / `template`：只返回 `agent_reply_hint`，`resource_role=source_template`。普通渠道 direct 精确命中时，列表 URL 必须在下一次工具调用前先发给用户；`feishu-group` 的 hint 带 `delivery_policy.emit_intermediate_url=false`，禁止发送列表 URL，并直接调用 `direct_deliver`。fork 的 `download_url` 只是来源输入。
 - direct 命中：运行一次 `direct_deliver`，由脚本读取一次模板、按当前 package/grant 各 query 一次并调用一次 `direct_finalize`；成功返回 `agent_reply_contract.terminal=true` 和 `delivery_trace_id`，且不改模板生成 Trace 字段。
-- `fork_prepare`：返回来源 HTML 与 `fork_manifest_v1` 文件路径，同时保持 `agent_reply_hint.terminal=false`；它是 fork 输入，不是完成证据。
+- `fork_prepare`：只返回脱敏工作 HTML、manifest v2、review 和 publish plan 路径，不主动暴露只读来源 HTML 路径或来源凭证；它是 fork 输入，不是完成证据。
 - `list` / 默认 `download`：只返回 `agent_reply_hint`，`resource_role=existing_page`。
 - `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。普通渠道的 `waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`；`feishu-group` 不返回 hint `public_url`，澄清消息也不得带链接。两者都只授权一次澄清停顿，不是业务完成证据。
-- 成功的 `upload` / `update` / `publish_final` / `publish_verified` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`feishu-group` 还包含 `delivery_policy:{channel:"feishu-group",emit_intermediate_url:false,terminal_url_format:"quantbuddy_playground"}`，并把 contract `public_url` 转为 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`；原始 pages URL 仅供内部发布与验收。`direct_deliver` 还附加只含公式 output 名称与脱敏 grant 字段路径的 `reply_data_availability`。
+- 成功的 `upload` / `update` / `publish_final` / `publish_verified` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`feishu-group` 还包含 `delivery_policy:{channel:"feishu-group",emit_intermediate_url:false,terminal_url_format:"quantbuddy_playground",max_markdown_tables:5}`，并把 contract `public_url` 转为 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`；原始 pages URL 仅供内部发布与验收。启用 `reply_data_policy_file` 的模板还附加 SHA256 绑定的 `reply_data_evidence_v1` 和字段级 `reply_data_availability`；direct 路径只复用本轮 package/grant 查询结果，不增加接口调用。validator 会在飞书终态发送前统计 Markdown 表格，超过限制即返回 `MARKDOWN_TABLE_LIMIT_EXCEEDED`。
 - 只有终态 contract 可以触发最终回复；其中 `required=true` 时才要求读取 Markdown 回复骨架。任何 hint、来源模板 metadata 或 `terminal:false` 都表示必须继续工作。
 - `publish_final` 会 fail-closed 校验同一首链 `page_id` / URL、排除来源模板 URL；fork 还要求有效 manifest、禁止任一来源 package/grant 残留，并检查核心栏目、必需输出、Card Runtime 和用户自己的实时凭证。
 
@@ -294,11 +295,11 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 
 归属由 `api_key`（Bearer）认定。两类对象、两套口径：
 
-**A. 自己的页面**（upload / update / download / list / revoke / **thumbnail** / publish_community / unpublish_community）
+**A. 自己的页面**（upload / update / download / list / revoke / publish_community / unpublish_community）
 
 - 默认：所有操作**只针对本人页面**。
 - `is_test=true` 的用户（内部）可以：
-  - `download` / `update` / `thumbnail` **其他 is_test 用户**的页面（按 page_id / url）；
+  - `download` / `update` **其他 is_test 用户**的页面（按 page_id / url）；
   - `list` 传 `scope=test_all`（或 `all=1`）列出**全部 is_test 用户**的页面（items 带 `owner`）。
 - 对**普通（非 is_test）用户**的页面：跨用户访问一律 `FORBIDDEN`。
 - `revoke`（撤销）**不开放**跨用户，始终仅本人。
@@ -323,52 +324,6 @@ python scripts/static_page.py list '{"scope":"test_all"}'
 python scripts/static_page.py download '{"page_id":"page_other","save":"output/pages/x.html"}'
 python scripts/static_page.py update   '{"page_id":"page_other","html_file":"output/pages/x.html"}'
 ```
-
-## 缩略图（`thumbnail` → setPageThumbnail）
-
-给一个**已发布**页面设置 / 替换一张**纯展示用的封面图**。缩略图只用于列表 / 详情 / 模板墙的
-`<img>` 预览，**不进入页面 HTML、不影响实时取数、不占活跃页配额**。
-
-- 直传图片文件（`image_file` 本地路径，PNG/JPG，≤2MB）；脚本按扩展名定 `Content-Type`，走
-  multipart `file` 字段上传。
-- 对象固定存 OSS `pages/thumbnails/{page_id}.png`（public-read），库里只回写页面的 `thumbnail_url`。
-- 因为按 `page_id` 命名：页面被转成公共模板后 page_id 不变 → 缩略图**天然继续有效**。
-- 鉴权同「自己的页面」B 类规则：本人 / 同为 is_test 可设；已转公共模板的页**仅 is_test** 可改。
-- 计费：固定 1 RU。
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `page_id` | string | ✅ | 要设缩略图的页面 |
-| `image_file` | string | ✅ | 本地图片路径（PNG/JPG，相对则相对 skill 根，≤2MB） |
-
-返回：`{ "code": 0, "page_id": "page_...", "thumbnail_url": "https://pages.quantbuddy.cn/pages/thumbnails/page_....png" }`
-
-错误码：`PAGE_ID_REQUIRED` / `IMAGE_REQUIRED`（没带文件）/ `PAGE_NOT_FOUND` / `FORBIDDEN`（无权改他人页或非 is_test 改模板）/ `IMAGE_TOO_LARGE` / `BAD_IMAGE_TYPE`。
-
-> 这张图什么时候用：页面已经发布、想在后台/模板墙有个像样的封面时再补一张即可，是**可选**的额外信息，不影响页面本身能否打开或取数。
-
-### 给已发布公共模板生成封面
-
-对已经上线的公共模板，不要直接用浏览器打开公开 HTML 后立刻截图：实时取数页面的初始 DOM 往往还停在
-“等待取数”。应先用 `render_existing_page_thumbnail.py` 取公式包真实 outputs，并临时替换封面页里的
-`QB.query`，让页面离线渲染完成后再截图。
-
-```bash
-python scripts/render_existing_page_thumbnail.py "{\"url\":\"https://pages.quantbuddy.cn/pages/page_xxx.html\",\"page_id\":\"page_xxx\",\"out_file\":\"output/thumbnails/page_xxx.png\",\"upload\":true}"
-```
-
-返回会包含 `query.status`、`query.outputs_count`、`capture.rasterizer`、`width/height/bytes` 和
-`thumbnail_url`。脚本不会在返回里输出 `signature`；如果页面没有公式包凭证或取数失败，会退化为普通等待截图并把原因写进 `query`。
-
-### 随 upload / update 自动设置缩略图
-
-`upload` / `update` 也可以带 `thumbnail_file`（或 `thumbnail_image` / `thumbnail_path`）。脚本会先发布 HTML，
-拿到或复用 `page_id` 后再调用同一个 `thumbnail` 上传封面。
-
-- HTML 发布/替换成功是主结果；缩略图上传失败**不回滚 HTML**，返回 JSON 仍保持 `code:0`，并附带
-  `thumbnail_warning` / `warnings[]`。
-- 成功时会把 `thumbnail_url` 合并回 upload/update 的返回值。
-- `thumbnail_file` 仍是 PNG/JPG、≤2MB，相对路径按 skill 根目录解析。
 
 ## 官方精选：读取 / 复用（`templates` / `template`）
 
@@ -427,7 +382,7 @@ python scripts/static_page.py templates '{"recommend":"社区"}'
 python scripts/static_page.py template '{"template_id":"tpl_xxx"}'
 ```
 
-返回：`{ code:0, template_id, page_id, title, description, thumbnail_url, category, is_template, template_status,
+返回：`{ code:0, template_id, page_id, title, description, category, is_template, template_status,
 download_url, is_live, package_ids, packages,
 scene_tags, paradigm_tags, recommend_tags }`。其中：
 
@@ -441,22 +396,32 @@ scene_tags, paradigm_tags, recommend_tags }`。其中：
 python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
 ```
 
-命中后不要先单独查询公式包或数据授权；`direct_deliver` 内部负责一次模板详情、每个数据源一次查询和一次 finalize。普通渠道在调用前已发送现成链接；`feishu-group` 必须等此命令生成 terminal contract 后再首次发送链接。成功响应还会返回完整 task ID 命名的 `agent_reply_contract_file`、`reply_draft_file`、`reply_validation_params_file` 与 `reply_validation_command`。Agent 根据 contract 的字段可用性和裁剪策略删除结构性空内容，只写入返回的草稿路径并执行校验命令一次；`valid=true` 后临时文件已清理，应立即使用 contract `public_url` 最终回复，不再运行工具。
+命中后不要先单独查询公式包或数据授权；`direct_deliver` 内部负责一次模板详情、每个数据源一次查询和一次 finalize。普通渠道在调用前已发送现成链接；`feishu-group` 必须等此命令生成 terminal contract 后再首次发送链接。成功响应还会返回完整 task ID 命名的 `agent_reply_contract_file`、`reply_draft_file`、`reply_validation_params_file` 与 `reply_validation_command`。严格单股模板同时从上述已有查询结果生成证据，不重复 query。Agent 按证据保留七节标题、有值字段全部输出、结构性空行空列删除、整节无值使用标准说明；执行校验命令一次，`valid=true` 后原样发送 `validated_markdown`，不再压缩、改写或运行工具。
 
-**4) fork 成自己的页**：`fork_prepare` → 改资产/文案/凭证 → `publish_final`
+**4) fork 成自己的页**：`fork_prepare` → 填结构化 decisions → `fork_review_update` → 运行生成的 publish plan
 
 ```bash
-python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_xxx","source_markers":["原标的名","原代码"],"target_asset":"新代码","asset_replacements":{"原标的名":"新标的名","原代码":"新代码"}}'
-python scripts/static_page.py publish_final '{"page_id":"page_first","html_file":"output/pages/final.html","source_template_id":"page_xxx","fork_manifest_file":"output/forks/page_xxx/page_xxx.fork-manifest.json"}'
+python scripts/static_page.py fork_prepare '{"task_id":"task_xxx","source_template_id":"page_xxx","target_page_id":"page_first","target_asset":{"name":"新标的名","code":"新代码"}}'
+python scripts/publish_workflow.py '@output/forks/page_xxx/page_xxx.publish-plan.json'
 ```
+
+**资产替换的职责分工**：Agent 说清楚"换成哪只标的"（`target_asset`），脚本负责"这只标的在页面里写成什么样"。来源模板的主资产由脚本从模板公式词频 + 标题推导；代码的实际书写形态（`SH600900` / `600900.SH` / 裸 `600900`）由脚本扫描来源 HTML 得出，**只替换页面里真实存在的写法**。不要去猜来源 HTML 里代码写成什么样——你看不到那个文件。
+
+| 错误码 | 触发条件 | 处理 |
+|--------|---------|------|
+| `FORK_SOURCE_ASSET_AMBIGUOUS` | 多资产/指数类范式推不出唯一主资产 | 按返回的 `detected_source_asset.candidates` 传 `source_asset` 重试；这类范式建议一开始就传 |
+| `TARGET_ASSET_NAME_REQUIRED` | 只给了代码，资产库也反查不到名字 | 按返回的 `example_params` 传 `target_asset:{"name":...,"code":...}` |
+| `FORK_SOURCE_ASSET_RESIDUAL` | 替换后主资产仍残留在页面 | 写出工作 HTML 前即拦截，不会等到发布后才发现残留 |
+
+`asset_replacements` 是**可选覆盖**：只在需要额外文案替换或要覆盖推导结果时传，同名 key 以传入的为准。
 
 > fork 要点：模板里内嵌的是原作者凭证。必须用 quant-buddy-skill 验证目标公式/输出，注册自己的 package/grant 并替换；`publish_final` 会拒绝来源 package/grant/signature 残留、manifest 声明的核心栏目/必需输出缺失或 Card Runtime 丢失。
 
-`fork_prepare` 会写两份 HTML：`*.source.html` 是只读来源基线，用 SHA256 锁定；`*.fork.html` 是工作副本。传入 `task_id` 时，还会在 `output/fork_task_bindings/` 写入按 task 哈希命名的原子绑定文件；`build_dashboard` 读取到 prepared binding 会立即返回 `FORK_TASK_BOUND`，`publish_final` 则自动补齐来源与 manifest。`asset_replacements` 会自动扩展常见交易所代码写法（如 `SH600000`、`600000.SH`），并记录实际替换计数；公式包和数据授权凭证仍必须在验证/注册后由调用方替换。编辑完成后先用 `fork_validate` 复用完整 manifest 门禁，成功后再进入浏览器验收。manifest 默认要求目标页的 package/grant 数量不少于来源页；只有确实把多个来源凭证整合成更少目标凭证时，才可下调 `minimum_target_package_count` / `minimum_target_grant_count`，并必须同时填写非空 `credential_count_reduction_reason` 供审计。确需放弃已绑定范式时，新建 Trace Context 后重新判定路由，不要复用原 task。
+`fork_prepare` 内部保存只读 `*.source.html` 基线，但普通返回只暴露 `*.fork.html`、`*.fork-manifest-v2.json`、`*.fork-review.json` 和 `*.publish-plan.json`。它会自动识别页面/Card Runtime 凭证、清除来源 ID/signature、为相同合同聚合 role 并生成全局唯一 Marker。package role 的 `source_contract` 原样保存模板接口 `formulas + nodes`，`target_registration_contract` 单独保存新包注册所需 `formulas + reads + begin_date`；`nodes[].data_id` 仅描述来源已注册包，不会进入目标请求。Agent只填写 `review_update_params_file.decisions`（已预生成 `roles.<role_id>.*` 嵌套骨架，直接在占位符里填值即可）；`fork_review_update` 应用同业/公式/标签决策并生成哈希绑定 receipt，随后运行 `publish_command`，由发布器统一验证、注册和扇出替换。
 
-> **改写公式：看 `source_runtime_contract`，不要凭输出名反推**。`getStaticPage`/`getTemplate` 现在都会带回来源 package 的 `formulas` 原文（公式不是隐私内容），`fork_prepare` 会原样整理进 `manifest.source_runtime_contract.packages[]`（每个包的 `package_id/formulas/outputs/other_asset_formulas`），并同步在返回值里给出。改写目标资产的公式时，照着 `formulas` 里对应输出名的那一条原文替换资产名/代码即可，不要只看 `required_outputs` 的变量名去猜测函数调用和参数写法。
+> **改写公式：看 `fork-review.json`，不要接触来源凭证或凭输出名反推**。主资产直接引用已自动替换；规则性同业矩阵会生成 `target_slots`，Agent只填写目标同业；复杂跨资产公式在 `target_formulas` 未填写前拒绝发布。review保留公式语义与只读输出合同，但不包含来源 ID/signature、Marker、reads 或完整 Grant payload。提交示例：`{"roles":{"package.package_002":{"target_slots":{"华能水电":"亿纬锂能"}}}}`——不要把 `required_decisions` 里的扁平 `decision_id`（如 `roles.package.package_002.target_slots.华能水电`）原样当 key 提交。
 >
-> `other_asset_formulas`（连带顶层 `cross_asset_formula_refs` / `cross_asset_formula_warning`）标出了引用了非主资产标的的公式——典型是同业对比、行业分组这类一个包里混了好几个不同标的的场景（如 `pe_hnsd = ... 取出(华能水电)`）。这类公式**不能**直接把旧标的换成新标的的名字照抄：要先判断目标资产自己的同业/行业范围（必要时问用户或用 `search_similar_cases` 找参照），再按对应产出名重新写公式；`asset_replacements` 的字符串替换只对"来源资产本身"安全，对这类公式会替换出错误的同业组合。改完同样要先过 `runMultiFormulaBatchStream` 验证再注册。
+> 同业/行业公式由 review 的 `review_type` 区分：规则性矩阵填写 `target_slots`，系统批量生成；无法规则化的跨资产公式填写完整 `target_formulas`。系统绝不自动决定目标同业，未审核完整时在任何网络调用前失败。
 
 ### 公共模板：安全改写（`update_template`）
 
@@ -487,7 +452,6 @@ python scripts/static_page.py publish_final '{"page_id":"page_first","html_file"
 | `title` | string | ❌ | 取 `<title>` | 页面标题 |
 | `description` | string | ❌ | 空 | 页面说明（≤1000 字，列表/详情展示用） |
 | `ttl_days` | number | ❌ | 365 | 有效期，到期链接失效、记录与对象清理 |
-| `thumbnail_file` | string | ❌ | 无 | HTML 上传成功后再设置封面图；失败只返回 warning，不影响 upload 成功 |
 | `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 场景标签，**只能选已有**；任一项查无即整体报 `SCENE_TAG_NOT_FOUND`。详见下「标签」 |
 | `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 无 | 范式标签，可选已有、也可现写新名（自动以 `source=user` 进共享池）。详见下「标签」 |
 | `user_query` | string | ❌ | 无 | 用户原始问题，用于 LLM 打标或显式标签来源溯源 |
@@ -514,7 +478,6 @@ python scripts/static_page.py publish_final '{"page_id":"page_first","html_file"
 | `title` | string | ❌ | 沿用原标题 | 新标题；不传保留原标题 |
 | `description` | string | ❌ | 沿用原说明 | 新说明；不传保留原说明，传空串 `""` 则清空 |
 | `ttl_days` | number | ❌ | 不变 | 传了才从此刻顺延有效期；不传保持原到期时间 |
-| `thumbnail_file` | string | ❌ | 无 | HTML 替换成功后再替换封面图；失败只返回 warning，不影响 update 成功 |
 | `scene_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留原标签；只能选已有，查无报 `SCENE_TAG_NOT_FOUND` |
 | `paradigm_tags` | string[] / 逗号串 / 单值 | ❌ | 沿用原标签 | **仅传入时更新**：传值=覆盖、传 `[]`=清空、不传=保留；可选已有或现写新名自动入池 |
 | `user_query` | string | ❌ | 无 | 用户原始问题，用于 LLM 打标或显式标签来源溯源 |
@@ -689,5 +652,5 @@ python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 
 ## 计费
 
-上传 / 替换 / 设置缩略图各固定 1 RU；下载 / 列表 / 撤销 / 查标签（tags）/ 发布到社区 / 取消社区发布 / 浏览模板（templates、template）不计费
-（下载字节直连 OSS，不经服务端）。替换、设缩略图都不占新的活跃页配额。
+上传 / 替换各固定 1 RU；下载 / 列表 / 撤销 / 查标签（tags）/ 发布到社区 / 取消社区发布 / 浏览模板（templates、template）不计费
+（下载字节直连 OSS，不经服务端）。替换不占新的活跃页配额。

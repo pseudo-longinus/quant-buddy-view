@@ -13,7 +13,7 @@
      const top = QB.topValues(out, 'GAIN');                  // 榜单
      const d   = QB.fmtDate(QB.lastDate(out, 'IDXRET'));     // 日期 → 'YYYY-MM-DD'
 
-     // 数据授权（免 key，凭 grant_id + signature；普通 JSON，不重算）：
+     // 数据授权（免 key，凭 grant_id + signature；表单 POST 免跨域预检，不重算）：
      // 返回值同样是 out 直查表，key 用 grant_id，上面这些取值器直接复用。
      const gOut = await QB.queryGrant({ endpoint, grant_id, signature });
      const last = QB.lastValue(gOut, grant_id);
@@ -433,13 +433,15 @@ const QB = (function () {
 
   async function _requestGrantBody(cfg) {
     const { endpoint, grant_id, signature } = cfg;
+    // 跨域取数改用表单 POST（CORS 安全列表内的 Content-Type）且不带自定义头，
+    // 避免页面(pages.quantbuddy.cn)->接口(www.quantbuddy.cn)时触发 OPTIONS 预检被拦；
+    // grant_id/signature 语义不变，服务端按表单字段解析，响应仍是 JSON。
+    const formBody = 'grant_id=' + encodeURIComponent(grant_id) +
+      '&signature=' + encodeURIComponent(signature);
     const resp = await fetch(apiUrl(endpoint, '/skill/queryDataGrant'), {
       method: 'POST',
-      headers: Object.assign(
-        { 'Content-Type': 'application/json' },
-        _hasSkillVer ? { 'x-skill-version': SKILL_VERSION, 'x-skill-name': SKILL_NAME } : {}
-      ),
-      body: JSON.stringify({ grant_id, signature }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formBody,
     });
     let body = null;
     try { body = await resp.json(); } catch (e) {}
@@ -450,7 +452,7 @@ const QB = (function () {
     return body;
   }
 
-  /* 数据授权取数：免 key，凭 grant_id + signature；普通 JSON POST（不重算，永远反映当下数据）。
+  /* 数据授权取数：免 key，凭 grant_id + signature；表单 POST 免跨域预检（不重算，永远反映当下数据）。
      成功/失败都走同一份 throw-on-error 约定；成功时返回的 out 直查表与 query() 同形状，
      key 用 grant_id，series/lastValue/topValues/perAsset 等取值器直接复用。 */
   async function queryGrant(cfg) {

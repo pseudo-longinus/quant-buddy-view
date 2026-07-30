@@ -22,7 +22,10 @@ def cmd_begin(params):
     if not user_query:
         return {"code": 1, "error": "USER_QUERY_REQUIRED", "message": "trace begin 需要 user_query（用户原始问题）"}
 
-    C.set_trace_context(task_id, user_query)
+    # configure_trace_context（不是 set_trace_context）：本次调用没带 api_key 字段时保留当前已生效的
+    # 覆盖，不清空——begin 常是任务第一个调用，read_params() 刚从同一份 params 里读出的 api_key 覆盖
+    # 不该被这一行自己冲掉。
+    C.configure_trace_context({"task_id": task_id, "user_query": user_query})
     body = {"task_id": task_id, "user_query": user_query}
     if params.get("agent_model"):
         body["agent_model"] = params["agent_model"]
@@ -40,11 +43,18 @@ def cmd_begin(params):
             "message": "服务端 Trace 上下文创建失败，未开始后续发布流程",
             "server_response": out,
         }
+    task_root = C.task_temp_dir(task_id, create=True)
     return {
         "code": 0,
         "task_id": task_id,
         "user_query": user_query,
-        "instruction": "后续每个 quant-buddy-view 命令都传入此 task_id",
+        "task_temp_dir": str(task_root),
+        "next_step": "templates",
+        "instruction": (
+            "后续每个 quant-buddy-view 命令都传入此 task_id，并只使用 task_temp_dir 保存任务产物。"
+            "下一步先用 templates(recommend=\"all\") 查范式卡判定 fork/自建；未查模板前禁止 new_page，"
+            "否则会被 ROUTING_TEMPLATES_REQUIRED 拦下。"
+        ),
     }
 
 

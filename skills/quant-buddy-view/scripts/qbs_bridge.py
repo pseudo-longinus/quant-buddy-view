@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Run a quant-buddy-skill tool inside the current QBV task context."""
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+import fork_runtime_contract as FRC
+import reply_data_evidence as RDE
 
 QBV_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FORMULA_BEGIN_DATE = 20150101
@@ -30,6 +35,21 @@ def _read_params(argv):
 def _qbs_root():
     override = os.environ.get("QBS_SKILL_ROOT", "").strip()
     return Path(override).resolve() if override else (QBV_ROOT.parent / "quant-buddy-skill").resolve()
+
+
+def _forward_api_key(env):
+    """把 QBV 侧「这次调用用哪个 key」翻译成 QBS 侧的同档变量，原地改 env。
+
+    两边优先级链是对称的（params.api_key > QBV_API_KEY / QBS_API_KEY > config.json > QUANT_BUDDY_API_KEY），
+    只是变量名不同。不覆盖已显式设好的 QBS_API_KEY——调用方直接指定 qbs 身份时那个更权威。
+    注意不能退回 QUANT_BUDDY_API_KEY：那是最低优先级兜底，config.json 有值时根本不生效。
+    """
+    if env.get("QBS_API_KEY", "").strip():
+        return env
+    api_key = env.get("QBV_API_KEY", "").strip()
+    if api_key:
+        env["QBS_API_KEY"] = api_key
+    return env
 
 
 def _session_key(task_id):
@@ -107,6 +127,89 @@ def _begin_date(value, label):
     return normalized
 
 
+def _package_reply_evidence(call_script, env, task_id, user_query, template_ref, packages, results):
+    started = time.perf_counter()
+    if not RDE.get_policy(template_ref):
+        return {"batch_count": 0, "requested_field_count": 0, "success_field_count": 0, "failed_field_count": 0, "read_elapsed_ms": 0}, []
+    pending = []
+    by_name = {item.get("name"): item for item in results}
+    for package in packages:
+        result = by_name.get(package.get("name")) or {}
+        output_ids = {
+            str(item.get("variable_name") or item.get("leftName") or item.get("output_name") or item.get("output") or "").strip():
+                str(item.get("data_id") or item.get("indexinfo_id") or "").strip()
+            for item in result.get("validation_outputs") or []
+            if isinstance(item, dict)
+        }
+        for read in package.get("reads") or []:
+            output = str(read.get("output") or "").strip()
+            data_id = output_ids.get(output) or ""
+            if not output or not data_id or not RDE.formula_output_needed(template_ref, output):
+                continue
+            read_params = RDE.read_data_params(read.get("read_mode"), read.get("mode_params"))
+            pending.append({
+                "package": package.get("name"),
+                "output": output,
+                "data_id": data_id,
+                "read_mode": read.get("read_mode"),
+                "read_params": read_params,
+            })
+    groups = {}
+    for item in pending:
+        key = json.dumps(item["read_params"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        groups.setdefault(key, []).append(item)
+    warnings = []
+    batch_count = 0
+    success_count = 0
+    failed_count = 0
+    for key, items in groups.items():
+        base_params = json.loads(key)
+        for start in range(0, len(items), 10):
+            batch = items[start:start + 10]
+            batch_count += 1
+            read_params = {
+                **base_params,
+                "task_id": task_id,
+                "user_query": user_query,
+                "ids": [item["data_id"] for item in batch],
+            }
+            payload, error = _invoke_payload(call_script, "readData", read_params, env)
+            if error or not isinstance(payload, dict) or payload.get("code") not in (0, None):
+                failed_count += len(batch)
+                warnings.append({
+                    "code": "REPLY_READ_DATA_FAILED",
+                    "outputs": [item["output"] for item in batch],
+                    "message": (error or payload or {}).get("message") if isinstance(error or payload, dict) else "readData failed",
+                })
+                continue
+            response_items = RDE.extract_read_data_items(payload)
+            by_id = {
+                str(item.get("id") or item.get("data_id") or item.get("indexinfo_id") or "").strip(): item
+                for item in response_items
+                if isinstance(item, dict)
+            }
+            for index, request in enumerate(batch):
+                response = by_id.get(request["data_id"])
+                if response is None and len(response_items) == len(batch):
+                    response = response_items[index]
+                if response is None:
+                    failed_count += 1
+                    warnings.append({"code": "REPLY_READ_DATA_ITEM_MISSING", "output": request["output"]})
+                    continue
+                package_result = by_name.get(request["package"])
+                package_result.setdefault("reply_evidence_outputs", []).append(
+                    RDE.compact_formula_read(request["output"], request["data_id"], request["read_mode"], response)
+                )
+                success_count += 1
+    return {
+        "batch_count": batch_count,
+        "requested_field_count": len(pending),
+        "success_field_count": success_count,
+        "failed_field_count": failed_count,
+        "read_elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }, warnings
+
+
 def _validate_package_set(call_script, params, env):
     packages = params.get("packages")
     if not isinstance(packages, list) or not packages:
@@ -125,6 +228,7 @@ def _validate_package_set(call_script, params, env):
             return {"code": 1, "error": "INVALID_PACKAGE", "message": f"packages[{index}] 必须是对象"}
         name = str(item.get("name") or "").strip()
         formulas = item.get("formulas")
+        reads = item.get("reads") if isinstance(item.get("reads"), list) else []
         if not name or name in names:
             return {"code": 1, "error": "INVALID_PACKAGE_NAME", "message": f"packages[{index}].name 缺失或重复"}
         if not isinstance(formulas, list) or not formulas or len(formulas) > 20 or not all(isinstance(value, str) and value.strip() for value in formulas):
@@ -148,6 +252,7 @@ def _validate_package_set(call_script, params, env):
             "formulas": formulas,
             "force_reusable_array": force_reusable,
             "begin_date": begin_date,
+            "reads": reads,
         })
 
     results = []
@@ -204,7 +309,11 @@ def _validate_package_set(call_script, params, env):
             "job_id": job_id or None,
             "validation_receipt_file": receipt,
             "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+            "validation_outputs": data.get("results") if isinstance(data.get("results"), list) else [],
         })
+    evidence_stats, evidence_warnings = _package_reply_evidence(
+        call_script, env, task_id, user_query, str(params.get("template_ref") or ""), normalized, results
+    )
     return {
         "code": 0,
         "success": True,
@@ -213,8 +322,93 @@ def _validate_package_set(call_script, params, env):
         "batch_count": len(results),
         "validation_receipt_files": receipts,
         "packages": results,
+        "reply_evidence_stats": evidence_stats,
+        "reply_evidence_warnings": evidence_warnings,
     }
 
+
+
+def _grant_validation_receipt(task_id, role_name, kind, fingerprint):
+    root = QBV_ROOT / "output" / "grant_validation_receipts"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(f"{task_id}:{role_name}:{fingerprint}".encode("utf-8")).hexdigest()
+    path = root / f"{digest}.json"
+    payload = {
+        "version": "grant_validation_receipt_v1",
+        "task_id": task_id,
+        "role": role_name,
+        "kind": kind,
+        "contract_fingerprint": fingerprint,
+        "status": "completed",
+        "success": True,
+        "validated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _validate_grant_set(call_script, params, env):
+    grants = params.get("grants")
+    if not isinstance(grants, list):
+        return {"code": 1, "error": "INVALID_GRANTS", "message": "grants 必须是数组"}
+    task_id = str(params.get("task_id") or "").strip()
+    user_query = str(params.get("user_query") or "").strip()
+    tool_by_kind = {
+        "fast_query": "fast_query",
+        "stock_profile": "stockProfile",
+        "composition_select": "selectByComposition",
+    }
+    names = set()
+    results = []
+    receipts = []
+    for index, item in enumerate(grants):
+        if not isinstance(item, dict):
+            return {"code": 1, "error": "INVALID_GRANT", "message": f"grants[{index}] 必须是对象"}
+        name = str(item.get("name") or item.get("role_id") or "").strip()
+        contract = item.get("contract") if isinstance(item.get("contract"), dict) else {}
+        kind = str(contract.get("kind") or "").strip()
+        payload = contract.get("payload")
+        fingerprint = str(item.get("contract_fingerprint") or "").strip()
+        actual_fingerprint = FRC.contract_fingerprint(contract)
+        if not name or name in names:
+            return {"code": 1, "error": "INVALID_GRANT_NAME", "message": f"grants[{index}].name 缺失或重复"}
+        if kind not in tool_by_kind or not isinstance(payload, dict) or not payload:
+            return {"code": 1, "error": "INVALID_GRANT_CONTRACT", "message": f"grants[{index}] kind/payload 无效"}
+        if fingerprint != actual_fingerprint:
+            return {"code": 1, "error": "GRANT_FINGERPRINT_MISMATCH", "message": f"grants[{index}] fingerprint 不一致"}
+        names.add(name)
+        validation_payload = dict(payload)
+        validation_payload.update({"task_id": task_id, "user_query": user_query})
+        result, error = _invoke_payload(call_script, tool_by_kind[kind], validation_payload, env)
+        if error:
+            return {**error, "success": False, "failed_grant": name, "grants": results}
+        if result.get("code") not in (0, None) or result.get("success") is False:
+            return {
+                "code": 1,
+                "error": "GRANT_VALIDATION_FAILED",
+                "success": False,
+                "failed_grant": name,
+                "result": result,
+                "grants": results,
+            }
+        receipt = _grant_validation_receipt(task_id, name, kind, fingerprint)
+        receipts.append(receipt)
+        results.append({
+            "name": name,
+            "kind": kind,
+            "status": _payload_status(result) or "completed",
+            "contract_fingerprint": fingerprint,
+            "validation_receipt_file": receipt,
+            "reply_evidence": RDE.compact_grant_result(kind, result),
+        })
+    return {
+        "code": 0,
+        "success": True,
+        "task_id": task_id,
+        "grant_count": len(results),
+        "validation_receipt_files": receipts,
+        "grants": results,
+    }
 
 def main():
     if len(sys.argv) < 2:
@@ -250,6 +444,11 @@ def main():
     env = dict(os.environ)
     env["QBS_SESSION_KEY"] = session_key
     env.setdefault("PYTHONUTF8", "1")
+    # 身份跨 skill 传递：两边的「本次调用用哪个 key」通道同档但不同名（QBV_API_KEY / QBS_API_KEY），
+    # 光靠继承 os.environ 传不过去——qbs 不认识 QBV_API_KEY，会一路兜底到它自己 config.json 里的
+    # 默认账号，于是用户的取数调用被记到那个账号名下（计费归错账，终态推送也显示错用户）。
+    # 桥接层是唯一同时知道两套变量名的地方，翻译责任在这里。
+    _forward_api_key(env)
 
     if not _session_ready(_session_path(qbs_root, session_key), task_id):
         bootstrap = _invoke(call_script, "newSession", {
@@ -266,6 +465,10 @@ def main():
     params["task_id"] = task_id
     if tool_name == "validate_package_set":
         payload = _validate_package_set(call_script, params, env)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload.get("code") == 0 else 1
+    if tool_name == "validate_grant_set":
+        payload = _validate_grant_set(call_script, params, env)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if payload.get("code") == 0 else 1
     result = _invoke(call_script, tool_name, params, env)

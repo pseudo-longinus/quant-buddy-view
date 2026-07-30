@@ -106,8 +106,18 @@ def _compile(html, params):
     return html
 
 
+# 硬编码数组字面量调用模式：形如 setBar($("valuationBars"), [ {label:..., value:...}, ... ])——
+# 容器名+一整个行数据数组直接塞进函数调用参数，绑定关系锁死在这次调用文本里，不利于以后定点编辑。
+# 只做非阻塞提醒（不拦截编译），推荐改成 guides/bespoke-page.md「列表/多行指标类组件」一节的
+# data-qb-bar-row 属性驱动写法：容器+行都是 DOM 节点，渲染函数保持通用、不含具体业务绑定。
+_HARDCODED_LIST_CALL_RE = re.compile(
+    r'\b(?:set[A-Z]\w*|render[A-Z]\w*)\s*\(\s*\$\([^)]*\)\s*,\s*\['
+)
+
+
 def _check(html):
     problems = []
+    warnings = []
     if re.search(r'<script\s+src=["\'][^"\']*(qr-mini|data-kernel|_shared)', html):
         problems.append("仍包含未内联的本地 script src")
     if "QB_SHARED_" in html or "__QB_LOGO_SRC__" in html:
@@ -118,7 +128,13 @@ def _check(html):
     size = len(html.encode("utf-8"))
     if size > MAX_PAGE_BYTES:
         problems.append(f"页面超过 2MB: {size} bytes")
-    return problems, size
+    if _HARDCODED_LIST_CALL_RE.search(html):
+        warnings.append(
+            "检测到形如 setBar($(\"...\"), [...]) 的硬编码数组字面量调用：这一组件的行数据"
+            "写死在了 JS 调用参数里，不利于以后定点编辑；建议改成 data-qb-bar-row 属性驱动写法"
+            "（见 guides/bespoke-page.md「列表/多行指标类组件」一节）。非阻塞，仅提醒。"
+        )
+    return problems, warnings, size
 
 
 def cmd_compile(params):
@@ -132,13 +148,13 @@ def cmd_compile(params):
         out_file = os.path.join(C.SKILL_ROOT, "output", "pages", base + ".html")
     out_path = _resolve(out_file)
     html = _compile(_read(src_path), params)
-    problems, size = _check(html)
+    problems, warnings, size = _check(html)
     if problems and not params.get("allow_placeholders"):
-        return {"code": 1, "message": "编译后静态检查未通过", "problems": problems, "size": size}
+        return {"code": 1, "message": "编译后静态检查未通过", "problems": problems, "warnings": warnings, "size": size}
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(html)
-    return {"code": 0, "out_file": out_path, "size": size, "warnings": problems}
+    return {"code": 0, "out_file": out_path, "size": size, "problems": problems, "warnings": warnings}
 
 
 def main():

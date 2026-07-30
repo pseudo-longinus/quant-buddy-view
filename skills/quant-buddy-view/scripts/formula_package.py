@@ -167,7 +167,7 @@ def _preflight_register_params(params):
                     if alias and not alias.group(1).lower().endswith("_pctile"):
                         errors.append(
                             f"`{left}` 是历史分位输出，不能直接别名到 `{alias.group(1)}`；"
-                            "请使用 `排序水位(数据,滚动天数)` 并先通过 QBS 验证"
+                            "请使用带明确窗口的历史水位公式（如排序水位或数值水位）并先通过 QBS 验证"
                         )
 
     if not isinstance(reads, list) or not reads:
