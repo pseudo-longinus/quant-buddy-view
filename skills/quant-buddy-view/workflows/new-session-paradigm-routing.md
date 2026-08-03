@@ -1,6 +1,6 @@
-# Workflow · 新会话：查范式卡 → 命中 / fork / 自建（三分支）
+# Workflow · 新会话：单股快速返回 / 查范式卡后三分支
 
-新会话被判定为可分享活页任务后的**第一步分诊**：先查范式卡（`templates` 活页列表）判命中，再决定走哪条路。范式卡 = 后台 `recommend:官方精选` 或 `recommend:社区` 标签的现成活页列表。若 `config.json._channel=feishu-group`，所有非终态 hint 都按 `delivery_policy.emit_intermediate_url=false` 处理：内部流程照常创建/维护页面，但用户只在终态收到 playground 链接。
+新会话被判定为可分享活页任务后先判断是否命中“简单单一 A 股分析”快速通道；未命中才查范式卡（`templates` 活页列表），再决定 direct / fork / 自建。范式卡 = 后台 `recommend:官方精选` 或 `recommend:社区` 标签的现成活页列表。若 `config.json._channel=feishu-group`，所有非终态 hint 都按 `delivery_policy.emit_intermediate_url=false` 处理：内部流程照常创建/维护页面，但用户只在终态收到 playground 链接。
 
 > 场景：用户说「宁德时代现在估值贵不贵，帮我做个能发出去的页」/「沪深300今天哪些成分股异动」。
 
@@ -14,6 +14,22 @@ QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_
 ```
 
 保存返回的 `task_id`。本工作流后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 命令都必须在参数中复用它；调用 quant-buddy-skill 验证公式时，使用 `qbs_bridge.py` 并显式传该 `task_id + user_query`，由 task-scoped session 防止并发拆链。
+
+## -0.5. 快速通道：简单单一 A 股分析
+
+同时满足以下条件时直接走快速通道：
+
+- 用户只指定一只 A 股名称或代码；
+- 诉求是简单综合分析、个股画像、估值/财务/行情概览并返回可分享页面；
+- 没有定制栏目或版式、指定额外指标/公式/图表、对比、多标的、指数、港股、美股、选股或回测要求。
+
+```bash
+python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵州茅台","user_query":"分析贵州茅台"}'
+```
+
+该命令直接调用 `POST /skill/newAssetPage`，由服务端完成资产解析、固定来源页实例替换和三份固定 Data Grant 注册。Agent 不查 `templates`、不运行 `new_page/fork_prepare`、不另跑 QBS 预验证、不自行注册 Grant。成功条件是 `agent_reply_contract.terminal=true` 且 `operation=new_asset_page`；最终只返回 contract 的 `public_url`，不生成七节 Markdown 分析，也不运行 `validate_agent_reply.py`。同一 task/资产重试由服务端幂等返回已有页面。
+
+任一条件不满足就进入第 0 步，不要把定制单股页或多资产请求塞进快速通道。快速通道创建的是调用者自己的页面；后续内容修改复用现有 `update(page_id)`。
 
 ## 0. 查范式卡判命中
 
@@ -117,6 +133,6 @@ fork/unmatched 创建首链后，如果资产库证明存在 A/H、同名代码�
 - 没有 terminal contract 禁止完成业务任务；唯一可暂停例外是成功的 `waiting_input` checkpoint，且用户回复后必须同任务续跑。
 - 每个 package/grant 最多查询一次，仅明确瞬时网络失败允许重试一次。
 - direct 命中后禁止研究脚本实现、运行子命令 `--help` 或重复调用 `template/query/finalize`；使用 `direct_deliver` 的紧凑结果继续生成回复。
-- validator 返回 `valid=true` 后立即最终回复；禁止再次校验、运行 `--help`、扫描临时目录或继续 memory 搜索。
+- `new_asset_page` 成功后直接返回 terminal contract 的公开 URL，不进入 validator；其余分支在 validator 返回 `valid=true` 后立即最终回复，禁止再次校验、运行 `--help`、扫描临时目录或继续 memory 搜索。
 - 性能门槛：普通渠道模板命中到首链 ≤5 秒；所有渠道 terminal 到最终回复 ≤45 秒、端到端 ≤120 秒、用户可见消息间隔 ≤60 秒。
 - 未跑浏览器验收时，只能声明公开 URL 和实时接口可访问。

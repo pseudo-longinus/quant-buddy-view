@@ -15,7 +15,7 @@
   --qb-shell-green:#43e091;
 }
 .qb-head{background:var(--qb-shell-header-bg);color:var(--qb-shell-ink);border-bottom:1px solid var(--qb-shell-line);position:relative;z-index:10}
-.qb-head-in{width:100%;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
+.qb-head-in{box-sizing:border-box;width:100%;min-width:0;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
 .qb-brand{display:flex;align-items:center;gap:10px;min-width:0;color:inherit;text-decoration:none}
 .qb-logo{width:32px;height:32px;border-radius:8px;overflow:hidden;background:#fff7ea;border:1px solid rgba(255,194,125,.45);padding:3px;display:flex;align-items:center;justify-content:center;flex:none}
 .qb-logo svg,.qb-logo img{width:100%;height:100%;display:block;object-fit:contain;border-radius:5px}
@@ -63,4 +63,30 @@
 @media(max-width:390px){
   .qb-name{font-size:14px}
   .qb-actions{width:100%;justify-content:space-between}
+}
+
+.qb-action.is-favorited{color:var(--qb-shell-accent)}
+.qb-action.is-favorited svg{fill:currentColor}
+.qb-warehouse-modal{position:fixed;inset:0;z-index:90;display:none;place-items:center;padding:18px;background:rgba(3,5,10,.78);backdrop-filter:blur(12px)}
+.qb-warehouse-modal.open{display:grid}
+.qb-warehouse-modal>iframe{display:block;width:min(650px,100%);height:min(720px,calc(100dvh - 36px));border:0;border-radius:16px;background:#fffaf2;box-shadow:0 28px 80px rgba(0,0,0,.5)}
+@media(max-width:520px){
+  .qb-head-in{flex-wrap:nowrap;gap:8px;padding:8px}
+  .qb-logo{width:30px;height:30px}
+  .qb-name{display:none}
+  .qb-actions{min-width:0;flex:1;flex-wrap:nowrap;gap:8px}
+  .qb-action{min-width:32px;justify-content:center;padding:7px 0}
+  .qb-action.primary{margin-left:auto;padding:9px 10px}
+  .qb-warehouse-modal{padding:0}
+  .qb-warehouse-modal>iframe{width:100%;height:100dvh;border-radius:0}
+}
+@media(max-width:390px){
+  .qb-actions{width:auto;justify-content:flex-end;gap:6px}
+  #refresh .action-label,#shareBtn .action-label{display:none}
+  .qb-action.primary{font-size:12px;padding:9px 8px}
+}
+@media(max-width:340px){
+  #favoriteBtn .action-label{display:none}
+  .qb-actions{gap:4px}
+  .qb-action.primary{padding-inline:7px}
 }

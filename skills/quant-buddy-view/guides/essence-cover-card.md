@@ -182,4 +182,4 @@
    - 批量：`python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx"]}'`
    检查项：存在 `data-qb-card-template` / `data-qb-card-style` / `data-qb-card-manifest` / `data-qb-card-runtime`；manifest 为 `embedded-card-v1@1.1.0`、`aspect_ratio:"4/3"`、含 `required_outputs` 且不含任何图片地址；在 720×540、410×308、320×240 空白宿主里独立 hydrate 成功、根节点含 `data-qb-live-card` 和 `data-qb-card-ready="true"`；标题 ≤24 / 描述 ≤56、`numeric-focus` 或 `visual-focus` 二选一；卡片浅色系；只有 hydrate 后仍残留「待更新 / 取数中 / —」才判失败。严格视觉模式还会检查 template/manifest 的 visual kind 一致、拒绝通用文案、可见原始 output key、重复 `qb-mini-metric` 和缺失主视觉标记。
 
-如要更新线上已分享页面：普通静态页 `static_page.py update`（保持同一 `page_id`/URL）或 `retrofit_card_runtime update:true`；已转公共模板且普通 update 报 `PAGE_NOT_FOUND` 时先 `template --page_id` 确认，再走后台 `updateTemplate` / `update_template`，不要新建链接冒充原链接。
+如要更新线上已分享页面：普通静态页 `static_page.py update`（保持同一 `page_id`/URL）或 `retrofit_card_runtime update:true`；已转公共模板且普通 update 报 `PAGE_NOT_FOUND` 时先 `template --page_id` 确认——本 skill 侧不提供该类模板的写回命令（`retrofit_card_runtime` 会返回 `TEMPLATE_WRITE_UNSUPPORTED`），需要保留原模板链接更新只能走后台/admin 管理入口，不要新建链接冒充原链接。

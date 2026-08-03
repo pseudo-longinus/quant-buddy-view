@@ -1,13 +1,13 @@
 # QuantBuddy Share Shell
 
-公共落地页组件，供 `quant-buddy-view` 的 bespoke 主体和 `build_dashboard.py` 标准页在构建期内联使用。它只提供固定页头、页尾、分享弹层和运行时行为，不是页面模板；Agent 不应把这里的片段复制成完整页面起点。
+公共落地页组件，供 `quant-buddy-view` 的 bespoke 主体和 `build_dashboard.py` 标准页在构建期内联使用。它只提供固定页头、页尾、投研仓收藏弹层、分享弹层和运行时行为，不是页面模板；Agent 不应把这里的片段复制成完整页面起点。
 
 ## 文件
 
 - `shell.html`：固定页头、页尾、分享海报弹层结构。
 - `shell.css`：暗色品牌外壳、白底 logo、页头按钮、弹层、移动端约束。
 - `poster.js`：固定海报页头/页尾、大二维码、canvas 绘制；默认前端截取页面主体作为预览，失败时再程序化降级，宁缺毋滥。
-- `shell.js`：刷新、分享弹层、复制链接、复制图片、下载 PNG 行为。
+- `shell.js`：刷新、投研仓状态通信、动态 Web Agent 跳转、分享弹层、复制链接、复制图片、下载 PNG 行为。
 
 ## 模板契约
 
@@ -21,6 +21,7 @@
 ```html
 <!-- QB_SHARED_SHELL_CSS -->
 <!-- QB_SHARED_SHELL_HEADER -->
+<!-- QB_SHARED_SHELL_RESEARCH_WAREHOUSE -->
 <main>模板主体内容</main>
 <!-- QB_SHARED_SHELL_FOOTER -->
 <!-- QB_SHARED_SHELL_MODAL -->
@@ -71,7 +72,9 @@ load();
 
 ## 验收
 
-- 页头固定为 `QuantBuddy · 宽宝`，右侧固定 `刷新数据 / 分享 / 开始使用`。
+- 页头固定为 `QuantBuddy · 宽宝`，右侧固定 `刷新数据 / 收藏 / 分享 / 开始使用`。
+- “开始使用”按当前公开页 URL 生成对应 `/playground/<owner path>/<page_id>`；收藏只接受官网固定 origin、精确 iframe source、channel 和 `page_id` 全部匹配的消息。
+- 投研仓 iframe 五秒未通信时降级为新窗口；静态页不读取 Cookie，也不接收 Token、用户名或文件夹明细。
 - 页面中不再出现旧的“手机扫码查看”二维码块或模板自带刷新按钮。
 - 分享海报可预览、复制链接、复制图片、下载 PNG，二维码尺寸可扫。
 - 移动端 320px 无横向溢出，弹层可滚动。

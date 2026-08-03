@@ -10,15 +10,25 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M3 12A9 9 0 0 1 18.3 5.6"/><path d="M18 2v4h4"/><path d="M6 22v-4H2"/></svg>
         <span class="action-label">刷新数据</span>
       </button>
+      <button class="qb-action" id="favoriteBtn" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.8A1.8 1.8 0 0 1 7.8 3h8.4A1.8 1.8 0 0 1 18 4.8V21l-6-3.8L6 21Z"/></svg>
+        <span class="action-label">收藏</span>
+      </button>
       <button class="qb-action" id="shareBtn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.8 15.4 6.2"/><path d="M8.6 13.2 15.4 17.8"/></svg>
         <span class="action-label">分享</span>
       </button>
-      <a class="qb-action primary" href="https://www.quantbuddy.cn" target="_blank" rel="noopener">开始使用</a>
+      <a class="qb-action primary" id="startUsing" href="https://www.quantbuddy.cn" target="_blank" rel="noopener">开始使用</a>
     </div>
   </div>
 </header>
 <!-- QB_SHELL_HEADER_END -->
+
+<!-- QB_SHELL_RESEARCH_WAREHOUSE_START -->
+<div class="qb-warehouse-modal" id="researchWarehouseModal" role="dialog" aria-modal="true" aria-label="收藏到投研仓" aria-hidden="true">
+  <iframe id="researchWarehouseFrame" title="收藏到投研仓" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+</div>
+<!-- QB_SHELL_RESEARCH_WAREHOUSE_END -->
 
 <!-- QB_SHELL_FOOTER_START -->
 <footer class="qb-footer" data-qb-share-shell-footer>

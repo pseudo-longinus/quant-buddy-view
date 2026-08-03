@@ -52,7 +52,9 @@ def cmd_begin(params):
         "next_step": "templates",
         "instruction": (
             "后续每个 quant-buddy-view 命令都传入此 task_id，并只使用 task_temp_dir 保存任务产物。"
-            "下一步先用 templates(recommend=\"all\") 查范式卡判定 fork/自建；未查模板前禁止 new_page，"
+            "若本次是无定制内容、对比、多标的或指定额外产出的简单单一 A 股分析，可直接调用 "
+            "new_asset_page 取得终态页面，跳过 templates/new_page。其余场景下一步先用 "
+            "templates(recommend=\"all\") 查范式卡判定 fork/自建；未查模板前禁止 new_page，"
             "否则会被 ROUTING_TEMPLATES_REQUIRED 拦下。"
         ),
     }

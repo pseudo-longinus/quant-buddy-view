@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import common as C
@@ -155,6 +156,112 @@ def _run_qbs_grant_set(task_id, user_query, grants, template_ref=""):
             os.unlink(params_file)
         except OSError:
             pass
+
+def _normalize_v1_grants(grants):
+    normalized = []
+    for index, raw in enumerate(grants or []):
+        if not isinstance(raw, dict):
+            raise ValueError(f"grants[{index}] 必须是对象")
+        item = dict(raw)
+        registration = item.get("registration") if isinstance(item.get("registration"), dict) else {}
+        contract = item.get("contract") if isinstance(item.get("contract"), dict) else {}
+        if not contract and registration.get("kind") and isinstance(registration.get("payload"), dict):
+            contract = {"kind": registration["kind"], "payload": dict(registration["payload"])}
+        if not contract:
+            raise ValueError(f"grants[{index}] 缺少 contract 或 registration.kind/payload")
+        item["contract"] = contract
+        item["contract_fingerprint"] = str(item.get("contract_fingerprint") or FRC.contract_fingerprint(contract))
+        normalized.append(item)
+    return normalized
+
+
+def _validation_route_items(items, validation_items, receipt_files, *, kind):
+    by_name = {
+        str(item.get("name") or ""): item
+        for item in (validation_items or [])
+        if isinstance(item, dict)
+    }
+    results = []
+    for index, item in enumerate(items or []):
+        name = str(item.get("name") or item.get("role_id") or f"{kind}_{index}").strip()
+        validated = dict(by_name.get(name) or {})
+        validated.setdefault("name", name)
+        validated.setdefault("role", str(item.get("role") or item.get("role_id") or name))
+        validated.setdefault("validation_receipt_file", receipt_files[index] if index < len(receipt_files) else "")
+        if kind == "grant":
+            contract = item.get("contract") if isinstance(item.get("contract"), dict) else {}
+            validated.setdefault("kind", str(contract.get("kind") or item.get("kind") or ""))
+            validated.setdefault("contract_fingerprint", str(item.get("contract_fingerprint") or ""))
+        results.append(validated)
+    return results
+
+
+def _infer_route_asset(explicit_asset, grant_items):
+    if str(explicit_asset or "").strip():
+        return str(explicit_asset).strip()
+    assets = []
+    for item in grant_items or []:
+        contract = item.get("contract") if isinstance(item, dict) and isinstance(item.get("contract"), dict) else {}
+        payload = contract.get("payload") if isinstance(contract.get("payload"), dict) else {}
+        values = payload.get("assets") if isinstance(payload.get("assets"), list) else [payload.get("asset")]
+        for value in values:
+            token = str(value or "").strip()
+            if token and token not in assets:
+                assets.append(token)
+    return assets[0] if len(assets) == 1 else ""
+
+
+def _write_live_route_receipt(task_id, asset, package_results, grant_results):
+    attempts = []
+    selected_routes = []
+    required_roles = []
+    for index, item in enumerate(package_results or []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or item.get("name") or f"formula_{index}").strip()
+        receipt_file = str(item.get("validation_receipt_file") or "").strip()
+        if role not in required_roles:
+            required_roles.append(role)
+        attempts.append({"role": role, "route": "formula_batch", "status": "success"})
+        selected_routes.append({"role": role, "kind": "formula", "receipt_file": receipt_file})
+    for index, item in enumerate(grant_results or []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or item.get("name") or f"grant_{index}").strip()
+        kind = str(item.get("kind") or "").strip()
+        receipt_file = str(item.get("validation_receipt_file") or "").strip()
+        fingerprint = str(item.get("contract_fingerprint") or "").strip()
+        if role not in required_roles:
+            required_roles.append(role)
+        route_name = "stock_profile" if kind == "stock_profile" else (
+            f"fast_query_{item.get('query_type')}" if kind == "fast_query" and item.get("query_type") else kind or "data_grant"
+        )
+        attempts.append({"role": role, "route": route_name, "status": "success"})
+        selected = {"role": role, "kind": kind, "receipt_file": receipt_file, "contract_fingerprint": fingerprint}
+        if item.get("query_type"):
+            selected["query_type"] = item.get("query_type")
+        selected_routes.append(selected)
+    payload = {
+        "schema": "live_data_route_receipt_v1",
+        "version": "live_data_route_receipt_v1",
+        "task_id": str(task_id or "").strip(),
+        "asset": str(asset or "").strip(),
+        "status": "live" if required_roles else "incomplete",
+        "required_roles": required_roles,
+        "attempted_roles": list(required_roles),
+        "attempts": attempts,
+        "selected_routes": selected_routes,
+        "required_roles_complete": bool(required_roles),
+        "static_fallback_allowed": False,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    root = SCRIPT_DIR.parent / "output" / "live_data_route_receipts"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    path = root / f"{digest}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
 def _replace_once(html, marker, value, label):
     count = html.count(marker)
     if count != 1:
@@ -302,10 +409,12 @@ def _run_workflow_v1(params):
     publish_params = params.get("publish_verified")
     if not task_id or not user_query:
         return _failure("QBV_TRACE_CONTEXT_REQUIRED", "task_id 和 user_query 必填")
-    if not isinstance(packages, list) or not packages:
-        return _failure("PACKAGES_REQUIRED", "packages 必须是非空数组")
+    if not isinstance(packages, list):
+        return _failure("INVALID_PACKAGES", "packages 必须是数组")
     if not isinstance(grants, list):
         return _failure("INVALID_GRANTS", "grants 必须是数组")
+    if not packages and not grants:
+        return _failure("LIVE_ROUTES_REQUIRED", "packages 和 grants 至少需要一个实时通道")
     if not isinstance(images, list):
         return _failure("INVALID_IMAGES", "images 必须是数组")
     if not isinstance(publish_params, dict) or not publish_params.get("page_id"):
@@ -313,6 +422,7 @@ def _run_workflow_v1(params):
 
     try:
         packages = _normalize_package_begin_dates(packages, params.get("begin_date"))
+        grants = _normalize_v1_grants(grants)
     except ValueError as exc:
         return _failure("PACKAGE_BEGIN_DATE_INVALID", str(exc))
 
@@ -353,12 +463,38 @@ def _run_workflow_v1(params):
     # 当前进程已生效的覆盖，不会把顶层 params 里传入的用户 api_key 悄悄清空——publish_workflow.py
     # 中途多次切换 task_id/user_query 上下文，覆盖必须原样带到 package/grant 注册和最终 publish。
     C.configure_trace_context({"task_id": task_id, "user_query": user_query})
-    validation = _run_qbs_package_set(task_id, user_query, packages)
+    validation = (
+        _run_qbs_package_set(task_id, user_query, packages)
+        if packages else {"code": 0, "validation_receipt_files": [], "packages": []}
+    )
     if not isinstance(validation, dict) or validation.get("code") != 0:
         return _failure("PACKAGE_SET_VALIDATION_FAILED", "QBS package-set 验证失败", validation=validation)
     receipts = validation.get("validation_receipt_files") or []
     if len(receipts) != len(packages):
         return _failure("PACKAGE_SET_RECEIPTS_INCOMPLETE", "package-set 收据数量与公式包数量不一致", validation=validation)
+    grant_validation = (
+        _run_qbs_grant_set(task_id, user_query, grants)
+        if grants else {"code": 0, "validation_receipt_files": [], "grants": []}
+    )
+    if not isinstance(grant_validation, dict) or grant_validation.get("code") != 0:
+        return _failure("GRANT_SET_VALIDATION_FAILED", "QBS grant-set 验证失败", validation=grant_validation)
+    grant_receipts = grant_validation.get("validation_receipt_files") or []
+    if len(grant_receipts) != len(grants):
+        return _failure("GRANT_SET_RECEIPTS_INCOMPLETE", "grant-set 收据数量与 Grant 数量不一致", validation=grant_validation)
+    grant_validation_by_name = {item.get("name"): item for item in grant_validation.get("grants") or [] if isinstance(item, dict)}
+    for grant in grants:
+        validated = grant_validation_by_name.get(grant.get("name")) or {}
+        if validated.get("contract_fingerprint") != grant.get("contract_fingerprint"):
+            return _failure("GRANT_FINGERPRINT_MISMATCH", f"Grant验证与注册合同不一致: {grant.get('name')}")
+    package_route_results = _validation_route_items(packages, validation.get("packages"), receipts, kind="formula")
+    grant_route_results = _validation_route_items(grants, grant_validation.get("grants"), grant_receipts, kind="grant")
+    route_asset = _infer_route_asset(publish_params.get("asset") or params.get("asset"), grants)
+    route_receipt_file = _write_live_route_receipt(
+        task_id,
+        route_asset,
+        package_route_results,
+        grant_route_results,
+    )
 
     registered_packages = []
     for index, item in enumerate(packages):
@@ -419,7 +555,11 @@ def _run_workflow_v1(params):
         "task_id": task_id,
         "user_query": user_query,
         "html_file": str(prepared_file),
+        "asset": route_asset,
+        "live_data_mode": "live",
+        "route_receipt_file": route_receipt_file,
         "validation_receipt_files": receipts,
+        "grant_validation_receipt_files": grant_receipts,
         "_via_publish_workflow": SP._VIA_PUBLISH_WORKFLOW_SENTINEL,
     })
     published = SP.cmd_publish_verified(verified_params)
@@ -435,6 +575,8 @@ def _run_workflow_v1(params):
         "uploaded_images": uploaded_images,
         "card_runtime_preflight": card_runtime_preflight,
         "validation_receipt_files": receipts,
+        "grant_validation_receipt_files": grant_receipts,
+        "route_receipt_file": route_receipt_file,
         "prepared_html_file": str(prepared_file),
         "publish_verified": published,
     }
@@ -606,6 +748,18 @@ def _run_workflow_v2(params):
         receipt = grant_validation_by_name.get(grant.get("name")) or {}
         if receipt.get("contract_fingerprint") != grant.get("contract_fingerprint"):
             return _failure("GRANT_FINGERPRINT_MISMATCH", f"Grant验证与注册合同不一致: {grant.get('name')}", timing=timings)
+    grant_receipts = grant_validation.get("validation_receipt_files") or []
+    if len(grant_receipts) != len(grants):
+        return _failure("GRANT_SET_RECEIPTS_INCOMPLETE", "grant-set 收据数量与 Grant 数量不一致", timing=timings)
+    package_route_results = _validation_route_items(packages, package_validation.get("packages"), receipts, kind="formula")
+    grant_route_results = _validation_route_items(grants, grant_validation.get("grants"), grant_receipts, kind="grant")
+    route_asset = _infer_route_asset(publish_params.get("asset") or params.get("asset"), grants)
+    route_receipt_file = _write_live_route_receipt(
+        task_id,
+        route_asset,
+        package_route_results,
+        grant_route_results,
+    )
 
     reply_evidence_contract = {}
     if RDE.get_policy(template_ref):
@@ -682,8 +836,12 @@ def _run_workflow_v2(params):
         "task_id": task_id,
         "user_query": user_query,
         "html_file": str(prepared_file),
+        "asset": route_asset,
         "fork_manifest_file": str(manifest_path),
+        "live_data_mode": "live",
+        "route_receipt_file": route_receipt_file,
         "validation_receipt_files": receipts,
+        "grant_validation_receipt_files": grant_receipts,
         "_via_publish_workflow": SP._VIA_PUBLISH_WORKFLOW_SENTINEL,
     })
     verified_params.update(reply_evidence_contract)
@@ -706,7 +864,8 @@ def _run_workflow_v2(params):
         "registered_grants": registered_grants,
         "uploaded_images": uploaded_images,
         "validation_receipt_files": receipts,
-        "grant_validation_receipt_files": grant_validation.get("validation_receipt_files") or [],
+        "grant_validation_receipt_files": grant_receipts,
+        "route_receipt_file": route_receipt_file,
         "card_runtime_preflight": card_runtime_preflight,
         "timing": timings,
         "stages": stages,

@@ -40,8 +40,15 @@ def _script_inline(path):
     return "<script>\n" + _read(path).strip() + "\n</script>"
 
 
-def _style_inline(path):
-    return "<style>\n" + _read(path).strip() + "\n</style>"
+def _style_inline(path, marker_name=None):
+    block = "<style>\n" + _read(path).strip() + "\n</style>"
+    return _marked(marker_name, block) if marker_name else block
+
+
+def _marked(name, value):
+    if not name:
+        return value
+    return f"<!-- QB_SHELL_{name}_START -->\n{value.strip()}\n<!-- QB_SHELL_{name}_END -->"
 
 
 def _logo_data_uri():
@@ -58,7 +65,8 @@ def _section(shell_html, name):
     )
     if not m:
         raise ValueError(f"shell.html 缺少 {name} section")
-    return m.group(1).strip().replace("__QB_LOGO_SRC__", _logo_data_uri())
+    body = m.group(1).strip().replace("__QB_LOGO_SRC__", _logo_data_uri())
+    return _marked(name, body)
 
 
 def _replace(html, token, value):
@@ -73,16 +81,34 @@ def _compile(html, params):
         html = html.replace(str(old), str(new))
 
     shell = _read(os.path.join(SHARED_DIR, "shell.html"))
-    html = _replace(html, "<!-- QB_SHARED_SHELL_CSS -->", _style_inline(os.path.join(SHARED_DIR, "shell.css")))
+    html = _replace(
+        html,
+        "<!-- QB_SHARED_SHELL_CSS -->",
+        _style_inline(os.path.join(SHARED_DIR, "shell.css"), "CSS"),
+    )
     html = _replace(html, "<!-- QB_SHARED_SHELL_HEADER -->", _section(shell, "HEADER"))
     html = _replace(html, "<!-- QB_SHARED_SHELL_FOOTER -->", _section(shell, "FOOTER"))
-    html = _replace(html, "<!-- QB_SHARED_SHELL_MODAL -->", _section(shell, "MODAL"))
+
+    warehouse = _section(shell, "RESEARCH_WAREHOUSE")
+    if "<!-- QB_SHARED_SHELL_RESEARCH_WAREHOUSE -->" in html:
+        html = _replace(html, "<!-- QB_SHARED_SHELL_RESEARCH_WAREHOUSE -->", warehouse)
+        html = _replace(html, "<!-- QB_SHARED_SHELL_MODAL -->", _section(shell, "MODAL"))
+    else:
+        html = _replace(
+            html,
+            "<!-- QB_SHARED_SHELL_MODAL -->",
+            warehouse + "\n\n" + _section(shell, "MODAL"),
+        )
 
     shared_js = "\n".join([
         _read(os.path.join(SHARED_DIR, "poster.js")).strip(),
         _read(os.path.join(SHARED_DIR, "shell.js")).strip(),
     ])
-    html = _replace(html, "<!-- QB_SHARED_SHELL_JS -->", "<script>\n" + shared_js + "\n</script>")
+    html = _replace(
+        html,
+        "<!-- QB_SHARED_SHELL_JS -->",
+        _marked("JS", "<script>\n" + shared_js + "\n</script>"),
+    )
 
     if params.get("inline_qr_mini", True):
         html = _replace(html, "<!-- QB_SHARED_QR_MINI -->", _script_inline(os.path.join(ASSETS_DIR, "qr-mini.js")))

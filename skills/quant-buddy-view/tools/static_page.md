@@ -15,13 +15,14 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 
 > 把一份自包含 HTML 看板上传到对象存储，返回 `https://pages.quantbuddy.cn/...` 公开链接，任何人凭链接即可在浏览器打开。之后凭 `page_id` 管理（替换内容 / 列表 / 撤销）。
 > **替换（`update`）只换内容、不换链接**：页面已经分享出去后想再补充/调整，重建 HTML 后 `update` 同一个 `page_id` 即可，URL 不变、访问者刷新就看到新内容，也不占用新的活跃页配额。
-> **首链进度页**：新会话先查官方精选+社区范式卡；普通渠道 direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize，fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护并发送同一首链。`config.json._channel=feishu-group` 时内部流程不变，但所有非终态链接都禁止发送，只交付 terminal contract 的 playground URL。
+> **新会话路由**：简单单一 A 股综合分析可在 Trace begin 后直接用 `new_asset_page` 返回终态自有页面；其他请求再查官方精选+社区范式卡。普通渠道 direct 命中后下一条用户可见消息立即发现成链接，再用 `direct_deliver` 确定性取数和 finalize，fork/unmatched 用 `new_page`、`update_progress`、`publish_verified` 维护并发送同一首链。`config.json._channel=feishu-group` 时内部流程不变，但所有非终态链接都禁止发送，只交付 terminal contract 的 playground URL。
 > 通过本地脚本 `scripts/static_page.py` 调用，页面管理命令凭 API Key 认身份（归属由 api_key 推定，优先级：参数 `api_key` > `QBV_API_KEY` > `config.json`）；每次用户任务先用 `scripts/trace_context.py begin` 建立 `task_id`——该步同样是后端写入、同样按 api_key 归属，必须与后续命令带同一个 key，否则整条链路的第一条记录会归到 `config.json` 的默认账号；后续命令通过参数复用并自动透传 `x-task-id`；`verify_card_runtime` 直连 URL 模式只做公开 HTML 验收。
 
 ## 端点
 
 | 操作 | 方法 + 路径 |
 |------|-------------|
+| 单一 A 股快速页 | `POST /skill/newAssetPage`（脚本命令 `new_asset_page`；asset 必填，task_id 由请求体 / `x-task-id` 透传） |
 | 首链进度页 | 脚本包装：`new_page` 调 `uploadStaticPage`，`update_progress` 调 `updateStaticPage` |
 | 首链最终发布 | 脚本包装：`publish_final` 先调 `update_progress` 进入 `final_publish`，再调 `updateStaticPage` 写正式活页；失败时回写失败进度页 |
 | 分级验收发布 | 脚本包装：`publish_verified` 固定执行 `fork_validate → fork-local 浏览器门禁 → publish_final → public-smoke` |
@@ -38,11 +39,13 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 | 模板详情 | `GET /skill/getTemplate?template_id=`（或 `page_id=`） |
 | direct 确定性交付 | 脚本包装：`direct_deliver` 调一次模板详情、下载公开 HTML、每数据源查询一次，再调 `finalizeDirectPage` |
 | direct 终态 | `POST /skill/finalizeDirectPage`（API Key；校验 task、模板 revision 与同 task 实时查询证据） |
-| 模板改写 | `POST /skill/updateTemplate`（is_test/admin；脚本命令 `update_template` 带并发复查） |
 
 ## 调用方式
 
 ```bash
+# 简单分析一只 A 股并直接返回终态页面；先用 trace_context.py begin 获得 task_id
+python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵州茅台","user_query":"分析贵州茅台"}'
+
 # 首次会话创建活页进度页（返回 page_id + url + steps；普通渠道发送 url，feishu-group 只内部保留）
 python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
 
@@ -106,12 +109,28 @@ python scripts/static_page.py direct_deliver '{"task_id":"task_xxx","page_id":"p
 # 兼容底层入口：仅在已经单独完成全部实时查询证据时使用
 python scripts/static_page.py direct_finalize '{"task_id":"task_xxx","page_id":"page_xxx","template_revision":"sha256"}'
 
-# 已转 published template 的页面：保持原 page_id/public_url 安全改写
-python scripts/static_page.py update_template '{"page_id":"page_xxx","html_file":"output/pages/x.html","verify_card_runtime":true,"expected_metadata":{"download_url":"https://..."}}'
-
 # 批量快速验收范式卡 card runtime artifact，不跑整页多视口
 python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"require_browser":true}'
 ```
+
+## 单一 A 股快速页（new_asset_page）
+
+`new_asset_page` 面向“简单分析一只 A 股并给我页面”这类窄场景。先用 `trace_context.py begin` 建立 new session，再调用一次本命令；不查询 templates、不创建进度页、不执行 fork，也不要求 Agent 另跑 quant-buddy-skill 验证或自行注册 Grant。
+
+参数：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `task_id` | ✅ | 本次 Trace task_id；CLI 同时通过 `x-task-id` 透传 |
+| `asset` | ✅ | 单只 A 股名称或代码，如 `贵州茅台` / `600519.SH` |
+| `user_query` | ❌ | 用户原始问题；省略时复用 Trace Context 中的 user_query |
+| `ttl_days` | ❌ | 页面与固定 Data Grant 有效期 |
+
+适用边界：单一 A 股、简单综合分析/画像/行情估值财务概览、只需返回页面。若用户要求定制栏目或版式、指定额外指标/公式/图表、对比、多标的、指数、港美股、选股或回测，继续走 `templates → direct/fork/unmatched`。
+
+服务端固定生成 profile / market_series / financial_report 三份 Data Grant，并按 `(user, task_id, 标准标题)` 幂等。成功输出只保留公开页面字段并附加 `agent_reply_contract.terminal=true`；最终直接返回 contract 的 `public_url`。命令不会输出 HTML、grant_id、signature、package_id 或内部 `_profile`，也不要求生成回复模板正文或运行 `validate_agent_reply.py`。
+
+常见业务错误包括：`ASSET_NOT_FOUND`、`ASSET_NOT_ASHARE`、`SOURCE_TAG_NOT_FOUND`、`SOURCE_PAGE_NOT_FOUND`、`GRANT_REGISTER_FAILED`、`PAGE_UPLOAD_FAILED`。后端 `code != 0` 时脚本原样返回错误结构，不伪装成成功页面。
 
 ## 首链进度页（new_page / update_progress / publish_final）
 
@@ -205,7 +224,7 @@ fork 只要含任一公式包或数据授权，就使用 [publish_workflow.md](p
 
 ## 范式卡 artifact 快速门禁
 
-`upload` / `update` / `update_template` 可传 `verify_card_runtime:true`。脚本会把最终 HTML 写入临时文件，执行：
+`upload` / `update` 可传 `verify_card_runtime:true`。脚本会把最终 HTML 写入临时文件，执行：
 
 ```bash
 node scripts/verify_page.mjs <html> --card-runtime-only --require-browser
@@ -237,6 +256,8 @@ python scripts/static_page.py retrofit_card_runtime '{"page_id":"page_xxx","visu
 ```
 
 没有视觉方案时返回 `CARD_VISUAL_REQUIRED`；传入尚未实现的 kind 返回 `CARD_VISUAL_UNSUPPORTED`。完整重建会自动追加 `--require-card-visual-contract` 严格验收，`preserve_visual:true` 为兼容旧 artifact 不启用该门禁。
+
+`retrofit_card_runtime` 传 `update:true` 时按普通页面写回（等价于 `update`，保持同一 `page_id`/URL）。若目标已被后台转成 published template（`template_status=published` 或 `is_template=true`），本 skill 不支持写回，返回 `TEMPLATE_WRITE_UNSUPPORTED` 而不会尝试任何改写；只重建 artifact 而不写回，可传 `update:false` 自行处理后续发布。
 
 ## 自动打标（`autotag`）
 
@@ -287,7 +308,7 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 - `fork_prepare`：只返回脱敏工作 HTML、manifest v2、review 和 publish plan 路径，不主动暴露只读来源 HTML 路径或来源凭证；它是 fork 输入，不是完成证据。
 - `list` / 默认 `download`：只返回 `agent_reply_hint`，`resource_role=existing_page`。
 - `new_page` / `update_progress`：始终非终态；即使继承了回复 metadata，也会抑制 `agent_reply_contract`。普通渠道的 `waiting_input` 会额外返回 `interaction_required=true`、`required_input`、原 `task_id/page_id/public_url` 和 `resume_step`；`feishu-group` 不返回 hint `public_url`，澄清消息也不得带链接。两者都只授权一次澄清停顿，不是业务完成证据。
-- 成功的 `upload` / `update` / `publish_final` / `publish_verified` / `update_template` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`feishu-group` 还包含 `delivery_policy:{channel:"feishu-group",emit_intermediate_url:false,terminal_url_format:"quantbuddy_playground",max_markdown_tables:5}`，并把 contract `public_url` 转为 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`；原始 pages URL 仅供内部发布与验收。启用 `reply_data_policy_file` 的模板还附加 SHA256 绑定的 `reply_data_evidence_v1` 和字段级 `reply_data_availability`；direct 路径只复用本轮 package/grant 查询结果，不增加接口调用。validator 会在飞书终态发送前统计 Markdown 表格，超过限制即返回 `MARKDOWN_TABLE_LIMIT_EXCEEDED`。
+- 成功的 `upload` / `update` / `publish_final` / `publish_verified` / `direct_deliver` / `direct_finalize`：返回 `agent_reply_contract`，包含 `terminal:true`、`operation`、`page_id`、`public_url` 和 registry 中的 `reply_render_policy`。`feishu-group` 还包含 `delivery_policy:{channel:"feishu-group",emit_intermediate_url:false,terminal_url_format:"quantbuddy_playground",max_markdown_tables:5}`，并把 contract `public_url` 转为 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`；原始 pages URL 仅供内部发布与验收。启用 `reply_data_policy_file` 的模板还附加 SHA256 绑定的 `reply_data_evidence_v1` 和字段级 `reply_data_availability`；direct 路径只复用本轮 package/grant 查询结果，不增加接口调用。validator 会在飞书终态发送前统计 Markdown 表格，超过限制即返回 `MARKDOWN_TABLE_LIMIT_EXCEEDED`。
 - 只有终态 contract 可以触发最终回复；其中 `required=true` 时才要求读取 Markdown 回复骨架。任何 hint、来源模板 metadata 或 `terminal:false` 都表示必须继续工作。
 - `publish_final` 会 fail-closed 校验同一首链 `page_id` / URL、排除来源模板 URL；fork 还要求有效 manifest、禁止任一来源 package/grant 残留，并检查核心栏目、必需输出、Card Runtime 和用户自己的实时凭证。
 
@@ -423,21 +444,9 @@ python scripts/publish_workflow.py '@output/forks/page_xxx/page_xxx.publish-plan
 >
 > 同业/行业公式由 review 的 `review_type` 区分：规则性矩阵填写 `target_slots`，系统批量生成；无法规则化的跨资产公式填写完整 `target_formulas`。系统绝不自动决定目标同业，未审核完整时在任何网络调用前失败。
 
-### 公共模板：安全改写（`update_template`）
+### 公共模板：不支持写回
 
-当一个原页面已被转成 published template，普通 `download/update` 可能返回 `PAGE_NOT_FOUND`。此时如果必须保持原模板链接，只能走 `update_template`，不要创建新页面顶替。
-
-`update_template` 的安全流程：
-
-1. 先调用 `template` 读取当前 metadata。
-2. 如传入 `expected_metadata`，脚本比较 `download_url/title/description/category/size/sha256/updated_at` 等字段；发现变化就停止。
-3. 编译公共 share shell；如传 `verify_card_runtime:true`，先跑 card artifact 快速门禁。
-4. 调 `POST /skill/updateTemplate` 写回同一个 `template_id/page_id`。
-5. 写后再次 `template` 回查，并把 `preflight_template/postflight_template` 放进返回 JSON。
-
-常用参数：`template_id` 或 `page_id`、`html/html_file`、`title`、`description`、`category`、`verify_card_runtime`、`expected_metadata`。
-
-写回后必须以 `template` / `templates` 回查为准。
+当一个原页面已被转成 published template，普通 `download/update` 可能返回 `PAGE_NOT_FOUND`。本 skill 侧不提供该类模板的写回命令；需要保留原模板链接更新时，走后台/admin 管理入口。skill 侧只做「读取 + 复用」（`templates`/`template`）和 fork 成自己的新页面。
 
 ## 配置
 
@@ -487,12 +496,17 @@ python scripts/publish_workflow.py '@output/forks/page_xxx/page_xxx.publish-plan
 | `page_context` | object | ❌ | 沿用原值 | 仅显式传入时更新；`null`/空对象清空。若最终模板是 v2 hybrid，清空会被拒绝 |
 | `agent_reply_template` | object | ❌ | 沿用原值 | Agent 回复格式 metadata；传 `null` / 空对象表示清空（服务端支持时生效） |
 | `reply_contract_binding` | object | ❌ | 沿用原值 | 人工维护分组和 revision；传 `null`/空对象清空，省略则保留 |
+| `change_note` | string | ❌ | `更新页面内容` | 一句话修改描述（≤200字），写入页面历史版本；正式发布应尽量传具体说明 |
+| `change_aspect` | string | ❌ | 服务端推断 | `content` / `data` / `layout` / `metadata`；布局改动必须显式传 `layout` |
 | `verify_card_runtime` | bool | ❌ | false | 替换前只验收 card runtime artifact；失败不覆盖 |
 | `verify_card_runtime_timeout_sec` | number | ❌ | 180 | 单次 artifact 门禁超时时间 |
 | `ensure_share_shell` | bool | ❌ | true | 替换前强制检查/自动补公共页头页尾；生产路径不要关闭 |
+| `refresh_share_shell` | bool | ❌ | false | 仅显式开启时替换 `QB_SHELL_CSS/HEADER/RESEARCH_WAREHOUSE/FOOTER/MODAL/JS` 六组 marker 内的公共 shell；每组必须唯一，否则 fail closed。普通 update 不刷新已有存量 shell |
 | `theme` | object | ❌ | 无 | 公共页头/页尾颜色变量，支持 `chrome_bg`、`header_bg`、`footer_bg`、`accent`、`accent_strong`、`line`、`ink`、`muted` |
 
 替换成功后 `url` / `page_id` 与替换前完全一致；仅本人、且未撤销的页面可改（已撤销返回 `NOT_ACTIVE`）。
+
+> `refresh_share_shell:true` 只适用于已经在本地编译出稳定 marker 的 HTML。旧线上 HTML 没有 marker 时会拒绝更新；先下载并在本地重建为 marker 版本，浏览器验收后再对指定 `page_id` 做同链接 update。该参数不用于批量迁移。新 shell 页头为 `刷新数据 / 收藏 / 分享 / 开始使用`，“开始使用”动态打开当前页对应 Web Agent，投研仓 iframe 无法通信时降级为官网新窗口。
 ## 响应（upload）
 
 ```json
@@ -632,6 +646,10 @@ python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 
 | code | 场景 |
 |---|---|
+| `NEW_ASSET_PAGE_PARAMS_REQUIRED` | new_asset_page 缺少 asset 或 task_id |
+| `ASSET_NOT_FOUND` / `ASSET_NOT_ASHARE` | new_asset_page 未识别到资产，或目标不是单只 A 股 |
+| `SOURCE_TAG_NOT_FOUND` / `SOURCE_PAGE_NOT_FOUND` | new_asset_page 正式环境未配置合法 `recommend:模板` 来源页 |
+| `GRANT_REGISTER_FAILED` / `PAGE_UPLOAD_FAILED` | new_asset_page 固定授权注册或页面上传失败 |
 | `HTML_REQUIRED` / `EMPTY` / `NOT_HTML` / `TOO_LARGE` | 内容缺失 / 为空 / 非 HTML / 超 2MB |
 | `PAGE_LIMIT` | 活跃页达上限 |
 | `STORAGE_FAILED` / `DB_FAILED` | 写对象存储 / 落库失败 |
@@ -642,8 +660,9 @@ python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 | `SCENE_TAG_NOT_FOUND` | upload/update：`scene_tags` 里有未登记的场景标签（场景只能选已有） |
 | `TEMPLATE_NOT_ALLOWED` | publish_community/unpublish_community：公共模板不走用户侧社区发布接口 |
 | `COMMUNITY_TAG_FAILED` | publish_community/unpublish_community：固定 `社区` 标签读取或创建失败 |
+| `TEMPLATE_WRITE_UNSUPPORTED` | `retrofit_card_runtime` 传 `update:true`：目标已是 published template，本 skill 侧不支持写回 |
 
-> 若公开 URL 明明可访问，但 `download` / `update` 返回 `PAGE_NOT_FOUND`，先用 `template --page_id <page_id>` 检查是否已转成公共模板。若 `template_status=published`，普通静态页维护路径不再适用；需要保留原模板链接更新时，应走后台/admin `updateTemplate` 路径，不能用新 URL 代替。
+> 若公开 URL 明明可访问，但 `download` / `update` 返回 `PAGE_NOT_FOUND`，先用 `template --page_id <page_id>` 检查是否已转成公共模板。若 `template_status=published`，普通静态页维护路径不再适用；本 skill 侧不提供该类模板的写回命令，不能用新 URL 代替。
 
 ## 安全与隔离
 
@@ -652,5 +671,5 @@ python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 
 ## 计费
 
-上传 / 替换各固定 1 RU；下载 / 列表 / 撤销 / 查标签（tags）/ 发布到社区 / 取消社区发布 / 浏览模板（templates、template）不计费
+`new_asset_page` 固定 10 RU（三份固定 Data Grant + 一次页面上传）；上传 / 替换各固定 1 RU；下载 / 列表 / 撤销 / 查标签（tags）/ 发布到社区 / 取消社区发布 / 浏览模板（templates、template）不计费
 （下载字节直连 OSS，不经服务端）。替换不占新的活跃页配额。

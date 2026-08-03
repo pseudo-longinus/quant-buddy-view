@@ -6,6 +6,7 @@ r"""
 工具说明文档：tools/static_page.md
 
 静态页子命令（除直连 URL 验收外需 API Key）：
+    new_asset_page  简单单一 A 股分析快速通道：直接生成并返回终态个股分析页
     new_page   首次会话先上传 iframe 友好的活页进度页，返回 page_id + 公开 url
     update_progress  更新同一个 page_id 的进度页 HTML；刷新由承接页面负责
     upload     上传 HTML，返回 page_id + 公开 url
@@ -26,7 +27,6 @@ r"""
     direct_finalize  直达命中终态：校验模板 revision、实时查询证据和任务归属，返回交付 Trace
     fork_prepare  下载命中范式，自动脱敏凭证并生成 fork_manifest_v2/review/publish plan
     fork_validate 在浏览器验收前对工作 HTML 复用 publish_final 的 fork 门禁（不发布）
-    update_template  官方精选/旧模板安全改写：metadata 复查后走 updateTemplate
     retrofit_card_runtime  为已发布模板重建独立 card runtime artifact，可原链接写回
     verify_card_runtime  批量快速验收独立 card runtime artifact（下载 HTML + required_outputs + 独立 hydrate）
 
@@ -37,9 +37,8 @@ r"""
   · 官方精选（templates/template）：浏览 / 复制对**全体登录用户**开放，发现口径是后台
     推荐标签 recommend:官方精选；不再要求 is_template=true 或 template_status=published。
   · 官方精选标签、旧模板元数据、上下线、删除、把某个用户页转成旧公共模板都属于后台写操作，
-    本 skill 侧默认只做「读取 + 复用」官方精选。
-  · update_template 只作为已转 published template / 官方精选页需要保留原链接时的
-    安全维护 helper；写回前必须复查 metadata，避免覆盖他人更新。
+    本 skill 侧默认只做「读取 + 复用」官方精选。已转 published template 的页面不支持本
+    skill 侧写回；`retrofit_card_runtime` 命中 template 目标时返回明确的不支持写回结果。
 
 参数传递（规避 PowerShell GBK 截断）：优先级 SP_PARAMS 环境变量 > @file > 命令行 JSON > stdin
 
@@ -62,6 +61,9 @@ upload 参数：
     }
     标签：推荐标签仅后台维护，本脚本不暴露；范式标签现写即进共享池。
     先用 tags 子命令查询可用场景/范式：python scripts/static_page.py tags
+new_asset_page 参数：asset 必填（A 股名称或代码）；user_query / ttl_days 可选。
+    仅用于无定制内容、对比、多标的或指定额外产出的简单单股分析；trace begin 后可跳过 templates/new_page。
+    成功即返回终态页面 contract，不返回 HTML、Grant、signature 或内部 profile。
 new_page 参数：title / message / current_step / page_status / steps / required_input 可选；正式 task 还必须在 templates(recommend="all") 后由 Agent 传 routing_decision：
     fork 用 {mode:"fork",source_template_id,reason_code}；unmatched 用 {mode:"unmatched",closest_template_id,reason_code,reason}。
     脚本核验候选属于本 task 并记录决定；默认接入公共 share shell，上传一个不自刷新的 iframe 活页进度页，并返回 page_id / url / progress。
@@ -105,6 +107,7 @@ fork_prepare 参数：{ "task_id":"本次 Trace task_id", "source_template_id":"
 verify_card_runtime 参数：{ "page_ids":["page_xxx"], "require_browser":true, "timeout_sec":180 }
 
 用法示例：
+    python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵州茅台","user_query":"分析贵州茅台"}'
     python scripts/static_page.py new_page '{"task_id":"task_xxx","title":"贵州茅台估值质量分析","message":"正在确认活页方案","routing_decision":{"mode":"fork","source_template_id":"page_template_xxx","reason_code":"same_paradigm_different_asset"}}'
     python scripts/static_page.py update_progress '{"page_id":"page_xxx","current_step":"formula_validation","message":"正在验证实时数据"}'
     python scripts/static_page.py publish_final '{"page_id":"page_xxx","html_file":"output/pages/final.html","title":"贵州茅台估值质量分析","source_template_id":"page_template_xxx","fork_manifest_file":"output/forks/page_template_xxx/page_template_xxx.fork-manifest.json","require_agent_reply_template":true}'
@@ -172,7 +175,7 @@ _PATH = {
     "templates": "/skill/listTemplates",
     "template":  "/skill/getTemplate",
     "direct_finalize": "/skill/finalizeDirectPage",
-    "update_template": "/skill/updateTemplate",
+    "new_asset_page": "/skill/newAssetPage",
 }
 
 _UPLOAD_TIMEOUT = 120
@@ -182,7 +185,8 @@ _DEFAULT_TIMEOUT = 60
 _MAX_HTML_BYTES = 2 * 1024 * 1024
 _MAX_PAGE_IMAGE_BYTES = 5 * 1024 * 1024
 _SHARE_POSTER_VERSION = "snapshot-tall-v1"
-_SHARE_SHELL_VERSION = "copy-link-v1"
+_SHARE_SHELL_VERSION = "research-warehouse-v1"
+_SHARE_SHELL_MARKERS = ("CSS", "HEADER", "RESEARCH_WAREHOUSE", "FOOTER", "MODAL", "JS")
 _FORK_MANIFEST_VERSION_V1 = "fork_manifest_v1"
 _FORK_MANIFEST_VERSION = FRC.MANIFEST_VERSION
 _SUPPORTED_FORK_MANIFEST_VERSIONS = {
@@ -201,6 +205,9 @@ _MANAGED_IMAGE_RE = re.compile(
 )
 _IMAGE_MARKER_RE = re.compile(r"__QB_IMAGE_[A-Z0-9_]+__")
 _VALIDATION_RECEIPT_VERSION = "qb_validation_receipt_v1"
+_GRANT_VALIDATION_RECEIPT_VERSION = "grant_validation_receipt_v1"
+_LIVE_DATA_ROUTE_RECEIPT_VERSION = "live_data_route_receipt_v1"
+_LIVE_DATA_MODES = {"live", "static_content_only", "static_after_live_probe"}
 _PROGRESS_SHELL_THEME = {
     "chrome_bg": "#ffffff",
     "header_bg": "#ffffff",
@@ -978,6 +985,37 @@ def _shared_shell_js():
     ])
 
 
+def _current_share_shell_fragments():
+    shell = CB._read(os.path.join(CB.SHARED_DIR, "shell.html"))
+    return {
+        "CSS": CB._style_inline(os.path.join(CB.SHARED_DIR, "shell.css"), "CSS"),
+        "HEADER": CB._section(shell, "HEADER"),
+        "RESEARCH_WAREHOUSE": CB._section(shell, "RESEARCH_WAREHOUSE"),
+        "FOOTER": CB._section(shell, "FOOTER"),
+        "MODAL": CB._section(shell, "MODAL"),
+        "JS": CB._marked("JS", _script_inline(_shared_shell_js())),
+    }
+
+
+def _refresh_share_shell_markers(html):
+    fragments = _current_share_shell_fragments()
+    for name in _SHARE_SHELL_MARKERS:
+        start = f"<!-- QB_SHELL_{name}_START -->"
+        end = f"<!-- QB_SHELL_{name}_END -->"
+        start_count = html.count(start)
+        end_count = html.count(end)
+        if start_count != 1 or end_count != 1:
+            raise ValueError(
+                "share shell 显式刷新失败："
+                f"{name} marker 必须各命中 1 次，实际 start={start_count}, end={end_count}"
+            )
+        pattern = re.escape(start) + r"[\s\S]*?" + re.escape(end)
+        html, count = re.subn(pattern, lambda _m, value=fragments[name]: value, html, count=1)
+        if count != 1:
+            raise ValueError(f"share shell 显式刷新失败：无法替换 {name} marker 区块")
+    return html, [f"refreshed_shell_{name.lower()}" for name in _SHARE_SHELL_MARKERS]
+
+
 def _share_runtime_is_current(html):
     return (
         "QB_SHARE_POSTER_VERSION" in html and _SHARE_POSTER_VERSION in html
@@ -1173,12 +1211,25 @@ def _has_shared_modal(html):
     return bool(re.search(r"id=[\"']sharePosterModal[\"']", html, flags=re.I))
 
 
+def _has_research_warehouse_modal(html):
+    return bool(re.search(r"id=[\"']researchWarehouseModal[\"']", html, flags=re.I))
+
+
 def _ensure_share_shell(html, params):
     """Preflight static-page HTML so published pages always carry the public shell."""
     if params.get("ensure_share_shell") is False:
         return html, {"checked": False, "skipped": True}
 
     actions = []
+    refresh_share_shell = params.get("refresh_share_shell") is True
+    had_shared_shell = (
+        _has_shared_header(html)
+        or "window.QBShareShell" in html
+        or "<!-- QB_SHARED_SHELL_HEADER -->" in html
+    )
+    if refresh_share_shell:
+        html, refresh_actions = _refresh_share_shell_markers(html)
+        actions.extend(refresh_actions)
 
     html, n = _replace_old_body_qr(html, collapse=bool(params.get("collapse_qr_space")))
     if n:
@@ -1252,6 +1303,21 @@ def _ensure_share_shell(html, params):
             raise ValueError("公共页头页尾检查失败：HTML 缺少 </body>，无法插入分享弹层")
         actions.append("inserted_shell_modal")
 
+    if (
+        not had_shared_shell
+        and not _has_research_warehouse_modal(html)
+        and "<!-- QB_SHARED_SHELL_RESEARCH_WAREHOUSE -->" not in html
+    ):
+        html, n = _inject_before(
+            r"<!-- QB_SHARED_SHELL_MODAL -->|</body>",
+            "<!-- QB_SHARED_SHELL_RESEARCH_WAREHOUSE -->",
+            html,
+            flags=re.I,
+        )
+        if not n:
+            raise ValueError("公共页头页尾检查失败：HTML 缺少 </body>，无法插入投研仓弹层")
+        actions.append("inserted_research_warehouse_modal")
+
     if "QRMini" not in html and "<!-- QB_SHARED_QR_MINI -->" not in html:
         html, n = _inject_before(r"</body>", "<!-- QB_SHARED_QR_MINI -->", html, flags=re.I)
         if not n:
@@ -1270,9 +1336,10 @@ def _ensure_share_shell(html, params):
             raise ValueError("公共页头页尾检查失败：HTML 缺少 </body>，无法插入公共 shell 初始化脚本")
         actions.append("inserted_shell_bootstrap")
 
-    html, n, runtime_action = _upgrade_share_poster_runtime(html)
-    if n:
-        actions.append(runtime_action)
+    if refresh_share_shell or not had_shared_shell:
+        html, n, runtime_action = _upgrade_share_poster_runtime(html)
+        if n:
+            actions.append(runtime_action)
 
     html = CB._compile(html, {"inline_qr_mini": True, "inline_data_kernel": True})
     problems = []
@@ -1287,7 +1354,14 @@ def _ensure_share_shell(html, params):
         problems.append("公共组件占位符未编译")
     if problems:
         raise ValueError("公共页头页尾检查失败：" + "；".join(problems))
-    return html, {"checked": True, "actions": actions, "header": True, "footer": True}
+    return html, {
+        "checked": True,
+        "actions": actions,
+        "header": True,
+        "footer": True,
+        "refreshed": refresh_share_shell,
+        "version": _SHARE_SHELL_VERSION if refresh_share_shell or not had_shared_shell else None,
+    }
 
 
 def _replace_old_body_qr(html, collapse=False):
@@ -2154,9 +2228,10 @@ def cmd_update(params):
         return metadata_err
 
     body = {"page_id": params["page_id"], "html": html}
-    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding", "trace_evidence"):
+    for k in ("title", "description", "ttl_days", "scene_tags", "paradigm_tags", "user_query", "tagging_method", "tagging_source", "tagging_meta", "page_context", "agent_reply_template", "reply_contract_binding", "change_note", "change_aspect", "trace_evidence"):
         if params.get(k) is not None:
             body[k] = params[k]
+    body.setdefault("change_note", "更新页面内容")
     if "page_context" in params and params.get("page_context") is None:
         body["page_context"] = None
     if "reply_contract_binding" in params and params.get("reply_contract_binding") is None:
@@ -2207,6 +2282,201 @@ def _validate_progress_params(params):
     return None
 
 
+def _evidence_error(error, message, **extra):
+    return {"code": 1, "error": error, "message": message, **extra}
+
+
+def _receipt_files(value):
+    if isinstance(value, str):
+        value = [value]
+    return value if isinstance(value, list) else []
+
+
+def _read_evidence_receipt(raw_path, label):
+    if not str(raw_path or "").strip():
+        return None, _evidence_error("DATA_EVIDENCE_RECEIPT_INVALID", f"{label} 缺少收据路径")
+    path = _fork_path(raw_path)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    except Exception as exc:
+        return None, _evidence_error("DATA_EVIDENCE_RECEIPT_INVALID", f"{label} 无法读取: {exc}", file=path)
+    if not isinstance(receipt, dict):
+        return None, _evidence_error("DATA_EVIDENCE_RECEIPT_INVALID", f"{label} 必须是 JSON 对象", file=path)
+    return receipt, None
+
+
+def _normalized_evidence_path(value):
+    try:
+        return os.path.normcase(os.path.abspath(_fork_path(value)))
+    except Exception:
+        return os.path.normcase(os.path.abspath(str(value or "")))
+
+
+def _valid_formula_receipt(receipt, task_id):
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("version") == _VALIDATION_RECEIPT_VERSION
+        and str(receipt.get("task_id") or "") == task_id
+        and receipt.get("status") == "completed"
+        and receipt.get("success") is True
+        and not receipt.get("failures")
+    )
+
+
+def _valid_grant_receipt(receipt, task_id):
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("version") == _GRANT_VALIDATION_RECEIPT_VERSION
+        and str(receipt.get("task_id") or "") == task_id
+        and receipt.get("status") == "completed"
+        and receipt.get("success") is True
+        and bool(str(receipt.get("contract_fingerprint") or "").strip())
+    )
+
+
+def _validate_route_identity(route, params):
+    task_id = _fork_task_id(params)
+    asset = str((params or {}).get("asset") or "").strip()
+    if route.get("schema") != _LIVE_DATA_ROUTE_RECEIPT_VERSION or route.get("version") != _LIVE_DATA_ROUTE_RECEIPT_VERSION:
+        return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_INVALID", "路由收据 schema/version 无效")
+    if str(route.get("task_id") or "") != task_id:
+        return _evidence_error("LIVE_DATA_ROUTE_TASK_MISMATCH", "路由收据 task_id 与当前发布任务不一致")
+    route_asset = str(route.get("asset") or "").strip()
+    if asset and route_asset != asset:
+        return _evidence_error("LIVE_DATA_ROUTE_ASSET_MISMATCH", "路由收据资产与当前页面资产不一致", expected_asset=asset, receipt_asset=route_asset)
+    if route_asset and not asset:
+        return _evidence_error("LIVE_DATA_ROUTE_ASSET_MISMATCH", "资产实时页面发布参数必须显式携带 asset", receipt_asset=route_asset)
+    return None
+
+
+def _validate_static_after_probe(params, route):
+    identity_error = _validate_route_identity(route, params)
+    if identity_error:
+        return identity_error
+    if route.get("status") != "static_fallback_allowed" or route.get("static_fallback_allowed") is not True or route.get("required_roles_complete") is not False:
+        return _evidence_error("STATIC_FALLBACK_RECEIPT_INVALID", "静态回退只接受 status=static_fallback_allowed 的未完成实时路由收据")
+    if route.get("selected_routes"):
+        return _evidence_error("STATIC_FALLBACK_ROUTE_SUCCEEDED", "已有实时路线成功，禁止静态回退")
+    required_roles = route.get("required_roles") if isinstance(route.get("required_roles"), list) else []
+    attempted_roles = route.get("attempted_roles") if isinstance(route.get("attempted_roles"), list) else []
+    if not required_roles or set(required_roles) != set(attempted_roles):
+        return _evidence_error("STATIC_FALLBACK_PROBE_INCOMPLETE", "所有核心实时角色都必须完成探测后才能静态回退", required_roles=required_roles, attempted_roles=attempted_roles)
+    attempts = route.get("attempts") if isinstance(route.get("attempts"), list) else []
+    for role in required_roles:
+        role_attempts = [item for item in attempts if isinstance(item, dict) and item.get("role") == role]
+        if not role_attempts:
+            return _evidence_error("STATIC_FALLBACK_PROBE_INCOMPLETE", f"核心角色 {role} 缺少探测记录")
+        if any(item.get("status") == "success" for item in role_attempts):
+            return _evidence_error("STATIC_FALLBACK_ROUTE_SUCCEEDED", f"核心角色 {role} 已有实时路线成功，禁止静态回退")
+        if not all(item.get("status") == "failed" and item.get("error_class") == "data" for item in role_attempts):
+            return _evidence_error("STATIC_FALLBACK_SYSTEM_BLOCKED", f"核心角色 {role} 含系统级阻塞或非数据失败，禁止静态回退")
+    return None
+
+
+def _validate_live_receipts(params, route):
+    identity_error = _validate_route_identity(route, params)
+    if identity_error:
+        return identity_error
+    if route.get("status") != "live" or route.get("required_roles_complete") is not True or route.get("static_fallback_allowed") is not False:
+        return _evidence_error("LIVE_DATA_ROUTE_INCOMPLETE", "实时发布只接受 status=live 且核心角色完整的路由收据")
+    required_roles = route.get("required_roles") if isinstance(route.get("required_roles"), list) else []
+    attempted_roles = route.get("attempted_roles") if isinstance(route.get("attempted_roles"), list) else []
+    selected = route.get("selected_routes") if isinstance(route.get("selected_routes"), list) else []
+    if not required_roles or set(required_roles) != set(attempted_roles) or not selected:
+        return _evidence_error("LIVE_DATA_ROUTE_INCOMPLETE", "实时路由收据必须覆盖全部核心角色并选择至少一条实时路线")
+    if not set(required_roles).issubset({str(item.get("role") or "") for item in selected if isinstance(item, dict)}):
+        return _evidence_error("LIVE_DATA_ROUTE_INCOMPLETE", "selected_routes 未覆盖全部核心角色")
+
+    task_id = _fork_task_id(params)
+    formula_files = _receipt_files(params.get("validation_receipt_files"))
+    grant_files = _receipt_files(params.get("grant_validation_receipt_files"))
+    formula_receipts = {}
+    grant_receipts = {}
+    invalid = []
+    for raw_path in formula_files:
+        receipt, error = _read_evidence_receipt(raw_path, "formula receipt")
+        path_key = _normalized_evidence_path(raw_path)
+        if error or not _valid_formula_receipt(receipt, task_id):
+            invalid.append({"file": str(raw_path), "kind": "formula"})
+        else:
+            formula_receipts[path_key] = receipt
+    for raw_path in grant_files:
+        receipt, error = _read_evidence_receipt(raw_path, "grant receipt")
+        path_key = _normalized_evidence_path(raw_path)
+        if error or not _valid_grant_receipt(receipt, task_id):
+            invalid.append({"file": str(raw_path), "kind": "grant"})
+        else:
+            grant_receipts[path_key] = receipt
+    if invalid:
+        return _evidence_error("LIVE_DATA_RECEIPT_INVALID", "Grant/公式验证收据无效、未完成或与当前 task_id 不一致", invalid_receipts=invalid)
+
+    selected_formula = set()
+    selected_grant = set()
+    selected_receipt_paths = set()
+    for index, item in enumerate(selected):
+        if not isinstance(item, dict):
+            return _evidence_error("LIVE_DATA_SELECTED_ROUTE_INVALID", f"selected_routes[{index}] 必须是对象")
+        kind = str(item.get("kind") or "").strip()
+        receipt_file = str(item.get("receipt_file") or "").strip()
+        path_key = _normalized_evidence_path(receipt_file)
+        if not path_key:
+            return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_MISSING", f"实时路线 {item.get('role')} 缺少 receipt_file")
+        if path_key in selected_receipt_paths:
+            return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_REUSED", "每条 selected route 必须对应唯一验证收据", receipt_file=receipt_file)
+        selected_receipt_paths.add(path_key)
+        if kind == "formula":
+            selected_formula.add(path_key)
+            receipt = formula_receipts.get(path_key)
+            if receipt is None:
+                return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_MISSING", f"公式路线 {item.get('role')} 缺少对应 qb_validation_receipt_v1")
+        else:
+            selected_grant.add(path_key)
+            receipt = grant_receipts.get(path_key)
+            if receipt is None:
+                return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_MISSING", f"Grant 路线 {item.get('role')} 缺少对应 grant_validation_receipt_v1")
+            receipt_kind = str(receipt.get("kind") or "").strip()
+            if not kind or receipt_kind != kind:
+                return _evidence_error("LIVE_DATA_ROUTE_KIND_MISMATCH", f"Grant 路线 {item.get('role')} 的 kind 与验证收据不一致", selected_kind=kind, receipt_kind=receipt_kind)
+            if str(receipt.get("contract_fingerprint") or "") != str(item.get("contract_fingerprint") or ""):
+                return _evidence_error("LIVE_DATA_ROUTE_FINGERPRINT_MISMATCH", f"Grant 路线 {item.get('role')} 的合同指纹与验证收据不一致")
+            receipt_role = str(receipt.get("role") or "").strip()
+            if receipt_role and receipt_role != str(item.get("role") or "").strip():
+                return _evidence_error("LIVE_DATA_ROUTE_ROLE_MISMATCH", f"Grant 路线 {item.get('role')} 的角色与验证收据不一致")
+    if len(selected) != len(selected_receipt_paths):
+        return _evidence_error("LIVE_DATA_RECEIPT_SET_MISMATCH", "selected_routes 必须与验证收据一一对应")
+    if selected_formula != set(formula_receipts) or selected_grant != set(grant_receipts):
+        return _evidence_error("LIVE_DATA_RECEIPT_SET_MISMATCH", "提交的 Grant/公式收据必须与 selected_routes 逐项完全对应")
+    return None
+
+
+def _validate_publish_data_evidence(params, *, source_credential_count=0):
+    params = params or {}
+    if str(params.get("validation_not_required_reason") or "").strip():
+        return _evidence_error("LEGACY_VALIDATION_WAIVER_FORBIDDEN", "自由文本 validation_not_required_reason 已停用；必须使用结构化 live_data_mode 和收据")
+    mode = str(params.get("live_data_mode") or "").strip()
+    if mode not in _LIVE_DATA_MODES:
+        return _evidence_error("LIVE_DATA_MODE_REQUIRED", "发布必须显式指定 live、static_content_only 或 static_after_live_probe")
+    if mode == "static_content_only":
+        if source_credential_count:
+            return _evidence_error(
+                "STATIC_CONTENT_ONLY_SOURCE_LIVE_DATA",
+                "来源页面包含 package/grant 实时凭证，不得声明为 static_content_only",
+                source_credential_count=source_credential_count,
+            )
+        if params.get("market_data_required") is not False or str(params.get("asset") or "").strip():
+            return _evidence_error("STATIC_CONTENT_ONLY_FORBIDDEN", "资产分析、行情、估值、财务或计算指标页面不得使用 static_content_only")
+        if params.get("route_receipt_file") or _receipt_files(params.get("validation_receipt_files")) or _receipt_files(params.get("grant_validation_receipt_files")):
+            return _evidence_error("STATIC_CONTENT_ONLY_EVIDENCE_CONFLICT", "纯静态模式不得混入实时路由或实时验证收据")
+        return None
+    route, error = _read_evidence_receipt(params.get("route_receipt_file"), "live data route receipt")
+    if error:
+        return _evidence_error("LIVE_DATA_ROUTE_RECEIPT_REQUIRED", "live/static_after_live_probe 模式必须提供可读取的 live_data_route_receipt_v1", details=error)
+    if mode == "static_after_live_probe":
+        return _validate_static_after_probe(params, route)
+    return _validate_live_receipts(params, route)
+
+
 def _validate_progress_evidence(params):
     params = params or {}
     task_id = _fork_task_id(params)
@@ -2216,50 +2486,25 @@ def _validate_progress_evidence(params):
     if not task_id or current_step not in guarded_steps or page_status in ("failed", "waiting_input"):
         return None
     if str(params.get("validation_not_required_reason") or "").strip():
-        return None
+        return _evidence_error("LEGACY_VALIDATION_WAIVER_FORBIDDEN", "自由文本 validation_not_required_reason 已停用；必须提供结构化实时数据证据")
+    if params.get("live_data_mode") or current_step == "final_publish":
+        return _validate_publish_data_evidence(params)
 
-    receipt_files = params.get("validation_receipt_files")
-    if isinstance(receipt_files, str):
-        receipt_files = [receipt_files]
-    if not isinstance(receipt_files, list) or not receipt_files:
-        return {
-            "code": 1,
-            "error": "PROGRESS_EVIDENCE_REQUIRED",
-            "message": f"task_id={task_id} 推进到 {current_step} 前需要已完成的验证收据",
-        }
-
+    # package_register/html_build/verify 的既有公式验证进度仍接受公式收据；
+    # final_publish 则必须升级为统一路由收据。
+    receipt_files = _receipt_files(params.get("validation_receipt_files"))
+    if not receipt_files:
+        return _evidence_error("PROGRESS_EVIDENCE_REQUIRED", f"task_id={task_id} 推进到 {current_step} 前需要已完成的验证收据")
     invalid = []
     valid_count = 0
     for raw_path in receipt_files:
-        path = _fork_path(raw_path)
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                receipt = json.load(handle)
-        except Exception as exc:
-            invalid.append({"file": path, "reason": f"read_failed: {exc}"})
-            continue
-        ok = (
-            isinstance(receipt, dict)
-            and receipt.get("version") == _VALIDATION_RECEIPT_VERSION
-            and str(receipt.get("task_id") or "") == task_id
-            and receipt.get("status") == "completed"
-            and receipt.get("success") is True
-            and not receipt.get("failures")
-        )
-        if ok:
-            valid_count += 1
+        receipt, error = _read_evidence_receipt(raw_path, "formula receipt")
+        if error or not _valid_formula_receipt(receipt, task_id):
+            invalid.append({"file": _fork_path(raw_path), "reason": "receipt must match task_id and be completed success with no failures"})
         else:
-            invalid.append({
-                "file": path,
-                "reason": "receipt must match task_id and be completed success with no failures",
-            })
+            valid_count += 1
     if invalid or valid_count == 0:
-        return {
-            "code": 1,
-            "error": "PROGRESS_EVIDENCE_INVALID",
-            "message": "验证收据失败、仍在排队或与当前 task_id 不一致，拒绝推进进度",
-            "invalid_receipts": invalid,
-        }
+        return _evidence_error("PROGRESS_EVIDENCE_INVALID", "验证收据失败、仍在排队或与当前 task_id 不一致，拒绝推进进度", invalid_receipts=invalid)
     return None
 
 
@@ -2284,6 +2529,8 @@ def _progress_publish_payload(params, html, *, require_page_id=False):
         "tagging_meta",
         "page_context",
         "agent_reply_template",
+        "change_note",
+        "change_aspect",
     ):
         if params.get(k) is not None:
             payload[k] = params[k]
@@ -2686,6 +2933,57 @@ def _routing_next_step(task_id, page_id, decision):
             },
         }
     return {"action": "build_dashboard_or_bespoke", "publish_command": "publish_final"}
+
+
+def cmd_new_asset_page(params):
+    params = dict(params or {})
+    asset = str(params.get("asset") or "").strip()
+    if not asset:
+        return {
+            "code": 1,
+            "error": "NEW_ASSET_PAGE_PARAMS_REQUIRED",
+            "message": "new_asset_page 需要 asset（要分析的 A 股名称或代码）",
+        }
+
+    trace_context = C.current_trace_context()
+    task_id = str(params.get("task_id") or trace_context.get("task_id") or "").strip()
+    if not task_id:
+        return {
+            "code": 1,
+            "error": "NEW_ASSET_PAGE_PARAMS_REQUIRED",
+            "message": "new_asset_page 需要 task_id（先运行 trace_context.py begin）",
+        }
+
+    cfg = C.load_config_require_key()
+    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
+    body = {"task_id": task_id, "asset": asset}
+    user_query = str(params.get("user_query") or trace_context.get("user_query") or "").strip()
+    if user_query:
+        body["user_query"] = user_query
+    if params.get("ttl_days") is not None:
+        body["ttl_days"] = params.get("ttl_days")
+
+    out = C.http_json(
+        "POST",
+        C.api_url(endpoint, _PATH["new_asset_page"]),
+        C.headers(api_key),
+        body,
+        timeout=_UPLOAD_TIMEOUT,
+    )
+    if not (isinstance(out, dict) and out.get("code") == 0):
+        return out
+
+    safe_fields = (
+        "page_id", "url", "title", "description", "asset", "source_page_id",
+        "idempotent", "page_context", "warnings", "expires_at",
+    )
+    result = {key: out[key] for key in safe_fields if key in out}
+    result.update({
+        "code": 0,
+        "operation": "new_asset_page",
+        "task_id": task_id,
+    })
+    return _attach_agent_reply_contract(result, operation="new_asset_page")
 
 
 def cmd_new_page(params):
@@ -3169,6 +3467,14 @@ def cmd_publish_verified(params):
                 "credential_count": credential_count,
                 "stages": stages,
             }
+        data_evidence_error = _validate_publish_data_evidence(params, source_credential_count=credential_count)
+        if data_evidence_error:
+            return {**data_evidence_error, "published": False, "verified": False, "stages": stages, "timing": timings}
+        stages["live_data_evidence"] = {
+            "code": 0,
+            "live_data_mode": params.get("live_data_mode"),
+            "route_receipt_file": params.get("route_receipt_file"),
+        }
         card_runtime = bool(params.get("card_runtime_required") or fork_validation.get("card_runtime_required"))
         started = time.perf_counter()
         stages["local_browser"] = _run_page_verifier(target, "fork-local", card_runtime=card_runtime)
@@ -5128,126 +5434,6 @@ def cmd_fork_review_update(params):
         return {"code": 1, "error": "FORK_REVIEW_UPDATE_FAILED", "message": str(exc)}
 
 
-def _expected_template_metadata(params):
-    expected = params.get("expected_metadata") if isinstance(params.get("expected_metadata"), dict) else {}
-    for key in (
-        "download_url", "title", "description", "category", "size", "sha256", "updated_at",
-        "package_ids", "grant_ids", "created_task_id", "latest_task_id", "latest_publish_trace_id",
-        "page_context", "agent_reply_template", "reply_contract_binding",
-    ):
-        flag = "expected_" + key
-        if flag in params:
-            expected[key] = params[flag]
-    return expected
-
-
-def _metadata_changes(current, expected):
-    changes = []
-    for key, old in expected.items():
-        if key not in current:
-            continue
-        now = current.get(key)
-        if key == "agent_reply_template":
-            now = _agent_reply_template_metadata(now)
-            old = _agent_reply_template_metadata(old)
-        elif key == "page_context":
-            now = _page_context_metadata(now)
-            old = _page_context_metadata(old)
-        elif key == "reply_contract_binding":
-            now = _reply_contract_binding_metadata(now)
-            old = _reply_contract_binding_metadata(old)
-        if isinstance(now, (dict, list)) or isinstance(old, (dict, list)):
-            now_cmp = json.dumps(now or {}, ensure_ascii=False, sort_keys=True)
-            old_cmp = json.dumps(old or {}, ensure_ascii=False, sort_keys=True)
-        else:
-            now_cmp = str(now or "")
-            old_cmp = str(old or "")
-        if now_cmp != old_cmp:
-            changes.append({"field": key, "expected": old, "current": now})
-    return changes
-
-
-def cmd_update_template(params):
-    """Safely update a published template without creating a replacement URL."""
-    cfg = C.load_config_require_key()
-    endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
-    tid = params.get("template_id") or params.get("page_id")
-    if not tid:
-        return {"code": 1, "message": "update_template 需要 template_id 或 page_id"}
-
-    before = cmd_template({"template_id": tid} if params.get("template_id") else {"page_id": tid})
-    if not (isinstance(before, dict) and before.get("code") == 0):
-        return {"code": 1, "message": "写回前读取模板失败", "template": before}
-    current = _template_record(before)
-    expected = _expected_template_metadata(params)
-    if expected:
-        changes = _metadata_changes(current, expected)
-        if changes:
-            return {
-                "code": 1,
-                "message": "模板 metadata 已变化，停止写回以避免覆盖他人更新",
-                "changes": changes,
-                "template": before,
-            }
-
-    body = {"template_id": current.get("template_id") or current.get("page_id") or tid}
-    html = None
-    if params.get("html") or params.get("html_file"):
-        html, err = _read_html(params)
-        if err:
-            return err
-        try:
-            html, shell_check = _ensure_share_shell(html, params)
-        except ValueError as e:
-            return {"code": 1, "message": str(e)}
-        card_runtime_verification = _maybe_verify_card_runtime(html, params)
-        if isinstance(card_runtime_verification, dict) and not card_runtime_verification.get("ok"):
-            return {
-                "code": 1,
-                "message": card_runtime_verification.get("message") or "card runtime artifact 验收未通过",
-                "card_runtime_verification": card_runtime_verification,
-            }
-        body["html"] = html
-    else:
-        shell_check = None
-        card_runtime_verification = None
-
-    for key in ("title", "description", "category", "page_context", "agent_reply_template", "reply_contract_binding"):
-        if params.get(key) is not None:
-            body[key] = params[key]
-    if "page_context" in params and params.get("page_context") is None:
-        body["page_context"] = None
-    if "reply_contract_binding" in params and params.get("reply_contract_binding") is None:
-        body["reply_contract_binding"] = None
-    if "agent_reply_template" in params and params.get("agent_reply_template") is None:
-        body["agent_reply_template"] = None
-    metadata_err = _validate_reply_metadata_pair(params)
-    if metadata_err:
-        return metadata_err
-
-    out = C.http_json("POST", C.api_url(endpoint, _PATH["update_template"]),
-                      C.headers(api_key), body, timeout=_UPLOAD_TIMEOUT)
-    after = cmd_template({"template_id": body["template_id"]})
-    if isinstance(out, dict):
-        out["preflight_template"] = before
-        out["postflight_template"] = after
-        if out.get("code") == 0:
-            delivered = _template_record(after) or current
-            out["page_id"] = delivered.get("page_id") or delivered.get("template_id") or body["template_id"]
-            out["public_url"] = _record_url(delivered)
-            for key in ("page_context", "agent_reply_template", "reply_contract_binding"):
-                if delivered.get(key) is not None:
-                    out[key] = delivered.get(key)
-        if shell_check:
-            out["share_shell"] = shell_check
-        if card_runtime_verification:
-            out["card_runtime_verification"] = card_runtime_verification
-    out = _normalize_cover_response(out)
-    if isinstance(out, dict) and out.get("code") == 0:
-        _attach_agent_reply_contract(out, operation="update_template")
-    return out
-
-
 def _fetch_public_html(url):
     if not url:
         raise ValueError("缺少可下载的 public/download URL")
@@ -5598,30 +5784,19 @@ def cmd_retrofit_card_runtime(params):
     if params.get("update"):
         if not tid:
             return {"code": 1, "message": "url 模式不能 update；请传 page_id/template_id", "html_file": out_file, "retrofit": info}
-        expected = _expected_template_metadata(params)
-        if not expected and record:
-            expected = {
-                key: record.get(key)
-                for key in ("download_url", "title", "description", "category", "size", "sha256", "updated_at")
-                if record.get(key) is not None
-            }
-        update_params = {
-            "template_id": tid,
-            "html_file": out_file,
-            "expected_metadata": expected,
-        }
-        update_result = cmd_update_template(update_params)
-        err_code = ""
-        if isinstance(update_result, dict):
-            err = update_result.get("error") if isinstance(update_result.get("error"), dict) else {}
-            template = update_result.get("template") if isinstance(update_result.get("template"), dict) else {}
-            template_err = template.get("error") if isinstance(template.get("error"), dict) else {}
-            err_code = str(err.get("code") or template_err.get("code") or update_result.get("code") or "")
-        if not (isinstance(update_result, dict) and update_result.get("code") == 0) and err_code == "TEMPLATE_NOT_FOUND":
-            update_result = cmd_update({
-                "page_id": tid,
+        if record.get("template_status") == "published" or record.get("is_template") is True:
+            return {
+                "code": 1,
+                "error": "TEMPLATE_WRITE_UNSUPPORTED",
+                "message": "该页面已转为公共模板（template_status=published），本 skill 不支持写回；如需保留原模板链接更新，请走后台/admin 管理入口。",
                 "html_file": out_file,
-            })
+                "retrofit": info,
+                "preflight_template": before,
+            }
+        update_result = cmd_update({
+            "page_id": tid,
+            "html_file": out_file,
+        })
         if not (isinstance(update_result, dict) and update_result.get("code") == 0):
             return {"code": 1, "message": "写回失败", "html_file": out_file, "retrofit": info, "update": update_result}
 
@@ -5638,6 +5813,7 @@ def cmd_retrofit_card_runtime(params):
 
 
 _COMMANDS = {
+    "new_asset_page": cmd_new_asset_page,
     "new_page": cmd_new_page,
     "update_progress": cmd_update_progress,
     "publish_final": cmd_publish_final,
@@ -5661,13 +5837,12 @@ _COMMANDS = {
     "fork_prepare": cmd_fork_prepare,
     "fork_review_update": cmd_fork_review_update,
     "fork_validate": cmd_fork_validate,
-    "update_template": cmd_update_template,
     "retrofit_card_runtime": cmd_retrofit_card_runtime,
     "verify_card_runtime": cmd_verify_card_runtime,
 }
 
 _TRACE_REQUIRED_COMMANDS = {
-    "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "update_template", "direct_deliver", "direct_finalize", "fork_validate", "image_upload",
+    "new_asset_page", "new_page", "update_progress", "publish_final", "publish_verified", "upload", "update", "direct_deliver", "direct_finalize", "fork_validate", "image_upload",
     "templates", "fork_prepare", "fork_review_update",
 }
 

@@ -20,6 +20,7 @@ SKILL_NAME = "quant-buddy-view"
 PRESERVE_NAMES = {"config.json", "config.local.json", "output", "logs"}
 REQUIRED_PATHS = [
     "SKILL.md",
+    "CHANGELOG.md",
     "scripts/common.py",
     "scripts/build_dashboard.py",
     "tools",

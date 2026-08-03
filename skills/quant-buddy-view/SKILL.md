@@ -2,17 +2,17 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.27
+version: 0.6.31
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
-  配合 quant-buddy-skill 使用：固定页面请求先用 static_page.py templates/template 选择带 recommend:官方精选 标签的在线精选页；实时取数页必须先在 quant-buddy-skill 验证公式并确认其 api_key 可用，再用本技能注册自有公式包、替换凭证/文案、浏览器验收，并通过 static_page.py upload/update 发布或更新 pages.quantbuddy.cn 链接。默认不从本地历史样板目录或低质 HTML 骨架起步。
-  用户显式唤起 /quant-buddy-view、/qbv、qbv 或 QBV，且请求不是纯咨询/代码维护/文档解释时，默认视为可分享活页任务：读完本技能约束后先查官方精选+社区范式卡判定 direct/fork/unmatched；默认 direct 先交付现成链接、fork/unmatched 用 new_page 返回首链；当 config.json._channel=feishu-group 时，所有分支都禁止提前发送链接，只在终态交付 playground 链接。
+  配合 quant-buddy-skill 使用：简单单一 A 股综合分析可在 trace begin 后直接用 static_page.py new_asset_page 返回实时页面；其他固定页面请求先用 templates/template 选择带 recommend 标签的在线范式页。自建实时页仍须先在 quant-buddy-skill 验证公式，再注册自有公式包、替换凭证/文案、浏览器验收并发布。默认不从本地历史样板目录或低质 HTML 骨架起步。
+  用户显式唤起 /quant-buddy-view、/qbv、qbv 或 QBV，且请求不是纯咨询/代码维护/文档解释时，默认视为可分享活页任务：简单单一 A 股分析走 new_asset_page 快速终态；其余请求查官方精选+社区范式卡判定 direct/fork/unmatched。默认 direct 先交付现成链接、fork/unmatched 用 new_page 返回首链；当 config.json._channel=feishu-group 时，所有分支都禁止提前发送链接，只在终态交付 playground 链接。
   Do not use this skill for one-off 行情查询、普通股票涨跌幅/估值问答、选股/回测探索；those belong to quant-buddy-skill unless the user explicitly wants a reusable/shareable page.
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.27
+  version: 0.6.31
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -61,63 +61,44 @@ runtimeRequirements:
 # quant-buddy-view · 量化看板发布
 
 把「已验证的量化数据与公式」沉淀成一个**公开可分享、实时取数**的网页看板/落地页。本技能不做一次性行情查询或回测探索；默认执行路线是：
-
-> **0.6.27 变更**：`new_page` 在完整执行 `templates(recommend:"all")` 后还必须由 Agent 显式提交 `routing_decision`：fork 传本次 `items_summary` 中的 `source_template_id + reason_code`，unmatched 传最接近候选、实质能力缺口及原因。脚本核验候选属于当前 task、补齐候选标签快照并把决定与 `page_id` 写入既有 `routing-credential.json`。`publish_final` 在任何网络写入前复核该决定：已选 fork 但未执行 `fork_prepare` 时返回可恢复的 `ROUTING_RECONFIRM_REQUIRED`；确认模板确实不适用时可用显式 `routing_override` 改判 unmatched。`build_dashboard` 不受限制，旧任务无路由记录时保持兼容。
->
-> **0.6.26 变更**：修复 `emit:"panel_block"` 嵌入 bespoke 页面时的两处真实崩溃/误判（真实任务实测复现并核实过）：① `_RENDER_JS_TEMPLATE` 整体包一层 IIFE，`fmt`/`esc`/`normalize`/`colIdx` 等不再泄漏到全局作用域，不会再跟宿主 bespoke 页面自己的同名变量（如 `const fmt=...`）撞名报 `SyntaxError`——宿主页面不需要手工包 IIFE 就能安全共存；`_BOOTSTRAP_BLOCK_RE`/`_EMBEDDED_BOOTSTRAP` 同步补上外层 IIFE 的收尾。② `cmd_panel_block` 新增可选 `host_html_file`/`include_data_kernel` 参数：给了宿主页面路径会自动探测是否已有取数内核（marker 版或历史手写等价版，复用 `data_kernel_retrofit.py` 现成判断逻辑），检测到则跳过重复内联 `data-kernel.js`，避免同页两份内核顶层变量重复声明崩溃。③ `chart_edit.py::_extract_boot` 改用 `json.JSONDecoder().raw_decode` 定位 `BOOT` 边界，不再要求 `const BOOT = {...};` 后面严格紧跟 `let LAST_OUTPUTS`，marker 区块内部多出的空白/注释不会再让 `inspect` 误判 `legacy:true`。④ 修复 fork 流程 `decisions` 契约不一致（两次真实任务复现）：`fork_prepare` 之前只在 `review_update_params_file` 里写一个空 `"decisions": {}`，而 `required_decisions` 给出的 `decision_id` 又是扁平点号字符串（如 `roles.package.package_001.target_formulas`），导致 Agent 把它当提交用的 key 直接写，被 `apply_review_decisions` 以 `FORK_REVIEW_DECISIONS_INVALID` 拒绝。现在 `fork_prepare`/`fork_review_update` 改为写入 `build_decisions_skeleton()` 生成的嵌套占位骨架（`{"roles":{"<role_id>":{...}}}`），Agent 只需要在骨架里填空；同时修掉一个连带 bug——`fork_review_update` 原来每轮无条件把 `decisions` 重置成 `{}`，多角色分轮填写时会丢掉已经确认的同业映射，现在改成按最新 review 重新生成骨架，已填值会被保留。⑤ **fork 资产替换改为由 `target_asset` 驱动**（真实任务复现：Agent 连撞三次 `未在来源 HTML 找到替换项` 后放弃 fork、退回自建）。病根是职责分配——`fork_prepare` 本来就收到了 `target_asset`，却只把它记进 manifest，反过来要求 Agent 手写 `asset_replacements`，即让 Agent 去猜一个它从没见过、且流程明令禁止读取的 HTML 里代码究竟写成 `SH600900` 还是 `600900.SH`。现在改为：Agent 负责说"换成哪只标的"，脚本负责推导来源主资产（模板公式词频 + 标题）并扫描来源 HTML 得出代码的实际书写形态，**只替换页面里真实存在的写法**，这类报错结构上不再可能发生；只给代码时先反查同级 quant-buddy-skill 资产库补名字。多资产/指数类范式推不出主资产时 fail-closed 返回 `FORK_SOURCE_ASSET_AMBIGUOUS`，报错自带候选资产名、来源 HTML 中真实存在的代码写法和可照抄的调用示例，由 Agent 传 `source_asset` 指定。替换后主资产若仍残留，在写出工作 HTML **之前**就返回 `FORK_SOURCE_ASSET_RESIDUAL`（同业资产不在检查范围内，它们本就该由 `target_slots` 决策替换），不再等到发布成功后才发现文案还是源模板原样。`asset_replacements` 降级为可选覆盖，老调用零改动。
->
-> **0.6.25 变更**：`build_dashboard.py` 新增 `emit:"panel_block"` 局部产出模式——只生成带 `QBV_RENDER_JS_START/END` marker 的图表 `<script>` 片段（不生成整页 HTML），供 bespoke（手写）页面把折线/柱状/双轴/雷达图这类图表交给标准声明式引擎画：panel 加 `target_selector` 指向 bespoke 布局里已有的容器，渲染进去不包卡片外壳。`renderChart` 新增双轴（`dual_axis`+`right_series`）与迷你走势图（`sparkline`），新增 `renderRadarChart`（`type:"radar"`）。`_render_js_for_boot()` 统一了「整页启动 / 嵌入式启动」的选择逻辑，`_render_html` 与 `chart_edit.py::_patch_page` 共用，避免嵌入式图表被编辑后误换成会二次初始化 `QBShareShell` 的整页启动代码。`chart_edit.py::add_series` 新增 `axis:"right"` 参数。目的：终结「bespoke 页面里的图表只能整页手工补丁」——用这套局部产出模式重建模板后，图表可直接用 `chart_edit.py` 现成的定点编辑操作维护，不需要为 bespoke 页面另造一套编辑机制。`compile_bespoke_page.py` 新增非阻塞 lint，检测把行数据硬编码进 JS 调用参数（如 `setBar($("..."),[...])`）的写法，提示改用 `data-qb-bar-row` 属性驱动。详见 `guides/bespoke-page.md`「统一原则」一节。
->
-> **0.6.24 变更**：`single_stock_deep_dive_v1` 启用数据驱动柔性回复：公式验证成功后复用 `data_id`，按兼容 `readData` 模式每批最多10个补读模板所需值；Grant直接复用验证响应。整个过程不重算公式、不重查已注册 package/grant。终态 contract 绑定 `reply_data_evidence_v1` 文件与 SHA256；七节标题必须完整保留，有数据的模板字段必须输出，无数据整节使用标准说明。`feishu-group` 终态 contract 同时声明最多 5 张 Markdown 表格，模板用列表或行内文本承载其余数据；validator 成功后必须原样发送 `validated_markdown`。
->
-> **0.6.23 变更**：所有正式任务产物统一进入 `trace_context begin` 返回的跨平台 `task_temp_dir`；新 fork 固定执行 `fork_prepare → fork_review_update → publish_workflow`。Agent 只填写生成的 review-update 参数文件中声明的业务决策，不直接编辑标准 fork HTML/review，也不创建一次性辅助脚本。`fork_review_update` 生成绑定 task/page/manifest/review/HTML 哈希的 receipt；缺失、不完整或过期时，发布器在首次网络调用前 fail-closed。所有返回命令使用当前 `sys.executable`，不硬编码 `python`/`python3`。
->
-
-> **0.6.22 变更**：补强 Card Runtime retrofit 的日期与视觉保真：模板不再内置历史日期，hydrate 从嵌套输出中选择最新可用日期；已识别页面继续生成与内容语义匹配的专属视觉，不回退为通用三指标布局。详细契约见 `guides/essence-cover-card.md`。
-
-> **0.6.21 变更**：新增活页 UI/UX 系统指南，以“稳定体验骨架 + 可变内容表达”组织字体、主题 token、页面原型、模式库、响应式转换、实时状态和验收矩阵；`SKILL.md` 只保留按需路由，浏览器批注细节继续由 `ui-refinement` profile 与维护指南承载。
->
-> **0.6.20 变更**：分享海报预览新增 `data-qb-runtime-src` 合同，允许用户点击分享前保持空 `src`；静态预检与浏览器图片门禁只豁免显式声明且尚未赋值的运行时图片，普通正文图片仍必须提供非空 `src`。`fork_prepare` 会为旧版 `sharePosterImage` 自动补充该合同，不再要求任务临时塞透明占位图。fork 的 PE/PB 水位输出允许继承来源模板的明确算法与正整数窗口（如 `排序水位(...,250)` 或 `数值水位(...,750)`），不再强制统一改成250日，但仍必须通过 QBS 验证且禁止直接别名原始指标。Card Runtime 完整重建同时改为显式视觉合同并 fail-closed：未命中页面专属视觉、也未传 `visual_contract` 时返回 `CARD_VISUAL_REQUIRED`，不再自动挑前三个 outputs 生成三行指标卡；新建 artifact 必须声明 `data-qb-card-visual-kind` / manifest `visual_kind` 并通过 `--require-card-visual-contract`。`numeric-focus` 只在显式选择时可用，且必须是“一个主数字 + 最多两个解释项”，不能退化为三个等权矩形；新增 `basis-structure` 基差轴视觉作为首个合同化示例。
->
-> **0.6.19 变更**：新 fork 默认由 `fork_prepare` 生成 `fork_manifest_v2`、脱敏 HTML、credential-free review 和 publish plan；自动识别页面/Card Runtime 凭证、聚合相同合同并生成唯一 Marker。package role 明确区分模板接口原始 `source_contract.formulas/nodes` 与新包请求 `target_registration_contract.formulas/reads/begin_date`，来源 `nodes[].data_id` 不进入目标注册合同。Agent 只填写目标同业槽位、复杂跨资产公式及业务文案，`publish_workflow.py` 从目标注册合同派生验证与注册，并在第一次网络写入前检查 review、required outputs/reads、估值分位语义、Grant 合同差异和 Card Runtime 结构；v1 任务继续兼容，本版不修改图片门禁，不实现注册幂等。已发布范式卡的 Card Runtime 协议同时新增 `preserve_visual` 路径，只更新 manifest/runtime 与 ready 契约，逐字节保留原 template/style；`retrofit_card_runtime` 的独立验收固定使用 `--card-runtime-only`。禁止用通用三指标重建路径覆盖已有视觉 artifact；只有 artifact 缺失且明确选择 `numeric-focus` 时才允许生成数字主导卡片。
->
-> **0.6.18 变更**：`publish_workflow.py` 在 QBS 验证、注册和上传等网络写入前，先以假凭证运行 Card Runtime 结构预检，提前拦截空 manifest 凭证、缺少/空 `src` 的图片等结构错误；package/grant 的 `markers.package_id`、`markers.grant_id`、`markers.signature` 现在兼容单个字符串或非空字符串数组，同一次注册可扇出替换页面正文与 Card Runtime 中的多个唯一 marker，避免为同一数据合同重复注册公式包。
->
-> **0.6.17 变更**：`templates` 不再把完整候选池原样打到 stdout——响应改为 `item_count` + 覆盖全部候选的 `items_summary`（不是 top-N）+ 完整结果落盘产生的 `full_result_file`/`full_result_sha256`；完整候选（含 `agent_reply_hint`/`page_context`）落盘到系统临时目录，交由既有 `cleanup_task_temp_files` 自动回收。落盘失败（`TEMPLATES_PERSIST_FAILED`）或响应结构异常（`TEMPLATES_RESPONSE_SHAPE_UNEXPECTED`）时直接返回错误，不再退化为把完整结果打印到 stdout——这是为了修复"候选池被外层工具输出预算截断、又没有另存一份，导致误判 unmatched 走自建"的事故根因。`templates` 现在也需要 Trace Context（task_id）。
->
-> **0.6.16 历史变更**：模板接口开始返回来源公式原文。0.6.19 起这些语义只投影到 credential-free `fork-review.json`：主资产自动替换、同业矩阵生成槽位、复杂跨资产公式要求完整审核；Agent不再读取带来源 ID/Marker 的底层 runtime contract。
-
-> **Fork 数据通道继承硬规则**：fork 的目标是替换标的并保持来源范式运行合同，不是重新设计数据层。来源模板某一角色使用公式包，目标页同一角色继续使用公式包；来源使用 `fast_query` / `stock_profile` / `composition_select` 数据授权，目标页继续使用同 kind、同 query_type、同响应形状的数据授权。禁止仅因“财务数据通常可走 fast_query(report)”就在 fork 中把来源财务公式包改成 grant，也禁止反向把来源 grant 改成公式包。只有 `unmatched` / 明确从零重建时才重新做通道选择；此时平台白名单报告期财务优先 `fast_query(query_type="report")`。
->
-> **0.6.15 变更**：新增活页正文图片上传/列表、可在当前页面点击放大的声明式 image panel、publish_workflow 图片 marker、fork 同页复制和浏览器图片门禁；PNG/JPEG/WebP 由服务端统一转为同域 WebP，发布必须保持图片与目标 `page_id` 同属。
->
-> **0.6.14 变更**：`data-kernel` 可在浏览器实时下载并解析 FastQuery `mode:"csv"`，自动 hydrate 为兼容的 `results[].fields[].series`；标准看板和构建期体检共用同口径，发布门禁等待 `QB_DATA_RUNTIME` 完成后再验收。
->
 > **feishu-group 渠道**：打包渠道为 `feishu-group` 时，direct/fork/unmatched/update 等所有分支禁止发送非终态链接；终态 contract 统一把 `pages.quantbuddy.cn/pages/<owner>/<page_id>.html` 转成 `www.quantbuddy.cn/playground/<owner>/<page_id>`，内部发布与验收仍使用原始托管 URL。
 
 0. 在任何后端请求前运行 `scripts/trace_context.py begin`，保存唯一 `task_id` 并在后续命令中复用。这步本身就是后端写入调用，必须和后续命令带同一个身份（`QBV_API_KEY` 环境变量或参数里的 `api_key`），不带会被记成 skill 默认账号。
-1. 运行一次 `scripts/static_page.py templates`，传 `recommend:"all"`，查询官方精选+社区命中池。
-2. direct 命中后，普通渠道先把列表返回的现成 URL 发给用户；`feishu-group` 不发链接，直接运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
-3. fork/unmatched 调用 `new_page` 时由 Agent 根据 `items_summary` 显式传 `routing_decision`，脚本校验并与同一 `page_id` 绑定；普通渠道立即发送首链，`feishu-group` 仅内部持有该链接，验证目标公式后继续注册、替换与 `publish_verified`。
-4. 所有分支最终按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
+1. 若用户只是要**简单分析一只 A 股并返回页面**，且没有定制栏目/版式、额外指标/公式/图表、对比或多标的要求，直接运行一次 `scripts/static_page.py new_asset_page`。成功的 `agent_reply_contract.terminal=true` 即为终态，直接返回其中的公开 URL，不再查 templates，也不另跑 QBS 验证或注册 Grant。
+2. 除上述快速场景外，运行一次 `scripts/static_page.py templates`，传 `recommend:"all"`，查询官方精选+社区命中池。
+3. direct 命中后，普通渠道先把列表返回的现成 URL 发给用户；`feishu-group` 不发链接，直接运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
+4. fork/unmatched 调用 `new_page` 时由 Agent 根据 `items_summary` 显式传 `routing_decision`，脚本校验并与同一 `page_id` 绑定；普通渠道立即发送首链，`feishu-group` 仅内部持有该链接，验证目标公式后继续注册、替换与 `publish_verified`。
+5. 除 `new_asset_page` 的单链接快速终态外，其余分支按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
 
 ## 何时用本技能 vs quant-buddy-skill
 
 - **探索/一次性查询**（"茅台今天涨跌幅"、"跑个均线金叉回测看看"）→ 用 **quant-buddy-skill**。
 - **要一个能反复看、能发给别人、数据会自动更新的页面** → 探索清楚后切到 **quant-buddy-view**。
 
-## 新会话路由：先查范式卡（templates）判命中
+## 新会话路由：单股快速返回 / 其余查范式卡
 
-先建立 Trace Context，再查询范式卡。`begin` 是**真实的后端写入调用**（落审计表），和后续命令一样需要本次任务的身份——必须与后续命令用同一个 key，否则这一步会被记到 skill 默认账号名下，任务链路从第一条记录起就归错人：
+先建立 Trace Context。`begin` 是**真实的后端写入调用**（落审计表），和后续命令一样需要本次任务的身份——必须与后续命令用同一个 key，否则这一步会被记到 skill 默认账号名下，任务链路从第一条记录起就归错人：
 
 ```bash
 # 身份走环境变量（exec 日志里会脱敏）；不要把 key 拼进命令串，命令是原样记录的
 QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
 ```
 
-保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`templates` / `upload` / `update` / `publish_final` / `publish_verified` / `update_template` 缺少 Trace Context 时必须停止执行。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
+保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`new_asset_page` / `templates` / `upload` / `update` / `publish_final` / `publish_verified` 缺少 Trace Context 时必须停止执行。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
 
-新会话被判定为可分享活页任务时，**第一步只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。返回值是 `item_count` + 覆盖全部候选的 `items_summary`（不再是原始 items 全量打印），完整候选落盘在 `full_result_file`；正常路由判断只需要读 `items_summary`，不需要也不应该去读 `full_result_file`。
+**具体资产证据闸门**：除 `new_asset_page` 固定场景外，只要用户点名具体资产，就在 Trace 后、解释资产身份或提交 `routing_decision` 前，按「Trace → 资产映射 → 最小接口验证 → 页面路由」的顺序完成验证：调用 `scripts/qbs_bridge.py resolve_asset_data` 得到平台 ticker 映射，并按页面实际需要探测所需数据角色是否可取数，只记录接口成功/失败、可用字段和结构化错误。页面结构与 direct/fork/unmatched 判断只依据"用户所需能力 × 已验证的平台能力"，不得依据 Agent 对公司上市状态、所有权、资产名称或市场惯例的记忆。验证前不得引入"上市/未上市、公开/私营、代理资产、无行情、只能静态"等限制性前提；若用户没有询问这些身份属性，也不要把它们扩展成分析主线。
+
+### 单一 A 股简单分析快速通道
+
+用户只要求分析一只 A 股并给出可分享页面，且**没有**定制栏目/版式、指定额外指标/公式/图表、对比、多标的、指数或港美股要求时，直接执行：
+
+```bash
+python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵州茅台","user_query":"分析贵州茅台"}'
+```
+
+该命令直接调用服务端固定场景；Agent 不查 `templates`、不建进度页、不跑 QBS 预验证、不自行注册 Grant。成功时只使用 `agent_reply_contract.public_url` 返回页面链接；这是单链接快速终态，不生成七节 Markdown 分析，也不运行 `validate_agent_reply.py`。同一 task/资产重试由服务端幂等返回已有页面。后续若用户要改这张自有页面，继续使用 `update` 保持同一个 `page_id` / URL。
+
+不满足上述窄条件时，**只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。返回值是 `item_count` + 覆盖全部候选的 `items_summary`（不再是原始 items 全量打印），完整候选落盘在 `full_result_file`；正常路由判断只需要读 `items_summary`，不需要也不应该去读 `full_result_file`。
 
 - **① 直接命中**（范式匹配，且标的/股票池/指数/市场范围一致）：
   - `templates` 一旦给出精确命中，普通渠道的**下一条用户可见消息必须立即发送现成 `download_url/public_url`，中间不允许任何工具调用**。推荐文案：`已直接命中现成活页：[标题](URL)。我继续核对实时数据并补充分析。`；若 `agent_reply_hint.delivery_policy.emit_intermediate_url=false`（即 `feishu-group`），禁止发送该 URL，直接继续。
@@ -143,7 +124,8 @@ QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_
 
 ## 默认路由
 
-- **固定页面形态**（个股速览、估值体检、成分股异动榜、多因子选股看板、商品日报等）：先 `templates` 查询官方精选+社区命中池；direct 直接用列表 URL + revision，fork 才读取和改写模板详情。
+- **简单单一 A 股综合分析**（无定制、额外指标/图表、对比或多标的要求）：`trace_context begin` 后直接 `new_asset_page` 返回自有实时页面。
+- **其他固定页面形态**（定制个股页、成分股异动榜、多因子选股看板、商品日报等）：先 `templates` 查询官方精选+社区命中池；direct 直接用列表 URL + revision，fork 才读取和改写模板详情。
 - **宽宝活卡 / 精华卡 / 封面卡（范式卡 artifact）**：把页面精华做成独立 **card runtime artifact**（`embedded-card-v1`：页面内嵌 `<template data-qb-card-template>` + `data-qb-card-manifest` + `QBCardRuntimeV1` runtime），供官网卡片流在空白宿主中**独立 hydrate**。静态首帧 `card_snapshot_url` 由 `skill_server` 按 artifact hash 生成，是页面封面的唯一来源（整页缩略图能力已下线）。按 [guides/essence-cover-card.md](guides/essence-cover-card.md) 生成；已发布页优先用 `preserve_visual:true` 只升级协议。完整重建必须命中页面专属视觉或显式传 `visual_contract`，否则 `CARD_VISUAL_REQUIRED` 停止；用 `verify_page.mjs --card-runtime-only --require-card-visual-contract` 验收新 artifact。卡片必须官网浅色系、固定信息骨架、可变核心可视化；不再用旧的 `?cover=1` URL 模式。
 - **没有合适在线模板**：再走 `workflows/dashboard-end-to-end.md`，用 `build_dashboard` 生成声明式实时看板。
 - **声明式看板也不够**：才走 `guides/bespoke-page.md` 写 bespoke 主体 HTML，并用公共 shell 编译成自包含页面。
@@ -151,7 +133,7 @@ QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_
   `scripts/chart_edit.py`，只动被要求的那一处、不重新验证/计算页面上其它无关系列；只有目标页面是 legacy
   （`chart_edit.py inspect` 判定，多为本次改动之前生成的老页面）或改动本质上要求整页重算/换版式，才落回
   下面的整页重建。
-- **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL。
+- **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL；正式 update 应传具体 `change_note`，版式变化显式传 `change_aspect:"layout"`，其它类型可让服务端推断。
 - **用户可见链接策略**：普通渠道 direct 在 `templates` 命中后、下一次工具调用前发现成 URL，fork/unmatched 在 `new_page` 返回后立即发首链；`feishu-group` 看到 `delivery_policy.emit_intermediate_url=false` 后禁止发送任何非终态 URL，只在 validator 通过后发送 terminal contract 的 playground `public_url`。进度页仍用 `update_progress` 和 `publish_final` 更新同一 `page_id`。
 - **Agent 回复模板**：活页 metadata 可带 `agent_reply_template` 指向本技能 `reply-templates/` 下的回复骨架。`reply-templates/` 是 Agent 最终回复格式，不是活页 HTML 页面模板；不要和在线 `templates` / `template` API 混用。
 - 本 skill 不再内置本地页面样板，不能从本地历史样板目录或低质 HTML 骨架起步。
@@ -161,13 +143,13 @@ QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_
 活页用同级 `page_context` 描述用途/模块/输出，用 `agent_reply_template.template_ref` 指向 [reply-templates/](reply-templates/) 的 Markdown 骨架。字段契约、hybrid 规则和发布继承见 [tools/static_page.md](tools/static_page.md)。
 
 - `page_context` 不得包含实时数值、api_key、signature、Bearer token 或本地路径；fork 后必须按最终页面重建，direct 才沿用原页。
-- 读取型命令返回 `agent_reply_hint.terminal=false`；`new_page/update_progress` 也不是终态。成功的 `direct_deliver/direct_finalize/upload/update/publish_final/publish_verified/update_template` 才可返回 `agent_reply_contract.terminal=true`。
+- 读取型命令返回 `agent_reply_hint.terminal=false`；`new_page/update_progress` 也不是终态。成功的 `new_asset_page/direct_deliver/direct_finalize/upload/update/publish_final/publish_verified` 可返回 `agent_reply_contract.terminal=true`；其中 `new_asset_page` 是只返回页面链接的快速终态，contract 不要求回复模板。
 - fork/unmatched 遇到必须由用户决定的口径时，用同一 `task_id/page_id` 进入 `waiting_input`，用户回答后继续原任务；不要重新建 Trace 或首链。`feishu-group` 的 waiting hint 不含 `public_url`，提问时也不得附带进度链接。
 - fork 必须使用 `fork_prepare` 绑定来源和 manifest，最终 `publish_final` 保持首链 URL、移除来源凭证并保留必需栏目/输出/Card Runtime；详细门禁见 [workflows/new-session-paradigm-routing.md](workflows/new-session-paradigm-routing.md)。
 - prepared fork task 禁止 `build_dashboard`；v2只填写生成的 review-update 决策文件，依次运行 `review_update_command` 和 `publish_command`。只有旧 v1任务继续使用手工 `fork_validate` 路径。
-- 带 `task_id` 的进度从 `package_register` 起必须传同任务的 `validation_receipt_files`，收据必须为 `completed + success=true + failures=[]`；静态页可传明确的 `validation_not_required_reason`。
+- 带 `task_id` 的进度从 `package_register` 起必须传同任务的结构化验证证据：实时页提交 `route_receipt`、`grant_receipts`、`formula_receipts`，且 `selected_routes` 必须逐项对应实际注册凭证；自由文本 `validation_not_required_reason` 不再放行。纯静态内容只能用 `static_content_only`；资产实时探测全部数据级失败时只能凭 `live_data_route_receipt_v1` 使用 `static_after_live_probe`。
 - 最终回复必须按回复模板输出并且只能使用 contract 的 `public_url`；`feishu-group` 下该字段必须是 `https://www.quantbuddy.cn/playground/<owner>/<page_id>`。一般模板依据 `reply_render_policy` 与 `reply_data_availability` 删除结构性不存在的字段、整列、整行和空可选章节。`single_stock_deep_dive_v1` 还必须读取 SHA256 绑定的 `reply_data_evidence_file`，保留全部七节标题，有数据的模板字段全部输出，整节无数据使用标准说明；只有有效结构中的偶发缺值才写 `--`。若 `delivery_policy.max_markdown_tables` 存在，整篇不得超过该表格数，超出的结构改用列表或行内文本且不得丢数据。validator 返回 `valid=true` 后原样发送 `validated_markdown`，不得再次压缩或改写，也不得暴露原始托管 URL、本地路径、凭证或内部日志。
-- 最终回复前只运行一次发布器返回的 `reply_validation_command`，并把同时返回的 `reply_validation_env`（形如 `{"QBV_API_KEY": "..."}`）原样作为该次执行的环境变量传入——validator 是独立子进程，不传会退回 `config.json` 的默认账号，任务终态被记成错误的用户。禁止把该 key 拼进命令串：命令在日志里原样记录，只有 env 会脱敏。validator 必须读取发布器生成的 `contract_file + contract_sha256`，不得手工重建精简 contract。direct 使用 `direct_deliver` 返回的完整 task ID 路径和命令，成功后自动清理。`valid=true` 后不再执行任何工具调用。
+- 除 `new_asset_page` 的单链接快速终态外，最终回复前只运行一次发布器返回的 `reply_validation_command`，并把同时返回的 `reply_validation_env`（形如 `{"QBV_API_KEY": "..."}`）原样作为该次执行的环境变量传入——validator 是独立子进程，不传会退回 `config.json` 的默认账号，任务终态被记成错误的用户。禁止把该 key 拼进命令串：命令在日志里原样记录，只有 env 会脱敏。validator 必须读取发布器生成的 `contract_file + contract_sha256`，不得手工重建精简 contract。direct 使用 `direct_deliver` 返回的完整 task ID 路径和命令，成功后自动清理。`valid=true` 后不再执行任何工具调用。
 - 没有 terminal contract 禁止完成任务。唯一例外是成功的 `waiting_input` checkpoint。
 - 性能门槛：普通渠道模板命中到首链不超过 5 秒；所有渠道 terminal 到最终回复不超过 45 秒，完整活页任务以 10 分钟内完成为常态目标，用户可见消息间隔不超过 60 秒。回复证据补读不设额外人工截止时间，但必须按模板字段过滤、相同模式批量读取且每批最多10个；禁止公式重算和 package/grant 重查。
 - 逐指标声明最新可得日期和实际覆盖范围。未做浏览器验收时，只能声明公开 URL 和实时接口可访问。
@@ -189,7 +171,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 - Windows 上若 symlink / `EPERM` 报错，在 `add` 命令末尾追加 `--copy` 重试。
 - 在源码 checkout 或 junction 调试本 skill 时，不要运行上面的 bundle 级 `add --all` / `update` 覆盖当前 `quant-buddy-view`；只确认同级 `../quant-buddy-skill` 是否存在，缺失时先停下说明需要把 quant-buddy-skill 放到同级。
 - 安装后必须确认 quant-buddy-skill 的 `config.json.api_key` 或 `QUANT_BUDDY_API_KEY` 可用；只报告“已配置/未配置/鉴权成功或失败”，不要打印 key 或完整 config。若鉴权失败，停下来说明 blocker，不要继续注册公式包。
-- 若只是上传/改造一份无需公式包的静态 HTML，可继续使用本技能；凡是实时取数页面或公式包注册，都必须先补齐 quant-buddy-skill 验证步骤。
+- 若只是上传/改造一份真正不含资产、市场数据和来源凭证的纯静态 HTML，可继续使用本技能并声明 `static_content_only`。资产实时页面必须通过 `qbs_bridge.py resolve_asset_data` 完成统一探测；只有 `required_roles.formula` 非空时才运行公式验证，普通行情、估值和财务不得为了触发公式包而改写成公式。
 
 推荐让两个 skill 同级安装，便于验证公式和迁移旧公式包凭证：
 ```text
@@ -206,7 +188,8 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 
 | 类型 | 展示名 | 入口 | 什么时候用 |
 |---|---|---|---|
-| 页面模板 | 官方精选 + 社区 | `scripts/static_page.py templates` | 固定页面形态；direct 直接交付，范围不一致才 fork |
+| 单股快页 | A 股个股综合分析 | `scripts/static_page.py new_asset_page` | 简单分析一只 A 股并返回页面；无定制/对比/额外指标要求 |
+| 页面模板 | 官方精选 + 社区 | `scripts/static_page.py templates` | 其他固定页面形态；direct 直接交付，范围不一致才 fork |
 | 回复模板 | Agent 回复骨架 | [reply-templates/](reply-templates/) | 活页 metadata 的 `agent_reply_template.template_ref`；用于约束 Agent 最终 Markdown 回复格式，不生成 HTML |
 | 封面组件 | 宽宝活卡 / 精华卡 | [guides/essence-cover-card.md](guides/essence-cover-card.md) | 独立 4:3 `embedded-card-v1` artifact；按指南实现和验收 |
 | 通用流程 | 标准实时看板 | [workflows/dashboard-end-to-end.md](workflows/dashboard-end-to-end.md) | 用户要“做成可分享看板/链接”，但没有指定固定页面模板 |
@@ -216,7 +199,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | 设计系统 | 活页 UI/UX 系统 | [guides/live-page-ui-ux-system.md](guides/live-page-ui-ux-system.md) | 新建或整体重构活页时，选择页面原型、主题 token、字体/密度、可组合模式和响应式转换；统一体验底线但保留页面身份 |
 | 维护指南 | 浏览器批注与整页 UI refinement | [guides/browser-feedback-refinement.md](guides/browser-feedback-refinement.md) | 用户针对已有自有页面的字体层级、间距、章节导航、sticky/折叠、响应式或分享交互提出修改；保持同一 `page_id`、runtime 合同和页面视觉身份 |
 
-- 单标的画像、估值财务、指数成分异动、多因子工作台都先匹配对应在线范式；范围不一致才 fork。详细页面契约由模板和构建脚本门禁，不在此重复。
+- 简单单一 A 股综合分析优先走 `new_asset_page`；定制单标的画像/估值财务、指数成分异动、多因子工作台仍先匹配对应在线范式，范围不一致才 fork。详细页面契约由服务端固定场景或模板/构建脚本门禁，不在此重复。
 - fork 后禁止沿用来源 `package_id/grant_id/signature`；必须验证并注册当前用户凭证。
 - 所有页面复用 `assets/share-shell/`；分享壳、海报、Card Runtime 和迁移细则分别读取对应 `guides/`，不要手写重复组件。
 - 公式注册与读取模式见 [tools/formula_package.md](tools/formula_package.md)，数据授权见 [tools/data_grant.md](tools/data_grant.md)，静态页命令和 metadata 见 [tools/static_page.md](tools/static_page.md)。
@@ -246,8 +229,14 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | 已上线维度分的 TopN / 榜单 / 异动名单（动量反转、趋势结构…） | 数据授权 `composition_select` | `grant_id` |
 
 - 一句话：**要"算"的用公式包；平台"直取/直选"的有界数据用数据授权**。原公式包 RANK 角色仍保留给"算指标"型多因子选股，不被 composition_select grant 取代。
+- **资产实时页面统一入口**：先调用 `scripts/qbs_bridge.py resolve_asset_data @params.json`，显式声明 `required_roles.profile/snapshot/report/formula` 与 `optional_fields`。路由按 `stockProfile → fast_query(snapshot) → fast_query(report) → 必需公式` 执行；普通行情、估值和报告期财务优先 `fast_query`，不得为了触发公式包而改写普通字段。
+- **禁止先验假设**：`resolve_asset_data` 探测前不得依据 Agent 对公司上市状态、所有权、资产名称或市场惯例的记忆推断平台是否可取数，也不得据此提前选择代理资产、静态说明、数据通道或页面结构；未验证前只能说"我先验证平台资产映射和数据可用性"。
+- **按业务覆盖判成功**：顶层 `success:true` 不代表页面数据完整。目标资产必须存在，required fields 必须有有效值，且不得出现在 `asset_errors` / `field_errors`；optional field 失败只记 warning。部分核心角色成功返回 `incomplete`，不得冒充完整页面。
+- **静态回退是硬门禁**：`ASSET_NOT_FOUND`、`DATA_UNAVAILABLE`、空结果、目标资产/required field 缺失等数据级失败可以继续下一独立通道；鉴权、配额、task/session、网络、超时、协议和服务错误必须返回 `blocked`。只有 `live_data_route_receipt_v1` 证明所有核心实时角色都已探测且均为数据级失败，才允许 `static_after_live_probe`；`static_content_only` 仅限没有资产、市场数据和来源凭证的纯静态内容。
+- **发布只认证据**：Grant-only、formula-only 与混合页面均可发布，但必须提交 route/grant/formula 结构化收据，并让 route receipt 的 `selected_routes` 与实际 Grant/公式收据逐项对应；禁止自由文本 waiver。
 - **两套并存**：探索/验证仍在 quant-buddy-skill 用 api-key 跑三接口（fastQuery / stockProfile / selectByComposition）；本技能只负责把验证过的请求注册成 grant 嵌页。api-key 那套一行不改。
 - **硬门槛同公式包**：注册任何 grant 前，先在 quant-buddy-skill 用 api-key 跑通对应接口、确认命中/出数，再回本技能注册。
+- **固定场景例外**：`new_asset_page` 的三份 Grant payload 由 `skill_server` 固定生成并做结构/白名单校验，Agent 不接触也不自行注册，因此该快速通道不额外执行 quant-buddy-skill 预验证；页面打开时按 Grant 实时取数。
 - **同源约束**：`access_dunhe=false`（页面绝不返回付费/敦和数据）、CORS/https 协议一致、signature 是公开凭证不打印给用户——与公式包完全一致。
 
 ## 硬规则
@@ -258,11 +247,14 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 4. **signature 是凭证**：不要打印到面向最终用户的对话里；看板会把它写进公开 HTML 供实时取数，发布前确认可接受。
 5. **标签来源不要写 Agent**：显式传 `scene_tags` / `paradigm_tags` 时，`tagging_method` 用 `manual` / `migration` / `unknown`；需要 LLM 自动识别就调用 `scripts/static_page.py autotag`。不要再传 `tagging_method:"agent"`，也不要在 `tagging_meta.method` 里写 `agent`。
 6. **失败要说清**：脚本返回 `code != 0` 时，向用户复述「卡在哪一步（命令名）+ 错误摘要」，不要以空白或纯日志结束。
-7. **正文图片先上传后引用**：先用 `static_page.py image_upload` 获得目标 `page_id` 下的绝对 `https://pages.quantbuddy.cn/pages/assets/...webp` URL，再写入 HTML；禁止跨页复用托管 URL。图片必须带明确 `alt` 与 `width/height`；首屏和海报目标内不得 lazy，正文下方才可 `loading="lazy"`。标准 image panel 默认启用当前页大图预览，装饰图才设 `zoomable:false`；不要用新窗口打开图片 URL。fork 必须按 manifest 的 `images[]` 上传到目标页并替换 marker，不能保留来源图片 URL。
-8. **`templates` 摘要必须覆盖全部候选，落盘失败不能裸奔**：`items_summary` 的条目数量必须等于 `item_count`（完整候选去重后的真实数量，不是服务端可能未重算的 `total`），不允许只看其中一部分候选就判定 `unmatched`；一旦返回 `error:"TEMPLATES_PERSIST_FAILED"` 或 `error:"TEMPLATES_RESPONSE_SHAPE_UNEXPECTED"`（落盘失败或响应结构异常），必须先向用户说明「范式候选未能完整确认，暂缓路由判断」，禁止在这种不完整信息下判定为 `unmatched` 走自建，也**不得通过重复调用 `templates` 来补救**（每个任务仍然只能调用一次这条硬规则不变）；确需重试仅限明确的瞬时网络失败，且只重试一次。
-9. **Card Runtime 先做零副作用结构预检**：含 Card Runtime artifact 的 HTML 必须由 `publish_workflow.py` 在 QBS 验证、注册、图片上传和发布前用假凭证执行 `verify_page.mjs --card-runtime-structure-only`。正文与 Card 共用凭证时用 marker 数组扇出；每个数组元素仍须全局唯一并在 HTML 中恰好出现一次。禁止空 manifest 凭证；普通 `<img>` 必须有非空 `src`，仅显式声明 `data-qb-runtime-src` 且等待运行时赋值的预览图可以暂时为空；同时禁止注册等价的重复 Card package/grant。
-10. **建页前必须先查范式卡并显式确认路由**：`new_page` 会校验当前任务已用 `templates(recommend="all")` 查过完整范式池，并要求 Agent 根据 `items_summary` 传 `routing_decision`。未查模板返回 `ROUTING_TEMPLATES_REQUIRED`；未提交决定返回 `ROUTING_DECISION_REQUIRED`；fork 引用的来源或 unmatched 的最接近候选必须属于本次结果。范式相同仅标的/范围不同时使用 fork reason，不得以此判 unmatched。`publish_final` 发现已选 fork 却没有 fork task binding 时，在网络写入前返回可恢复的 `ROUTING_RECONFIRM_REQUIRED`；只有确认存在实质能力缺口时才用 `routing_override` 显式改判。`build_dashboard` 不受限制，direct 不建页，也不受影响。
-11. **本地验收与公网验收分责**：`fork-local` 在本地 `file://`（origin=null）下用放开同源策略的测试浏览器跑真实取数渲染（`security_mode:"disabled-web-security"`），布局/占位符/运行时错误/图片/Card Runtime 门禁照常执行；`public-smoke` 保持浏览器默认安全策略，数据接口 CORS/`Failed to fetch`/运行时失败仍严格拦截。平台注入的 `/webapi/skill/track` 分析埋点是 fire-and-forget，其 CORS/网络失败降为 `non_core_console_warnings`，不再让成功页面发布失败；数据接口（`queryDataGrant`/`queryFormulaPackage`）的失败仍是阻塞性核心错误。
+7. **具体资产必须先验证，再解释或路由**：当用户请求涉及具体资产，尤其是美股、港股、ETF、特殊名称或中英文混写资产时，必须先执行上方"具体资产证据闸门"（`resolve_asset_data` 探测）；不要等到准备作负面判断时才验证。不得根据现实上市状态、所有权、公司常识、历史记忆或资产名称直觉，推断平台是否可取数，也不得据此选择代理资产、静态说明、数据通道或页面结构。资产库命中只证明 ticker 映射，`resolve_asset_data` 探测成功才证明对应数据能力；按用户实际需要验证行情/估值、画像、财务或其他数据，禁止为"更全面"无边界扩查。验证结果必须区分资产未映射、接口不支持、字段缺失和额度限制；单个字段缺失、窗口受限或额度限制不得扩大表述为资产不可用。只有工具证据与用户需求直接相关时，才在页面或回复中说明上市/私营、代理或市场身份；未验证前只能说「我先验证平台资产映射和数据可用性」。
+8. **正文图片先上传后引用**：先用 `static_page.py image_upload` 获得目标 `page_id` 下的绝对 `https://pages.quantbuddy.cn/pages/assets/...webp` URL，再写入 HTML；禁止跨页复用托管 URL。图片必须带明确 `alt` 与 `width/height`；首屏和海报目标内不得 lazy，正文下方才可 `loading="lazy"`。标准 image panel 默认启用当前页大图预览，装饰图才设 `zoomable:false`；不要用新窗口打开图片 URL。fork 必须按 manifest 的 `images[]` 上传到目标页并替换 marker，不能保留来源图片 URL。
+9. **`templates` 摘要必须覆盖全部候选，落盘失败不能裸奔**：`items_summary` 的条目数量必须等于 `item_count`（完整候选去重后的真实数量，不是服务端可能未重算的 `total`），不允许只看其中一部分候选就判定 `unmatched`；一旦返回 `error:"TEMPLATES_PERSIST_FAILED"` 或 `error:"TEMPLATES_RESPONSE_SHAPE_UNEXPECTED"`（落盘失败或响应结构异常），必须先向用户说明「范式候选未能完整确认，暂缓路由判断」，禁止在这种不完整信息下判定为 `unmatched` 走自建，也**不得通过重复调用 `templates` 来补救**（每个任务仍然只能调用一次这条硬规则不变）；确需重试仅限明确的瞬时网络失败，且只重试一次。
+10. **Card Runtime 先做零副作用结构预检**：含 Card Runtime artifact 的 HTML 必须由 `publish_workflow.py` 在 QBS 验证、注册、图片上传和发布前用假凭证执行 `verify_page.mjs --card-runtime-structure-only`。正文与 Card 共用凭证时用 marker 数组扇出；每个数组元素仍须全局唯一并在 HTML 中恰好出现一次。禁止空 manifest 凭证；普通 `<img>` 必须有非空 `src`，仅显式声明 `data-qb-runtime-src` 且等待运行时赋值的预览图可以暂时为空；同时禁止注册等价的重复 Card package/grant。
+11. **普通建页前必须先查范式卡并显式确认路由**：`new_page` 会校验当前任务已用 `templates(recommend="all")` 查过完整范式池，并要求 Agent 根据 `items_summary` 传 `routing_decision`。未查模板返回 `ROUTING_TEMPLATES_REQUIRED`；未提交决定返回 `ROUTING_DECISION_REQUIRED`；fork 引用的来源或 unmatched 的最接近候选必须属于本次结果。范式相同仅标的/范围不同时使用 fork reason，不得以此判 unmatched。`publish_final` 发现已选 fork 却没有 fork task binding 时，在网络写入前返回可恢复的 `ROUTING_RECONFIRM_REQUIRED`；只有确认存在实质能力缺口时才用 `routing_override` 显式改判。`new_asset_page` 是服务端固定单股场景，不调用 `new_page`，因此不进入该 templates/routing gate；`build_dashboard` 不受限制，direct 不建页，也不受影响。
+12. **本地验收与公网验收分责**：`fork-local` 在本地 `file://`（origin=null）下用放开同源策略的测试浏览器跑真实取数渲染（`security_mode:"disabled-web-security"`），布局/占位符/运行时错误/图片/Card Runtime 门禁照常执行；`public-smoke` 保持浏览器默认安全策略，数据接口 CORS/`Failed to fetch`/运行时失败仍严格拦截。平台注入的 `/webapi/skill/track` 分析埋点是 fire-and-forget，其 CORS/网络失败降为 `non_core_console_warnings`，不再让成功页面发布失败；数据接口（`queryDataGrant`/`queryFormulaPackage`）的失败仍是阻塞性核心错误。
+13. **Fork 数据通道必须继承来源合同**：fork 的目标是替换标的并保持来源范式运行合同，不是重新设计数据层。来源模板某一角色使用公式包，目标页同一角色继续使用公式包；来源使用 `fast_query` / `stock_profile` / `composition_select` 数据授权，目标页继续使用同 kind、同 query_type、同响应形状的数据授权。禁止仅因“财务数据通常可走 fast_query(report)”就在 fork 中把来源财务公式包改成 grant，也禁止反向把来源 grant 改成公式包。只有 `unmatched` / 明确从零重建时才重新做通道选择；此时平台白名单报告期财务优先 `fast_query(query_type="report")`。
+14. **CHANGELOG 仅作为版本审计**：维护、升级或排查历史行为变化时，先阅读 `CHANGELOG.md` 中最新版本及与问题相关的历史条目；执行页面任务时，当前规则仍以 `SKILL.md` + `workflows/**` + `tools/**` + `guides/**` 为准。CHANGELOG 可能包含已被后续版本反转或废弃的旧口径，禁止用历史条目覆盖当前规则。
 
 
 ## 工具一览
@@ -278,8 +270,8 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | `scripts/compile_bespoke_page.py` | （单命令） | **【shell 处理脚本】** bespoke 主体 HTML → 内联公共 share shell / logo / qr-mini / data-kernel 的自包含 HTML | [guides/share-shell.md](guides/share-shell.md) |
 | `scripts/retrofit_share_shell.py` | （单命令） | **【shell 处理脚本】** 旧 HTML/已发布页面 → 删除旧二维码/旧页头/旧页尾，套入公共 share shell（`assets/share-shell/`），可原链接 update | [tools/retrofit_share_shell.md](tools/retrofit_share_shell.md) |
 | `scripts/data_kernel_retrofit.py` | （单命令） | 按 `QB_DATA_KERNEL` marker 或严格旧内核指纹，只替换页面中的 data-kernel；零个/多个命中均拒绝写回 | [tools/data_grant.md](tools/data_grant.md) |
-| `scripts/static_page.py` | `templates` / `direct_deliver` / `new_page` / `update_progress` / `publish_final` / `publish_verified` / `upload` / `update` / `download` / `image_upload` / `image_list` / `fork_prepare` / `fork_review_update` / `fork_validate` / `update_template` / 其他管理命令 | 范式路由、正文图片、direct 确定性交付、首链进度、分级浏览器门禁和页面发布管理 | [tools/static_page.md](tools/static_page.md) |
-| `scripts/qbs_bridge.py` | `<quant-buddy-skill tool> @params.json` / `validate_package_set` / `validate_grant_set` | QBV→QBS task_id 继承；按最终 package/Grant 合同验证并生成 fingerprint 绑定收据 | 本节“新会话路由” |
+| `scripts/static_page.py` | `new_asset_page` / `templates` / `direct_deliver` / `new_page` / `update_progress` / `publish_final` / `publish_verified` / `upload` / `update` / `download` / `image_upload` / `image_list` / `fork_prepare` / `fork_review_update` / `fork_validate` / `retrofit_card_runtime` / 其他管理命令 | 简单单股快速返回、范式路由、正文图片、direct 确定性交付、首链进度、分级浏览器门禁和页面发布管理 | [tools/static_page.md](tools/static_page.md) |
+| `scripts/qbs_bridge.py` | `resolve_asset_data` / `<quant-buddy-skill tool> @params.json` / `validate_package_set` / `validate_grant_set` | 统一实时路由探测并继承 QBV→QBS task_id；按最终 package/Grant 合同生成 route/grant/formula fingerprint 绑定收据 | 本节“新会话路由” |
 | `scripts/publish_workflow.py` | `@publish-plan.json` | manifest v2驱动 review/合同预检、package+Grant验证、每role一次注册、多Marker扇出替换和单次 `publish_verified`；v1 JSON兼容 | [tools/publish_workflow.md](tools/publish_workflow.md) |
 | `scripts/validate_agent_reply.py` | （单命令） | 校验发布器 SHA256 绑定的终态 contract 与 Markdown 草稿，并检查公开 URL、章节结构和敏感信息；可在成功后清理任务临时参数文件 | — |
 | `scripts/verify_page.mjs` | （单命令） | 发布前/发布后页面验收：标准三视口、h1、占位符、横向溢出、控制台核心错误；批注迭代可用 `--profile ui-refinement`、`--extra-viewport` 与 `--min-visible-font-px`；范式卡加 `--card-runtime` 或 `--card-runtime-only` | [guides/browser-feedback-refinement.md](guides/browser-feedback-refinement.md) |
