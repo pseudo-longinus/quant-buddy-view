@@ -147,7 +147,7 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 - 复用在线模板时，用同一 `task_id` 调 `fork_prepare` 生成 `fork_manifest_v2`、脱敏 HTML、`fork-review.json`、`publish-plan.json` 和任务级 `fork_task_binding_v1`。新流程由 publish plan 调用 `publish_workflow.py`；已准备的 v1 manifest 仍兼容。脚本继承来源模板的 `agent_reply_template`，manifest 负责校验来源 HTML SHA、来源凭证残留、核心栏目、必需输出与 Card Runtime。
 - 个股估值、宏观事件、行业主题、多资产比较、资金量化、基金产品、海外资产会按高置信 metadata 匹配专业骨架；无法匹配的新活页使用 `generic_live_page_delivery_v1`，不再退化成一句发布摘要。
 - `reply_template_v2 + hybrid` 必须同时具备当前活页 `page_context` 和 `hybrid_composition`，缺一项正式发布直接失败；旧 v1 hybrid 兼容。
-- `update_progress` 优先只传 `current_step + message`，脚本会自动把前序阶段标为 `done`、当前阶段标为 `running`、后序阶段标为 `pending`；不要在每次更新里复制一份可能过期的完整 `steps`。
+- `update_progress` 优先只传 `current_step + message`，脚本会自动把前序阶段标为 `done`、当前阶段标为 `running`、后序阶段标为 `pending`；不要在每次更新里复制一份可能过期的完整 `steps`。未传 `change_note` 时，页面历史版本会按“状态 + 中文阶段标题 + 用户可见 message”自动生成修改描述，最长 200 字；显式传入的 `change_note` 优先。
 - 带 `task_id` 推进到 `package_register` 或更后阶段时，必须传 quant-buddy-skill 成功返回的 `validation_receipt_files`；`failed/deferred` 收据不能作为完成证据。无需实时验证的静态页必须传非空 `validation_not_required_reason`。
 - 必须由用户决定口径时传 `page_status=waiting_input` 和 `required_input`；当前步骤标为 `waiting`，返回 `agent_reply_hint.interaction_required=true`。用户回复后必须复用原 `task_id/page_id`，以 `page_status=running` 恢复 `resume_step`。
 - 进度快照默认显式上传空 `scene_tags/paradigm_tags`，防止临时文案触发自动打标；正式 `publish_final` 不继承该抑制策略。
@@ -165,6 +165,7 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 | `page_status` | `new_page` / `update_progress` | ❌ | `running` / `waiting_input` / `done` / `failed`，默认 `running` |
 | `required_input` | `new_page` / `update_progress` | `waiting_input` 时必填 | `{id,prompt,options?,resume_step}`；`options` 为可选 `{value,label}` 数组 |
 | `steps` | `new_page` / `update_progress` | ❌ | 步骤数组；每项含 `id`、`title`、`status`、可选 `message`。默认不必传，脚本会按 `current_step` 自动推导状态 |
+| `change_note` | `update_progress` | ❌ | 页面历史版本的一句话修改描述；不传时自动生成，显式传入时原样优先，最长 200 字 |
 
 `publish_final` 接收普通 `update` 的参数，并额外支持：
 
@@ -172,6 +173,7 @@ python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page
 |---|---|---|
 | `progress_message` / `final_publish_message` / `publish_message` | ❌ | 进入 `final_publish` 时的用户可见文案，默认 `正在完成活页生成` |
 | `failure_message` / `progress_failure_message` | ❌ | 正式发布失败时回写到进度页的用户可见文案，默认 `活页生成遇到问题，请稍后重试。` |
+| `change_note` | ❌ | 正式活页版本的修改描述；不传时默认 `完成发布：正式活页内容已发布`，不影响发布前后进度快照各自自动生成的描述 |
 | `source_template_id` | ❌ | 本页复用的在线模板 `template_id/page_id`；继承回复骨架，不复制来源 `page_context` |
 | `fork_manifest_file` / `fork_manifest` | `source_template_id` 存在时必填 | v1/v2 均可读取；新 `fork_prepare` 只生成 v2。发布前 fail-closed 校验来源 HTML、凭证、栏目、输出和 Card Runtime |
 | `require_agent_reply_template` | ❌ | `true` 时启用 fail-closed 门禁；无法解析 Agent 回复模板则不发布正式页 |
@@ -506,7 +508,9 @@ python scripts/publish_workflow.py '@output/forks/page_xxx/page_xxx.publish-plan
 
 替换成功后 `url` / `page_id` 与替换前完全一致；仅本人、且未撤销的页面可改（已撤销返回 `NOT_ACTIVE`）。
 
-> `refresh_share_shell:true` 只适用于已经在本地编译出稳定 marker 的 HTML。旧线上 HTML 没有 marker 时会拒绝更新；先下载并在本地重建为 marker 版本，浏览器验收后再对指定 `page_id` 做同链接 update。该参数不用于批量迁移。新 shell 页头为 `刷新数据 / 收藏 / 分享 / 开始使用`，“开始使用”动态打开当前页对应 Web Agent，投研仓 iframe 无法通信时降级为官网新窗口。
+> `refresh_share_shell:true` 只适用于已经在本地编译出稳定 marker 的 HTML。旧线上 HTML 没有 marker 时会拒绝更新；先下载并在本地重建为 marker 版本，浏览器验收后再对指定 `page_id` 做同链接 update。该参数不用于批量迁移。新 shell 页头为 `刷新数据 / 收藏 / 分享 / 问一问`，“问一问”动态打开当前页对应 Web Agent，投研仓 iframe 无法通信时降级为官网新窗口。
+
+成功执行 Shell 刷新后，响应中的 `share_shell` 会返回当前 `version`、`revision`、标准化六 Marker 的 `artifact_hash` 与实际替换区块；管理端可据此重新检测 metadata。当前目标由 `assets/share-shell/contract.json` 定义，不要在调用方另行硬编码。
 ## 响应（upload）
 
 ```json

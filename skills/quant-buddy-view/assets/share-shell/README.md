@@ -4,10 +4,11 @@
 
 ## 文件
 
-- `shell.html`：固定页头、页尾、分享海报弹层结构。
+- `contract.json`：当前 Share Shell 的 `version`、`revision` 与必须能力清单，是构建、检测和后台策略同步的源契约。
+- `shell.html`：固定页头、页尾、投研仓/鉴权/Web Agent iframe 与分享海报弹层结构。
 - `shell.css`：暗色品牌外壳、白底 logo、页头按钮、弹层、移动端约束。
 - `poster.js`：固定海报页头/页尾、大二维码、canvas 绘制；默认前端截取页面主体作为预览，失败时再程序化降级，宁缺毋滥。
-- `shell.js`：刷新、投研仓状态通信、动态 Web Agent 跳转、分享弹层、复制链接、复制图片、下载 PNG 行为。
+- `shell.js`：刷新、投研仓与鉴权通信、移动端 Web Agent 底部对话框、桌面端 Playground 跳转、分享弹层、复制链接、复制图片、下载 PNG 行为。
 
 ## 模板契约
 
@@ -36,6 +37,14 @@ load();
 ```
 
 最终发布前用 `scripts/compile_bespoke_page.py` 编译，输出 HTML 必须自包含，不保留本地 `script src`、公共组件占位符或模板凭证占位符。
+
+## 版本与 artifact 契约
+
+- 当前目标为 `share-shell-v2 / revision 2`，必须包含 `research_warehouse`、`brand_warehouse_navigation`、`mobile_web_agent_sheet`、`desktop_playground_navigation`、`agent_page_refresh` 五项能力。
+- 编译后的 HTML 注入 `QB_SHARE_SHELL_VERSION` 和 `QB_SHARE_SHELL_REVISION`，供服务端 fail-closed 检测；未识别版本或 revision 不得标记为 verified。
+- `scripts/share_shell_contract.py` 只提取 `QB_SHELL_CSS/HEADER/RESEARCH_WAREHOUSE/FOOTER/MODAL/JS` 六组 Marker，统一换行和区块首尾空白后计算 SHA-256。当前标准 artifact hash 为 `cc98771282a73ac7b2a8383260cdc6ffa03ea809eb0868e14a1d77c0bd2ecb6b`。
+- `refresh_share_shell:true` 只能替换这六组 Marker；正文、Data Kernel、实时数据脚本和 Card Runtime 必须保持不变。
+- 以后任何页头视觉或交互调整都必须提升 `contract.json` 的 revision，并同步更新检测规则、后台目标策略和回归测试；不能靠逐页手工修改维持行为。
 
 ## 海报策略
 
@@ -72,9 +81,11 @@ load();
 
 ## 验收
 
-- 页头固定为 `QuantBuddy · 宽宝`，右侧固定 `刷新数据 / 收藏 / 分享 / 开始使用`。
-- “开始使用”按当前公开页 URL 生成对应 `/playground/<owner path>/<page_id>`；收藏只接受官网固定 origin、精确 iframe source、channel 和 `page_id` 全部匹配的消息。
+- 页头固定为 `QuantBuddy · 宽宝`，右侧固定 `刷新数据 / 收藏 / 分享 / 问一问`。
+- “问一问”按当前公开页 URL 生成对应 `/playground/<owner path>/<page_id>`：移动端（`max-width: 680px`）在当前页打开 `75dvh` 的 chat-only `/embed/web-agent` 底部对话框，桌面端继续经当前页鉴权 iframe 进入 Playground。
+- Web Agent 回答结束后，可信 `turn-complete` 调用页面 `onRefresh` 刷新实时数据；检测到活页 HTML 更新时，可信 `page-updated` 关闭对话框并重载当前页。
+- 收藏和 Web Agent 通信都必须同时校验官网/本地允许 origin、精确 iframe source、channel 与 `page_id`；Web Agent 额外只接受匹配的官方 `page_url`。
 - 投研仓 iframe 五秒未通信时降级为新窗口；静态页不读取 Cookie，也不接收 Token、用户名或文件夹明细。
 - 页面中不再出现旧的“手机扫码查看”二维码块或模板自带刷新按钮。
 - 分享海报可预览、复制链接、复制图片、下载 PNG，二维码尺寸可扫。
-- 移动端 320px 无横向溢出，弹层可滚动。
+- 移动端 320px 无横向溢出，Web Agent 底部对话框约占 3/4 屏，遮罩、关闭按钮和 Escape 均可关闭。

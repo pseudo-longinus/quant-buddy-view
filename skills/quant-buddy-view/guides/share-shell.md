@@ -19,6 +19,7 @@ Shared component files live in:
 
 ```text
 assets/share-shell/
+  contract.json
   shell.html
   shell.css
   shell.js
@@ -27,6 +28,20 @@ assets/share-shell/
 ```
 
 Templates must not fork private header/footer/share-modal implementations. If the shell needs a visual or behavioral change, update the shared files and recompile affected pages.
+
+## Versioned Capability Contract
+
+`assets/share-shell/contract.json` is the source contract for the current managed shell. The current target is `share-shell-v2 / revision 2` with five required capabilities:
+
+- `research_warehouse`
+- `brand_warehouse_navigation`
+- `mobile_web_agent_sheet`
+- `desktop_playground_navigation`
+- `agent_page_refresh`
+
+Build output exposes `QB_SHARE_SHELL_VERSION` and `QB_SHARE_SHELL_REVISION`. `scripts/share_shell_contract.py` canonicalizes the six stable Marker regions (`CSS`, `HEADER`, `RESEARCH_WAREHOUSE`, `FOOTER`, `MODAL`, `JS`) and computes their SHA-256 artifact hash. The revision-2 artifact hash is `cc98771282a73ac7b2a8383260cdc6ffa03ea809eb0868e14a1d77c0bd2ecb6b`.
+
+Any future header visual or interaction change is a managed artifact change: bump `revision`, update `contract.json`, update `skill_server` capability detection, update the `dunhe_backend` target policy, and extend regression tests. Do not patch published headers page by page. A shell-only refresh must preserve the page body, Data Kernel, live-data scripts, Card Runtime, `page_id`, and public URL.
 
 ## Public Interface
 
@@ -54,9 +69,12 @@ QBShareShell.init({
 The shell owns:
 
 - header brand text: `QuantBuddy · 宽宝`;
-- header actions: `刷新数据 / 收藏 / 分享 / 开始使用`;
+- header actions: `刷新数据 / 收藏 / 分享 / 问一问`;
 - favorite state: the shell accepts only fixed-origin, exact-iframe-source, matching-channel and matching-`page_id` messages;
-- “开始使用”: derive `/playground/<完整 owner path>/<page_id>` from the current `/pages/.../<page_id>.html` URL;
+- “问一问”: derive `/playground/<完整 owner path>/<page_id>` from the current `/pages/.../<page_id>.html` URL. At `680px` and narrower, keep the live page in place and open `/embed/web-agent` as a `75dvh` bottom sheet containing chat only; wider layouts keep the current-page `/embed/auth-continue` flow and navigate to Playground only after a trusted `authenticated:true` response;
+- header brand: use the same current-page authentication iframe, then enter `/dashboard?scope=favorited`;
+- authentication boundary: the static page keeps pending navigation and page context locally and never reads session cookies, tokens, or identity data. The auth iframe receives no redirect target; the Web Agent iframe receives only the validated `page_id` and official `page_url`. 收藏 remains a separate functional `/embed/research-warehouse` iframe because it also owns folder selection and collection actions;
+- mobile Web Agent completion: trusted `turn-complete` messages call the template `onRefresh` hook; trusted `page-updated` messages close the sheet and reload the current live page so an updated OSS artifact becomes visible;
 - footer risk note and official-site link;
 - share modal structure;
 - poster copy/download behavior;
@@ -126,7 +144,9 @@ Existing published pages are **not** upgraded during an ordinary `static_page.py
 
 The input HTML must already contain one complete set of the six stable markers. Old pages without markers must first be rebuilt locally with `compile_bespoke_page.py`; never enable this flag as a bulk migration shortcut.
 
-The 投研仓 iframe is preloaded hidden and falls back to opening the official embed in a new window if the frame cannot communicate. The static page never reads cookies or receives tokens, user identity, or folder details.
+Local previews may pass `pageUrl`, `embedOrigin`, and `navigationOrigin` to `QBShareShell.init()`; production pages omit them and derive the current public page URL directly.
+
+The 投研仓 iframe keeps its existing preload and new-window fallback behavior. The authentication iframe is not loaded or used for hidden session probing; it is created only after the user clicks the header brand or “问一问”. Both protocols validate the official origin, exact iframe source, channel, and request/page identifier. The static page never reads cookies or receives tokens, user identity, or folder details.
 
 ## Retrofitting Old Pages
 
@@ -149,9 +169,10 @@ python scripts/retrofit_share_shell.py '{"page_id":"page_xxx","update":true,"the
 - Run `python -m py_compile scripts/build_dashboard.py scripts/compile_bespoke_page.py scripts/retrofit_share_shell.py`.
 - Confirm generated HTML has no `QB_SHARED_`, `__PLACEHOLDER__`, `pkg_replace`, or `replace_with_signature` residue.
 - Verify desktop, 390px, and 320px widths have no horizontal overflow.
-- Verify header actions show `刷新数据 / 收藏 / 分享 / 开始使用`.
-- Verify 390px hides secondary refresh/share labels and 320px also compresses 收藏 without horizontal overflow.
-- Verify “开始使用” opens the matching Web Agent path and the 投研仓 iframe/new-window fallback keeps the same `page_id`.
+- Verify header actions show `刷新数据 / 收藏 / 分享 / 问一问`.
+- Verify 441px and narrower hide refresh/share labels, keep the 收藏 text visible through 320px, and have no horizontal overflow.
+- Verify the header brand stays on the current live page while `/embed/auth-continue` is authenticating and navigates only after a trusted success message. At mobile widths, verify “问一问” opens the `75dvh` chat-only `/embed/web-agent` sheet without navigation; at wider widths it keeps the Auth iframe → matching Playground path. Keep the 投研仓 iframe/new-window fallback on the same `page_id`.
+- Verify a trusted Web Agent `turn-complete` refreshes live data and `page-updated` reloads the current page; untrusted origin/source/channel/page messages do nothing.
 - Verify the old body QR block (`手机扫码查看`) is absent.
 - Verify share modal generates a `900x1400` PNG poster.
 - Verify copy image works, or degrades to a clear fallback message when Clipboard permissions are unavailable.

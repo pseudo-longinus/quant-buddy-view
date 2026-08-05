@@ -21,6 +21,7 @@ REVIEW_VERSION = "fork_review_v1"
 REVIEW_RECEIPT_VERSION = "fork_review_receipt_v1"
 PLAN_VERSION = "publish_workflow_v2"
 DEFAULT_BEGIN_DATE = 20150101
+MAX_PACKAGE_FORMULAS = 100
 
 _PACKAGE_ID_RE = re.compile(r"^pkg_[0-9A-Za-z._-]+$")
 _GRANT_ID_RE = re.compile(r"^(?:dg|grant)_[0-9A-Za-z._-]+$")
@@ -36,9 +37,14 @@ _LONG_PAIR_RE = re.compile(
     re.I,
 )
 _SHORT_PAIR_RE = re.compile(
-    r"(?:[\"']?id[\"']?)\s*:\s*(?P<id_quote>[\"'])(?P<credential_id>(?:pkg|dg|grant)_[^\"']+)(?P=id_quote)"
+    r"(?<![0-9A-Za-z_])(?:[\"']?id[\"']?)\s*:\s*(?P<id_quote>[\"'])(?P<credential_id>(?:pkg|dg|grant)_[^\"']+)(?P=id_quote)"
     r"(?P<middle>[\s\S]{0,1800}?)"
-    r"(?:[\"']?sig[\"']?)\s*:\s*(?P<sig_quote>[\"'])(?P<signature>[^\"']+)(?P=sig_quote)",
+    r"(?<![0-9A-Za-z_])(?:[\"']?sig[\"']?)\s*:\s*(?P<sig_quote>[\"'])(?P<signature>[^\"']+)(?P=sig_quote)",
+    re.I,
+)
+_CONST_CREDENTIAL_ID_RE = re.compile(
+    r"\b(?:const|let|var)\s+(?P<prefix>[A-Za-z0-9_]*)(?P<credential_kind>PACKAGE|GRANT)_ID\s*=\s*"
+    r"(?P<id_quote>[\"'])(?P<credential_id>(?:pkg|dg|grant)_[^\"']+)(?P=id_quote)",
     re.I,
 )
 
@@ -270,25 +276,60 @@ def _credential_kind(credential_id, id_key=""):
     return ""
 
 
-def discover_credential_pairs(html):
-    """Return unique active credential pairs while rejecting ambiguous ID/signature mappings."""
+def _constant_credential_pairs(html):
+    """Pair bespoke JS constants by their full variable-name prefix.
+
+    Supported shapes include PACKAGE_ID + SIGNATURE,
+    ROSTER_PACKAGE_ID + ROSTER_SIGNATURE, and
+    FUND_GRANT_ID + FUND_GRANT_SIGNATURE.
+    """
+    text = str(html or "")
+    pairs = []
+    for match in _CONST_CREDENTIAL_ID_RE.finditer(text):
+        prefix = str(match.group("prefix") or "")
+        declared_kind = str(match.group("credential_kind") or "").upper()
+        kind = "package" if declared_kind == "PACKAGE" else "grant"
+        signature_variable = f"{prefix}SIGNATURE" if kind == "package" else f"{prefix}GRANT_SIGNATURE"
+        signature_re = re.compile(
+            rf"\b(?:const|let|var)\s+{re.escape(signature_variable)}\s*=\s*"
+            r"(?P<sig_quote>[\"'])(?P<signature>[^\"']+)(?P=sig_quote)",
+            re.I,
+        )
+        for signature_match in signature_re.finditer(text):
+            pairs.append({
+                "kind": kind,
+                "credential_id": str(match.group("credential_id") or "").strip(),
+                "signature": str(signature_match.group("signature") or "").strip(),
+            })
+    return pairs
+
+
+def discover_credential_pairs(html, *, reject_ambiguous=True):
+    """Return unique active credential pairs while optionally rejecting ambiguity."""
     pairs = []
     seen = set()
     id_to_signatures = defaultdict(set)
     signature_to_ids = defaultdict(set)
+    candidates = []
     for pattern in (_LONG_PAIR_RE, _SHORT_PAIR_RE):
         for match in pattern.finditer(html or ""):
             credential_id = str(match.group("credential_id") or "").strip()
             signature = str(match.group("signature") or "").strip()
             kind = _credential_kind(credential_id, match.groupdict().get("id_key") or "")
-            if not kind or not credential_id or not signature:
-                continue
-            key = (kind, credential_id, signature)
-            id_to_signatures[(kind, credential_id)].add(signature)
-            signature_to_ids[signature].add((kind, credential_id))
-            if key not in seen:
-                seen.add(key)
-                pairs.append({"kind": kind, "credential_id": credential_id, "signature": signature})
+            candidates.append({"kind": kind, "credential_id": credential_id, "signature": signature})
+    candidates.extend(_constant_credential_pairs(html))
+    for candidate in candidates:
+        credential_id = str(candidate.get("credential_id") or "").strip()
+        signature = str(candidate.get("signature") or "").strip()
+        kind = str(candidate.get("kind") or "").strip()
+        if not kind or not credential_id or not signature:
+            continue
+        key = (kind, credential_id, signature)
+        id_to_signatures[(kind, credential_id)].add(signature)
+        signature_to_ids[signature].add((kind, credential_id))
+        if key not in seen:
+            seen.add(key)
+            pairs.append({"kind": kind, "credential_id": credential_id, "signature": signature})
     ambiguous = [
         {"kind": kind, "credential_id": credential_id, "signature_count": len(signatures)}
         for (kind, credential_id), signatures in id_to_signatures.items() if len(signatures) > 1
@@ -297,7 +338,7 @@ def discover_credential_pairs(html):
         {"signature_sha256": hashlib.sha256(signature.encode("utf-8")).hexdigest(), "credential_count": len(ids)}
         for signature, ids in signature_to_ids.items() if len(ids) > 1
     ]
-    if ambiguous or shared_signatures:
+    if reject_ambiguous and (ambiguous or shared_signatures):
         raise ForkRuntimeError(
             "SOURCE_CREDENTIAL_AMBIGUOUS",
             "来源 HTML 存在一个 ID 对应多个 signature，或同一 signature 对应多个凭证",
@@ -305,8 +346,6 @@ def discover_credential_pairs(html):
             shared_signatures=shared_signatures,
         )
     return pairs
-
-
 def _contract_indexes(template_record):
     packages = {}
     grants = {}
@@ -945,8 +984,11 @@ def validate_resolved_contracts(manifest, resolved):
             raise ForkRuntimeError("PACKAGE_BEGIN_DATE_INVALID", f"{role_id}.begin_date 必须是 YYYYMMDD 整数") from exc
         if begin_date < 20050104 or begin_date > 20991231 or len(str(begin_date)) != 8:
             raise ForkRuntimeError("PACKAGE_BEGIN_DATE_INVALID", f"{role_id}.begin_date 超出有效范围")
-        if not isinstance(formulas, list) or not (1 <= len(formulas) <= 20) or not all(isinstance(value, str) and value.strip() for value in formulas):
-            raise ForkRuntimeError("PACKAGE_CONTRACT_INVALID", f"{role_id}.formulas 必须是 1..20 条非空公式")
+        if not isinstance(formulas, list) or not (1 <= len(formulas) <= MAX_PACKAGE_FORMULAS) or not all(isinstance(value, str) and value.strip() for value in formulas):
+            raise ForkRuntimeError(
+                "PACKAGE_CONTRACT_INVALID",
+                f"{role_id}.formulas 必须是 1..{MAX_PACKAGE_FORMULAS} 条非空公式",
+            )
         outputs = [formula_output(value) for value in formulas]
         if any(not value for value in outputs) or len(set(outputs)) != len(outputs):
             raise ForkRuntimeError("PACKAGE_OUTPUT_INVALID", f"{role_id} 公式左值缺失或重复")

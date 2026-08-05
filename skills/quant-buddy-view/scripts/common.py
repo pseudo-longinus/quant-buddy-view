@@ -155,16 +155,31 @@ def api_url(endpoint, path):
 
 _TRACE_TASK_ID = None
 _TRACE_USER_QUERY = None
+_TRACE_AGENT_MODEL = None
 _API_KEY_OVERRIDE = None  # 调用方（如 Playground）本次调用传入的 api_key，仅本进程生效，不落盘
+_TRACE_CONTEXT_FILE_NAME = ".trace_context.json"
 
 
-def set_trace_context(task_id=None, user_query=None, api_key_override=None):
+def _normalize_agent_model(value):
+    """模型名仅做空白归一化；未知或空值保持 None，绝不猜测。"""
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def set_trace_context(task_id=None, user_query=None, api_key_override=None, agent_model=None):
     """设置当前进程的 Trace Context；供 read_params / trace_context.py 共用。"""
-    global _TRACE_TASK_ID, _TRACE_USER_QUERY, _API_KEY_OVERRIDE
+    global _TRACE_TASK_ID, _TRACE_USER_QUERY, _TRACE_AGENT_MODEL, _API_KEY_OVERRIDE
     _TRACE_TASK_ID = str(task_id).strip() if task_id else None
     _TRACE_USER_QUERY = str(user_query).strip() if user_query else None
+    _TRACE_AGENT_MODEL = _normalize_agent_model(agent_model)
     _API_KEY_OVERRIDE = str(api_key_override).strip() if api_key_override else None
-    return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
+    return {
+        "task_id": _TRACE_TASK_ID,
+        "user_query": _TRACE_USER_QUERY,
+        "agent_model": _TRACE_AGENT_MODEL,
+    }
 
 
 def configure_trace_context(params=None):
@@ -173,6 +188,12 @@ def configure_trace_context(params=None):
     nested = params.get("trace_context") if isinstance(params.get("trace_context"), dict) else {}
     task_id = params.get("task_id") or nested.get("task_id") or os.environ.get("QBV_TASK_ID")
     user_query = params.get("user_query") or nested.get("user_query") or os.environ.get("QBV_USER_QUERY")
+    explicit_agent_model = params.get("agent_model") if "agent_model" in params else nested.get("agent_model")
+    agent_model = _normalize_agent_model(explicit_agent_model)
+    if not agent_model:
+        agent_model = _normalize_agent_model(os.environ.get("QBV_AGENT_MODEL"))
+    if not agent_model and task_id:
+        agent_model = read_task_agent_model(task_id)
     # 调用方可在 params 里附带 api_key，本次调用临时覆盖 config.json，优先级最高；pop 掉避免
     # 混进后续以 params 为请求体转发的调用里。这次调用没提 api_key 字段（跟"显式传空值清空"不是一回事）
     # 时优先保留当前已生效的覆盖，不清空——避免同一进程内的重入调用（如 cmd_direct_deliver 内部临时切
@@ -194,11 +215,15 @@ def configure_trace_context(params=None):
         api_key_override = _API_KEY_OVERRIDE
     else:
         api_key_override = os.environ.get("QBV_API_KEY", "").strip() or None
-    return set_trace_context(task_id, user_query, api_key_override)
+    return set_trace_context(task_id, user_query, api_key_override, agent_model)
 
 
 def current_trace_context():
-    return {"task_id": _TRACE_TASK_ID, "user_query": _TRACE_USER_QUERY}
+    return {
+        "task_id": _TRACE_TASK_ID,
+        "user_query": _TRACE_USER_QUERY,
+        "agent_model": _TRACE_AGENT_MODEL,
+    }
 
 
 def safe_task_id(task_id):
@@ -229,6 +254,46 @@ def task_temp_path(task_id, name, create_parent=False):
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def read_task_agent_model(task_id):
+    """Best-effort 读取 task-scoped 模型名；文件缺失/损坏时静默返回 None。"""
+    try:
+        path = task_temp_path(task_id, _TRACE_CONTEXT_FILE_NAME)
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if str(payload.get("task_id") or "").strip() != str(task_id or "").strip():
+            return None
+        return _normalize_agent_model(payload.get("agent_model"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def persist_task_agent_model(task_id, agent_model):
+    """Best-effort 原子保存 task-scoped 模型名；失败不得影响活页主流程。"""
+    model = _normalize_agent_model(agent_model)
+    if not task_id or not model:
+        return False
+    temp_path = None
+    try:
+        path = task_temp_path(task_id, _TRACE_CONTEXT_FILE_NAME, create_parent=True)
+        payload = {
+            "version": "qbv_trace_context_v1",
+            "task_id": str(task_id).strip(),
+            "agent_model": model,
+        }
+        fd, temp_path = tempfile.mkstemp(prefix=".trace-context-", suffix=".json", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temp_path, path)
+        return True
+    except (OSError, ValueError, TypeError):
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        return False
 
 
 def cleanup_task_temp_files(task_id):
@@ -356,6 +421,8 @@ def headers(api_key=None, accept=None):
         h["x-skill-channel"] = SKILL_CHANNEL
     if _TRACE_TASK_ID:
         h["x-task-id"] = _TRACE_TASK_ID
+    if _TRACE_AGENT_MODEL:
+        h["x-agent-model"] = _TRACE_AGENT_MODEL
     if api_key:
         h["Authorization"] = f"Bearer {api_key}"
     if accept:

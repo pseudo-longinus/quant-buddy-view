@@ -169,7 +169,7 @@ def _share_config(spec):
         "tagline": brand.get("tagline") or spec.get("brand_tagline") or "Agent 调用 Skill 计算 · HTML 可调",
         "page_type": spec.get("page_type") or brand.get("page_type") or "量化看板",
         "official_url": official_url,
-        "official_label": spec.get("official_label") or brand.get("official_label") or "开始使用",
+        "official_label": spec.get("official_label") or brand.get("official_label") or "问一问",
         "show_qr": _as_bool(spec.get("show_qr", brand.get("show_qr")), True),
         "share_url": spec.get("share_url") or brand.get("share_url") or "",
         "share_title": spec.get("share_title") or brand.get("share_title") or "分享海报",

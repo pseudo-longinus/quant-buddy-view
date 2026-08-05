@@ -25,10 +25,14 @@ def cmd_begin(params):
     # configure_trace_context（不是 set_trace_context）：本次调用没带 api_key 字段时保留当前已生效的
     # 覆盖，不清空——begin 常是任务第一个调用，read_params() 刚从同一份 params 里读出的 api_key 覆盖
     # 不该被这一行自己冲掉。
-    C.configure_trace_context({"task_id": task_id, "user_query": user_query})
+    context_params = {"task_id": task_id, "user_query": user_query}
+    if "agent_model" in params:
+        context_params["agent_model"] = params.get("agent_model")
+    C.configure_trace_context(context_params)
+    agent_model = C.current_trace_context().get("agent_model")
     body = {"task_id": task_id, "user_query": user_query}
-    if params.get("agent_model"):
-        body["agent_model"] = params["agent_model"]
+    if agent_model:
+        body["agent_model"] = agent_model
     out = C.http_json(
         "POST",
         C.api_url(endpoint, "/skill/session/begin"),
@@ -44,6 +48,8 @@ def cmd_begin(params):
             "server_response": out,
         }
     task_root = C.task_temp_dir(task_id, create=True)
+    if agent_model:
+        C.persist_task_agent_model(task_id, agent_model)
     return {
         "code": 0,
         "task_id": task_id,

@@ -9,6 +9,32 @@
 
 ---
 
+## [0.6.35] — 2026-08-05
+
+将活页页头升级为 Share Shell v2 能力契约：统一 Logo 鉴权后进入个人中心投研仓、投研仓收藏、移动端 75dvh“问一问” Web Agent、桌面端 Playground 跳转及 Agent 回答后的刷新/重载协议。新增 `assets/share-shell/contract.json`、revision 注入和六 Marker 标准化 SHA-256 工具；显式 `refresh_share_shell:true` 仍只替换 Share Shell 区块并保留正文、Data Kernel、实时取数与 Card Runtime。以后页头视觉或交互调整必须提升 revision、更新能力契约并通过刷新与通信回归测试。
+
+---
+
+## [0.6.34] — 2026-08-04
+
+新增 `agent_model` 柔性采集与任务级贯穿：Agent 明确知道真实运行模型时可在 `trace_context begin` 显式传入，宿主也可通过可选环境变量 `QBV_AGENT_MODEL` 注入；两者都缺失或只有空白时保持为空，禁止猜测、询问用户或阻断活页流程。非空模型名会 best-effort 保存到 task-scoped Trace Context，后续独立 QBV 命令自动恢复并通过 `x-agent-model` 发送，QBS bridge 创建继承会话时也同步透传。上下文文件缺失、损坏或不可写均静默降级，不改变现有命令退出码。配套服务端审计在当前请求未携带模型名时，可从同 `task_id`、同认证用户的成功 `newSession` 记录柔性回填；反查发生在响应后的日志阶段，失败仍写入 `null`，不影响用户请求。
+
+---
+
+## [0.6.33] — 2026-08-04
+
+提升活页进度版本的可追踪性：`update_progress` 未显式传 `change_note` 时，自动按页面状态、中文阶段标题和用户可见 `message` 生成不超过 200 字的修改描述，区分“进度更新 / 等待输入 / 进度完成 / 进度失败”；`final_publish` 阶段进一步区分“开始发布 / 完成发布 / 发布失败”。调用方显式提供的 `change_note` 仍具有最高优先级，正式 `publish_final` 未提供说明时默认记录“完成发布：正式活页内容已发布”，避免版本历史连续出现无法定位的“更新页面内容”。同时让 `publish_final` 的内部发布进度快照继承 `live_data_mode`、市场数据要求、资产与路由/公式/Grant 收据等结构化证据，避免正式发布成功但“开始发布”版本因证据参数丢失而写入失败。
+
+---
+
+## [0.6.32] — 2026-08-03
+
+修复具体资产实时取数探测链：`fast_query` 改用接口支持的 `result_mode:"value"`，正确解包 `{code, data:{...}}` 响应中的 `results`、`asset_errors` 与 `field_errors`，资产名称归一化保留中日韩统一表意文字，避免中文资产被误判为 `TARGET_ASSET_MISSING`。统一 direct 与 fork 的运行时凭证发现逻辑，支持 `PACKAGE_ID/SIGNATURE`、`ROSTER_PACKAGE_ID/ROSTER_SIGNATURE`、`FUND_GRANT_ID/FUND_GRANT_SIGNATURE` 等带角色前缀的 JS 常量；模板声明但来源 HTML 未发现的凭证必须显式说明缩减原因，禁止把元数据残留静默带入发布合同。
+
+公式包注册合同继续按平台能力接受最多 100 条公式，QBS 验证在同一包内按每批最多 20 条自动拆分，前批输出通过 `force_reusable_array` 保活。多批验证完成后生成绑定完整合同指纹、子收据路径及 SHA256 的包级聚合收据；发布门禁兼容旧单批收据，并严格校验聚合输出摘要、子收据唯一性、内容哈希及任务归属。版本测试改为校验 `SKILL.md` 顶层版本、metadata 版本与运行时解析结果动态一致，避免每次发版维护硬编码断言。
+
+---
+
 ## [0.6.31] — 2026-08-03
 
 新增具体资产证据闸门：点名资产时必须先通过 `resolve_asset_data` 验证平台 ticker 映射和用户所需数据角色，禁止依据上市状态、所有权、名称或市场惯例先验推断平台能力、代理资产、静态回退或页面结构；验证结果必须区分资产未映射、接口不支持、字段缺失和额度限制。建立正式的 `CHANGELOG.md` 治理与 Agent 阅读边界：维护、升级或排查版本差异时读取最新版本及相关历史，普通建页任务不默认加载全部历史；当前规则仍以 `SKILL.md`、`workflows/**`、`tools/**`、`guides/**` 为准。将历史版本说明从 `SKILL.md` 移入 changelog，同时保留仍有效的 Fork 数据通道继承硬规则。发布包和自更新流程现在强制包含 changelog，并新增对应测试；根目录打包脚本补充 `skillhub` channel 用法示例。

@@ -1,7 +1,7 @@
 <!-- QB_SHELL_HEADER_START -->
 <header class="qb-head" data-qb-share-shell>
   <div class="qb-head-in">
-    <a class="qb-brand" href="https://www.quantbuddy.cn" target="_blank" rel="noopener" aria-label="QuantBuddy 官网">
+    <a class="qb-brand" href="https://www.quantbuddy.cn/dashboard?scope=favorited" aria-label="前往个人中心投研仓">
       <span class="qb-logo"><img src="__QB_LOGO_SRC__" alt="QuantBuddy" /></span>
       <span class="qb-name">QuantBuddy · 宽宝</span>
     </a>
@@ -18,7 +18,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.8 15.4 6.2"/><path d="M8.6 13.2 15.4 17.8"/></svg>
         <span class="action-label">分享</span>
       </button>
-      <a class="qb-action primary" id="startUsing" href="https://www.quantbuddy.cn" target="_blank" rel="noopener">开始使用</a>
+      <a class="qb-action primary" id="startUsing" href="https://www.quantbuddy.cn">问一问</a>
     </div>
   </div>
 </header>
@@ -27,6 +27,14 @@
 <!-- QB_SHELL_RESEARCH_WAREHOUSE_START -->
 <div class="qb-warehouse-modal" id="researchWarehouseModal" role="dialog" aria-modal="true" aria-label="收藏到投研仓" aria-hidden="true">
   <iframe id="researchWarehouseFrame" title="收藏到投研仓" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+</div>
+<div class="qb-auth-modal" id="authContinueModal" role="dialog" aria-modal="true" aria-label="登录 QuantBuddy 后继续" aria-hidden="true">
+  <iframe id="authContinueFrame" title="登录 QuantBuddy 后继续" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+</div>
+<div class="qb-web-agent-modal" id="webAgentModal" role="dialog" aria-modal="true" aria-label="问一问当前活页" aria-hidden="true">
+  <div class="qb-web-agent-sheet">
+    <iframe id="webAgentFrame" title="问一问当前活页" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  </div>
 </div>
 <!-- QB_SHELL_RESEARCH_WAREHOUSE_END -->
 

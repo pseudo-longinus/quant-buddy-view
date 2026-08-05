@@ -1,7 +1,12 @@
 (function(){
-  const VERSION = "research-warehouse-v1";
+  const VERSION = "share-shell-v2";
+  const REVISION = 2;
   const OFFICIAL_ORIGIN = "https://www.quantbuddy.cn";
-  const CHANNEL = "qb-research-warehouse-v1";
+  const PAGES_ORIGIN = "https://pages.quantbuddy.cn";
+  const WAREHOUSE_CHANNEL = "qb-research-warehouse-v1";
+  const AUTH_CHANNEL = "qb-auth-continue-v1";
+  const WEB_AGENT_CHANNEL = "qb-web-agent-v1";
+  const AUTH_HELLO_MAX_ATTEMPTS = 75;
   const $ = id => document.getElementById(id);
   let state={};
   let pageContext=null;
@@ -9,7 +14,45 @@
   let warehouseTimer=0;
   let warehouseHelloTimer=0;
   let warehouseHelloAttempts=0;
+  let authReady=false;
+  let authHelloTimer=0;
+  let authHelloAttempts=0;
+  let authRequestId="";
+  let pendingAuthenticatedTarget="";
+  let pendingAuthenticatedTrigger=null;
+  let webAgentReady=false;
+  let webAgentHelloTimer=0;
+  let webAgentHelloAttempts=0;
+  let pendingWebAgentTrigger=null;
   function callMaybe(v){ return typeof v === "function" ? v() : v; }
+  function serviceOrigin(){
+    try{
+      const candidate=new URL(state.embedOrigin || OFFICIAL_ORIGIN);
+      if(candidate.protocol==="https:" || (candidate.protocol==="http:" && /^(127\.0\.0\.1|localhost)$/.test(candidate.hostname))) return candidate.origin;
+    }catch(e){}
+    return OFFICIAL_ORIGIN;
+  }
+  function normalizeOfficialTarget(targetUrl,fallbackPath){
+    const fallback=/^\/(?![\\/])/.test(fallbackPath || "") ? fallbackPath : "/dashboard";
+    try{
+      const target=new URL(targetUrl,OFFICIAL_ORIGIN);
+      const candidate=target.pathname+target.search+target.hash;
+      if(target.origin===OFFICIAL_ORIGIN && /^\/(?![\\/])/.test(candidate) && !/[\u0000-\u001f\u007f]/.test(candidate)) return OFFICIAL_ORIGIN+candidate;
+    }catch(e){}
+    return OFFICIAL_ORIGIN+fallback;
+  }
+  function resolveNavigationTarget(targetUrl){
+    const safe=normalizeOfficialTarget(targetUrl,"/dashboard");
+    if(!state.navigationOrigin) return safe;
+    try{
+      const local=new URL(state.navigationOrigin);
+      if(local.protocol==="http:" && /^(127\.0\.0\.1|localhost)$/.test(local.hostname)){
+        const parsed=new URL(safe);
+        return local.origin+parsed.pathname+parsed.search+parsed.hash;
+      }
+    }catch(e){}
+    return safe;
+  }
   function setStatus(msg){ const el=$("sharePosterStatus"); if(el) el.textContent=msg; }
   function setBusy(busy){ ["copyPoster","downloadPoster"].forEach(id=>{ const el=$(id); if(el) el.disabled=!!busy; }); }
   function setRefreshBusy(busy,label){
@@ -36,10 +79,16 @@
       const pageId=file.replace(/\.html$/i,"");
       if(!pageId || !routeParts.length) return null;
       const encoded=[...routeParts,pageId].map(value=>encodeURIComponent(decodeURIComponent(value)));
+      const playgroundUrl=OFFICIAL_ORIGIN+"/playground/"+encoded.join("/");
+      const pageUrl=PAGES_ORIGIN+"/pages/"+encoded.join("/")+".html";
+      const embedOrigin=serviceOrigin();
       return {
         pageId:pageId,
-        playgroundUrl:OFFICIAL_ORIGIN+"/playground/"+encoded.join("/"),
-        embedUrl:OFFICIAL_ORIGIN+"/embed/research-warehouse?page_id="+encodeURIComponent(pageId)
+        pageUrl:pageUrl,
+        playgroundUrl:playgroundUrl,
+        embedUrl:embedOrigin+"/embed/research-warehouse?page_id="+encodeURIComponent(pageId),
+        authEmbedUrl:embedOrigin+"/embed/auth-continue",
+        webAgentEmbedUrl:embedOrigin+"/embed/web-agent"
       };
     }catch(e){ return null; }
   }
@@ -55,12 +104,12 @@
   function warehouseFrame(){ return $("researchWarehouseFrame"); }
   function buildWarehouseHello(context){
     if(!context || !context.pageId) return null;
-    return {channel:CHANNEL,type:"hello",page_id:context.pageId};
+    return {channel:WAREHOUSE_CHANNEL,type:"hello",page_id:context.pageId};
   }
   function postWarehouseHello(){
     const frame=warehouseFrame(), message=buildWarehouseHello(pageContext);
     if(!frame || !frame.contentWindow || !message) return false;
-    frame.contentWindow.postMessage(message,OFFICIAL_ORIGIN);
+    frame.contentWindow.postMessage(message,serviceOrigin());
     return true;
   }
   function stopWarehouseHelloRetries(){
@@ -122,10 +171,10 @@
     return !!(
       frame
       && context
-      && event.origin===OFFICIAL_ORIGIN
+      && event.origin===serviceOrigin()
       && event.source===frame.contentWindow
       && data
-      && data.channel===CHANNEL
+      && data.channel===WAREHOUSE_CHANNEL
       && data.page_id===context.pageId
     );
   }
@@ -139,6 +188,212 @@
     warehouseTimer=0;
     if(data.type==="state" || data.type==="collected") setFavoriteState(data.favorited===true);
     if(data.type==="close") closeWarehouse();
+  }
+  function authFrame(){ return $("authContinueFrame"); }
+  function nextAuthRequestId(){
+    return "auth-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2,10);
+  }
+  function buildAuthHello(requestId){
+    if(!requestId || !/^[A-Za-z0-9._:-]{1,160}$/.test(requestId)) return null;
+    return {channel:AUTH_CHANNEL,type:"hello",request_id:requestId};
+  }
+  function postAuthHello(){
+    const frame=authFrame(), message=buildAuthHello(authRequestId);
+    if(!frame || !frame.contentWindow || !message) return false;
+    frame.contentWindow.postMessage(message,serviceOrigin());
+    return true;
+  }
+  function stopAuthHelloRetries(){
+    window.clearTimeout(authHelloTimer);
+    authHelloTimer=0;
+    authHelloAttempts=0;
+  }
+  function scheduleAuthHelloRetries(){
+    stopAuthHelloRetries();
+    const send=()=>{
+      if(authReady || authHelloAttempts>=AUTH_HELLO_MAX_ATTEMPTS){ stopAuthHelloRetries(); return; }
+      authHelloAttempts+=1;
+      postAuthHello();
+      authHelloTimer=window.setTimeout(send,400);
+    };
+    send();
+  }
+  function ensureAuthFrame(){
+    const frame=authFrame();
+    if(!frame || !pageContext) return null;
+    if(!frame.dataset.qbAuthLoadBound){
+      frame.addEventListener("load",()=>{ authReady=false; scheduleAuthHelloRetries(); });
+      frame.dataset.qbAuthLoadBound="1";
+    }
+    if(!frame.src) frame.src=pageContext.authEmbedUrl;
+    scheduleAuthHelloRetries();
+    return frame;
+  }
+  function openAuthenticatedTarget(event,targetUrl){
+    if(event && typeof event.preventDefault==="function") event.preventDefault();
+    const modal=$("authContinueModal");
+    if(!modal || !pageContext) return false;
+    pendingAuthenticatedTarget=normalizeOfficialTarget(targetUrl,"/dashboard");
+    pendingAuthenticatedTrigger=event && event.currentTarget ? event.currentTarget : null;
+    authRequestId=nextAuthRequestId();
+    authReady=false;
+    ensureAuthFrame();
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden","false");
+    document.documentElement.style.overflow="hidden";
+    return true;
+  }
+  function closeAuthContinue(restoreFocus){
+    stopAuthHelloRetries();
+    const modal=$("authContinueModal");
+    if(modal){
+      modal.classList.remove("open");
+      modal.setAttribute("aria-hidden","true");
+    }
+    document.documentElement.style.overflow="";
+    if(restoreFocus!==false && pendingAuthenticatedTrigger && typeof pendingAuthenticatedTrigger.focus==="function") pendingAuthenticatedTrigger.focus();
+    pendingAuthenticatedTarget="";
+    pendingAuthenticatedTrigger=null;
+    authRequestId="";
+    authReady=false;
+  }
+  function isTrustedAuthSource(event,frame){
+    const data=event && event.data;
+    return !!(
+      frame
+      && event.origin===serviceOrigin()
+      && event.source===frame.contentWindow
+      && data
+      && data.channel===AUTH_CHANNEL
+    );
+  }
+  function isTrustedAuthReadyMessage(event,frame){
+    return !!(isTrustedAuthSource(event,frame) && event.data.type==="ready");
+  }
+  function isTrustedAuthMessage(event,frame,requestId){
+    const data=event && event.data;
+    return !!(
+      requestId
+      && isTrustedAuthSource(event,frame)
+      && data.request_id===requestId
+    );
+  }
+  function onAuthMessage(event){
+    const frame=authFrame();
+    if(isTrustedAuthReadyMessage(event,frame)){
+      postAuthHello();
+      return;
+    }
+    if(!isTrustedAuthMessage(event,frame,authRequestId)) return;
+    const data=event.data;
+    authReady=true;
+    stopAuthHelloRetries();
+    if(data.type==="close"){
+      closeAuthContinue(true);
+      return;
+    }
+    if(data.type==="state" && data.authenticated===true && pendingAuthenticatedTarget){
+      const target=resolveNavigationTarget(pendingAuthenticatedTarget);
+      closeAuthContinue(false);
+      window.location.assign(target);
+    }
+  }
+  function webAgentFrame(){ return $("webAgentFrame"); }
+  function buildWebAgentHello(context){
+    if(!context || !context.pageId || !context.pageUrl) return null;
+    return {channel:WEB_AGENT_CHANNEL,type:"hello",page_id:context.pageId,page_url:context.pageUrl};
+  }
+  function postWebAgentHello(){
+    const frame=webAgentFrame(), message=buildWebAgentHello(pageContext);
+    if(!frame || !frame.contentWindow || !message) return false;
+    frame.contentWindow.postMessage(message,serviceOrigin());
+    return true;
+  }
+  function stopWebAgentHelloRetries(){
+    window.clearTimeout(webAgentHelloTimer);
+    webAgentHelloTimer=0;
+    webAgentHelloAttempts=0;
+  }
+  function scheduleWebAgentHelloRetries(){
+    stopWebAgentHelloRetries();
+    const send=()=>{
+      if(webAgentReady || webAgentHelloAttempts>=16){ stopWebAgentHelloRetries(); return; }
+      webAgentHelloAttempts+=1;
+      postWebAgentHello();
+      webAgentHelloTimer=window.setTimeout(send,400);
+    };
+    send();
+  }
+  function ensureWebAgentFrame(){
+    const frame=webAgentFrame();
+    if(!frame || !pageContext) return null;
+    if(!frame.dataset.qbWebAgentLoadBound){
+      frame.addEventListener("load",()=>{ webAgentReady=false; scheduleWebAgentHelloRetries(); });
+      frame.dataset.qbWebAgentLoadBound="1";
+    }
+    if(!frame.src) frame.src=pageContext.webAgentEmbedUrl;
+    if(!webAgentReady) scheduleWebAgentHelloRetries();
+    return frame;
+  }
+  function isMobileAsk(){
+    try{
+      if(window.matchMedia) return window.matchMedia("(max-width: 680px)").matches;
+      return typeof window.innerWidth==="number" && window.innerWidth<=680;
+    }catch(e){ return false; }
+  }
+  function openWebAgent(event){
+    if(event && typeof event.preventDefault==="function") event.preventDefault();
+    const modal=$("webAgentModal");
+    if(!modal || !pageContext) return false;
+    pendingWebAgentTrigger=event && event.currentTarget ? event.currentTarget : null;
+    ensureWebAgentFrame();
+    if(webAgentReady) postWebAgentHello();
+    else scheduleWebAgentHelloRetries();
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden","false");
+    document.documentElement.style.overflow="hidden";
+    return true;
+  }
+  function closeWebAgent(restoreFocus){
+    stopWebAgentHelloRetries();
+    const modal=$("webAgentModal");
+    if(modal){
+      modal.classList.remove("open");
+      modal.setAttribute("aria-hidden","true");
+    }
+    document.documentElement.style.overflow="";
+    if(restoreFocus!==false && pendingWebAgentTrigger && typeof pendingWebAgentTrigger.focus==="function") pendingWebAgentTrigger.focus();
+    pendingWebAgentTrigger=null;
+  }
+  function isTrustedWebAgentMessage(event,frame,context){
+    const data=event && event.data;
+    return !!(
+      frame
+      && context
+      && event.origin===serviceOrigin()
+      && event.source===frame.contentWindow
+      && data
+      && data.channel===WEB_AGENT_CHANNEL
+      && data.page_id===context.pageId
+    );
+  }
+  function reloadAfterAgentUpdate(){
+    closeWebAgent(false);
+    if(typeof state.onAgentPageUpdated==="function"){ state.onAgentPageUpdated(); return; }
+    if(window.location && typeof window.location.reload==="function") window.location.reload();
+  }
+  function onWebAgentMessage(event){
+    const frame=webAgentFrame();
+    if(!isTrustedWebAgentMessage(event,frame,pageContext)) return;
+    const data=event.data;
+    if(data.type==="ready"){ webAgentReady=true; stopWebAgentHelloRetries(); return; }
+    if(data.type==="close"){ closeWebAgent(true); return; }
+    if(data.type==="turn-complete"){ void runRefresh(); return; }
+    if(data.type==="page-updated") reloadAfterAgentUpdate();
+  }
+  function openAsk(event){
+    if(isMobileAsk()) return openWebAgent(event);
+    return openAuthenticatedTarget(event,pageContext ? pageContext.playgroundUrl : OFFICIAL_ORIGIN+"/playground");
   }
   async function generatePoster(){
     const canvas=$("sharePosterCanvas"), img=$("sharePosterImage");
@@ -204,26 +459,33 @@
   }
   function init(opts){
     state=Object.assign({},opts || {}); ensureCopyLinkButton();
-    pageContext=derivePageContext(location.href);
-    const start=$("startUsing"); if(start && pageContext) start.href=pageContext.playgroundUrl;
+    pageContext=derivePageContext(state.pageUrl || location.href);
+    const brand=document.querySelector(".qb-brand");
+    const start=$("startUsing");
+    if(start && pageContext) start.href=pageContext.playgroundUrl;
     if(pageContext) ensureWarehouseFrame();
     const refresh=$("refresh"), share=$("shareBtn"), favorite=$("favoriteBtn");
     if(refresh && !refresh.dataset.qbBound){ refresh.addEventListener("click",runRefresh); refresh.dataset.qbBound="1"; }
     if(share && !share.dataset.qbBound){ share.addEventListener("click",openSharePoster); share.dataset.qbBound="1"; }
     if(favorite && !favorite.dataset.qbBound){ favorite.addEventListener("click",openWarehouse); favorite.dataset.qbBound="1"; }
-    const link=$("copyLink"), copy=$("copyPoster"), down=$("downloadPoster"), close=$("closePoster"), modal=$("sharePosterModal"), warehouseModal=$("researchWarehouseModal");
+    if(brand && !brand.dataset.qbAuthBound){ brand.addEventListener("click",e=>openAuthenticatedTarget(e,OFFICIAL_ORIGIN+"/dashboard?scope=favorited")); brand.dataset.qbAuthBound="1"; }
+    if(start && !start.dataset.qbAuthBound){ start.addEventListener("click",openAsk); start.dataset.qbAuthBound="1"; }
+    const link=$("copyLink"), copy=$("copyPoster"), down=$("downloadPoster"), close=$("closePoster"), modal=$("sharePosterModal"), warehouseModal=$("researchWarehouseModal"), authModal=$("authContinueModal"), webAgentModal=$("webAgentModal");
     if(link && !link.dataset.qbBound){ link.addEventListener("click",copyShareLink); link.dataset.qbBound="1"; }
     if(copy && !copy.dataset.qbBound){ copy.addEventListener("click",copyPosterImage); copy.dataset.qbBound="1"; }
     if(down && !down.dataset.qbBound){ down.addEventListener("click",downloadPosterImage); down.dataset.qbBound="1"; }
     if(close && !close.dataset.qbBound){ close.addEventListener("click",closeSharePoster); close.dataset.qbBound="1"; }
     if(modal && !modal.dataset.qbBound){ modal.addEventListener("click",e=>{ if(e.target===modal) closeSharePoster(); }); modal.dataset.qbBound="1"; }
     if(warehouseModal && !warehouseModal.dataset.qbBound){ warehouseModal.addEventListener("click",e=>{ if(e.target===warehouseModal) closeWarehouse(); }); warehouseModal.dataset.qbBound="1"; }
+    if(authModal && !authModal.dataset.qbBound){ authModal.addEventListener("click",e=>{ if(e.target===authModal) closeAuthContinue(true); }); authModal.dataset.qbBound="1"; }
+    if(webAgentModal && !webAgentModal.dataset.qbBound){ webAgentModal.addEventListener("click",e=>{ if(e.target===webAgentModal) closeWebAgent(true); }); webAgentModal.dataset.qbBound="1"; }
     if(!document.documentElement.dataset.qbShareEsc){
-      document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeSharePoster(); closeWarehouse(); } });
-      window.addEventListener("message",onWarehouseMessage);
+      document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeSharePoster(); closeWarehouse(); closeAuthContinue(true); closeWebAgent(true); } });
+      window.addEventListener("message",e=>{ onWarehouseMessage(e); onAuthMessage(e); onWebAgentMessage(e); });
       document.documentElement.dataset.qbShareEsc="1";
     }
   }
   window.QB_SHARE_SHELL_VERSION=VERSION;
-  window.QBShareShell={init:init, open:openSharePoster, close:closeSharePoster, refresh:runRefresh, setRefreshBusy:setRefreshBusy, derivePageContext:derivePageContext, buildWarehouseHello:buildWarehouseHello, isTrustedWarehouseMessage:isTrustedWarehouseMessage, openWarehouse:openWarehouse, closeWarehouse:closeWarehouse};
+  window.QB_SHARE_SHELL_REVISION=REVISION;
+  window.QBShareShell={init:init, open:openSharePoster, close:closeSharePoster, refresh:runRefresh, setRefreshBusy:setRefreshBusy, normalizeOfficialTarget:normalizeOfficialTarget, derivePageContext:derivePageContext, buildWarehouseHello:buildWarehouseHello, isTrustedWarehouseMessage:isTrustedWarehouseMessage, openWarehouse:openWarehouse, closeWarehouse:closeWarehouse, buildAuthHello:buildAuthHello, isTrustedAuthReadyMessage:isTrustedAuthReadyMessage, isTrustedAuthMessage:isTrustedAuthMessage, openAuthenticatedTarget:openAuthenticatedTarget, closeAuthContinue:closeAuthContinue, buildWebAgentHello:buildWebAgentHello, isTrustedWebAgentMessage:isTrustedWebAgentMessage, isMobileAsk:isMobileAsk, openWebAgent:openWebAgent, closeWebAgent:closeWebAgent};
 })();

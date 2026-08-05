@@ -12,11 +12,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import common as C
 import fork_runtime_contract as FRC
 import reply_data_evidence as RDE
 
 QBV_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FORMULA_BEGIN_DATE = 20150101
+MAX_PACKAGE_FORMULAS = 100
+MAX_VALIDATION_BATCH_FORMULAS = 20
 
 
 def _read_params(argv):
@@ -127,6 +130,100 @@ def _begin_date(value, label):
     return normalized
 
 
+def _formula_validation_batches(formulas, requested_force_reusable=None):
+    """Split one package contract into QBS-safe batches without changing package boundaries."""
+    requested = {
+        str(value).strip() for value in (requested_force_reusable or [])
+        if str(value or "").strip()
+    }
+    chunks = [
+        list(formulas[start:start + MAX_VALIDATION_BATCH_FORMULAS])
+        for start in range(0, len(formulas), MAX_VALIDATION_BATCH_FORMULAS)
+    ]
+    batches = []
+    for index, chunk in enumerate(chunks):
+        outputs = FRC.formula_outputs(chunk)
+        force_reusable = []
+        if index < len(chunks) - 1:
+            force_reusable.extend(outputs)
+        force_reusable.extend(output for output in outputs if output in requested)
+        batches.append({
+            "formulas": chunk,
+            "force_reusable_array": list(dict.fromkeys(force_reusable)),
+        })
+    return batches
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_completed_formula_receipt(path, task_id):
+    receipt = json.loads(Path(path).read_text(encoding="utf-8"))
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("version") != "qb_validation_receipt_v1"
+        or str(receipt.get("task_id") or "") != task_id
+        or receipt.get("status") != "completed"
+        or receipt.get("success") is not True
+        or receipt.get("failures")
+    ):
+        raise ValueError(f"invalid child validation receipt: {path}")
+    return receipt
+
+
+def _write_package_validation_receipt(task_id, item, child_receipt_files):
+    contract = {
+        "formulas": list(item.get("formulas") or []),
+        "reads": list(item.get("reads") or []),
+        "begin_date": item.get("begin_date"),
+    }
+    fingerprint = FRC.contract_fingerprint(contract)
+    child_entries = []
+    outputs = []
+    for raw_path in child_receipt_files:
+        child_path = str(Path(raw_path).resolve())
+        child = _read_completed_formula_receipt(child_path, task_id)
+        child_entries.append({"file": child_path, "sha256": _file_sha256(child_path)})
+        outputs.extend(item for item in child.get("outputs") or [] if isinstance(item, dict))
+    digest_source = json.dumps(outputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = {
+        "version": "qb_validation_receipt_v1",
+        "task_id": task_id,
+        "tool_name": "validate_package_set",
+        "status": "completed",
+        "success": True,
+        "failures": [],
+        "outputs": outputs,
+        "outputs_sha256": hashlib.sha256(digest_source.encode("utf-8")).hexdigest(),
+        "package_name": item.get("name"),
+        "contract_fingerprint": fingerprint,
+        "batch_count": len(child_entries),
+        "batch_receipts": child_entries,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    root = QBV_ROOT / "output" / "formula_validation_receipts"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(f"{task_id}:{item.get('name')}:{fingerprint}".encode("utf-8")).hexdigest()
+    path = root / f"{digest}.json"
+    fd, temp_path = tempfile.mkstemp(prefix=".receipt-", suffix=".json", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    return str(path), fingerprint
+
 def _package_reply_evidence(call_script, env, task_id, user_query, template_ref, packages, results):
     started = time.perf_counter()
     if not RDE.get_policy(template_ref):
@@ -231,8 +328,12 @@ def _validate_package_set(call_script, params, env):
         reads = item.get("reads") if isinstance(item.get("reads"), list) else []
         if not name or name in names:
             return {"code": 1, "error": "INVALID_PACKAGE_NAME", "message": f"packages[{index}].name 缺失或重复"}
-        if not isinstance(formulas, list) or not formulas or len(formulas) > 20 or not all(isinstance(value, str) and value.strip() for value in formulas):
-            return {"code": 1, "error": "INVALID_PACKAGE_FORMULAS", "message": f"packages[{index}].formulas 必须是 1..20 条非空字符串"}
+        if not isinstance(formulas, list) or not formulas or len(formulas) > MAX_PACKAGE_FORMULAS or not all(isinstance(value, str) and value.strip() for value in formulas):
+            return {
+                "code": 1,
+                "error": "INVALID_PACKAGE_FORMULAS",
+                "message": f"packages[{index}].formulas 必须是 1..{MAX_PACKAGE_FORMULAS} 条非空字符串",
+            }
         force_reusable = item.get("force_reusable_array")
         if force_reusable is not None and (
             not isinstance(force_reusable, list)
@@ -247,69 +348,150 @@ def _validate_package_set(call_script, params, env):
         except ValueError as exc:
             return {"code": 1, "error": "INVALID_BEGIN_DATE", "message": str(exc)}
         names.add(name)
+        contract = {"formulas": formulas, "reads": reads, "begin_date": begin_date}
         normalized.append({
             "name": name,
             "formulas": formulas,
             "force_reusable_array": force_reusable,
             "begin_date": begin_date,
             "reads": reads,
+            "contract_fingerprint": FRC.contract_fingerprint(contract),
         })
 
     results = []
     receipts = []
+    total_batch_count = 0
     for item in normalized:
-        batch_params = {
-            "task_id": task_id,
-            "user_query": user_query,
-            "formulas": item["formulas"],
-            "begin_date": item["begin_date"],
-            "output_mode": "summary",
-        }
-        if item["force_reusable_array"] is not None:
-            batch_params["force_reusable_array"] = item["force_reusable_array"]
-        payload, error = _invoke_payload(call_script, "runMultiFormulaBatchStream", batch_params, env)
-        if error:
-            return {**error, "success": False, "task_id": task_id, "failed_package": item["name"], "packages": results}
-        if payload.get("code") not in (0, None) or payload.get("success") is False:
-            return {"code": 1, "error": "PACKAGE_VALIDATION_FAILED", "success": False, "task_id": task_id, "failed_package": item["name"], "result": payload, "packages": results}
-
-        trace_id = str(payload.get("trace_id") or (payload.get("data") or {}).get("trace_id") or "").strip()
-        job_id = str(payload.get("job_id") or (payload.get("data") or {}).get("job_id") or "").strip()
-        if _payload_status(payload) == "deferred" or payload.get("_deferred"):
-            if not trace_id:
-                return {"code": 1, "error": "DEFERRED_CONTINUATION_MISSING", "success": False, "task_id": task_id, "failed_package": item["name"], "packages": results}
-            payload, error = _invoke_payload(call_script, "resumeJob", {
+        validation_outputs = []
+        batch_receipts = []
+        batch_summaries = []
+        trace_ids = []
+        job_ids = []
+        batches = _formula_validation_batches(item["formulas"], item["force_reusable_array"])
+        for batch_index, batch in enumerate(batches):
+            total_batch_count += 1
+            batch_params = {
                 "task_id": task_id,
                 "user_query": user_query,
-                "trace_id": trace_id,
+                "formulas": batch["formulas"],
+                "begin_date": item["begin_date"],
                 "output_mode": "summary",
-            }, env)
-            if error:
-                return {**error, "success": False, "task_id": task_id, "failed_package": item["name"], "packages": results}
-
-        receipt = str(payload.get("validation_receipt_file") or "").strip()
-        if payload.get("code") not in (0, None) or payload.get("success") is False or not receipt:
-            return {
-                "code": 1,
-                "error": "PACKAGE_VALIDATION_INCOMPLETE",
-                "success": False,
-                "task_id": task_id,
-                "failed_package": item["name"],
-                "result": payload,
-                "packages": results,
             }
-        receipts.append(receipt)
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            if batch["force_reusable_array"]:
+                batch_params["force_reusable_array"] = batch["force_reusable_array"]
+            payload, error = _invoke_payload(call_script, "runMultiFormulaBatchStream", batch_params, env)
+            if error:
+                return {
+                    **error,
+                    "success": False,
+                    "task_id": task_id,
+                    "failed_package": item["name"],
+                    "failed_batch_index": batch_index,
+                    "packages": results,
+                }
+            if payload.get("code") not in (0, None) or payload.get("success") is False:
+                return {
+                    "code": 1,
+                    "error": "PACKAGE_VALIDATION_FAILED",
+                    "success": False,
+                    "task_id": task_id,
+                    "failed_package": item["name"],
+                    "failed_batch_index": batch_index,
+                    "result": payload,
+                    "packages": results,
+                }
+
+            trace_id = str(payload.get("trace_id") or (payload.get("data") or {}).get("trace_id") or "").strip()
+            job_id = str(payload.get("job_id") or (payload.get("data") or {}).get("job_id") or "").strip()
+            if trace_id:
+                trace_ids.append(trace_id)
+            if job_id:
+                job_ids.append(job_id)
+            if _payload_status(payload) == "deferred" or payload.get("_deferred"):
+                if not trace_id:
+                    return {
+                        "code": 1,
+                        "error": "DEFERRED_CONTINUATION_MISSING",
+                        "success": False,
+                        "task_id": task_id,
+                        "failed_package": item["name"],
+                        "failed_batch_index": batch_index,
+                        "packages": results,
+                    }
+                payload, error = _invoke_payload(call_script, "resumeJob", {
+                    "task_id": task_id,
+                    "user_query": user_query,
+                    "trace_id": trace_id,
+                    "output_mode": "summary",
+                }, env)
+                if error:
+                    return {
+                        **error,
+                        "success": False,
+                        "task_id": task_id,
+                        "failed_package": item["name"],
+                        "failed_batch_index": batch_index,
+                        "packages": results,
+                    }
+
+            receipt = str(payload.get("validation_receipt_file") or "").strip()
+            if payload.get("code") not in (0, None) or payload.get("success") is False or not receipt:
+                return {
+                    "code": 1,
+                    "error": "PACKAGE_VALIDATION_INCOMPLETE",
+                    "success": False,
+                    "task_id": task_id,
+                    "failed_package": item["name"],
+                    "failed_batch_index": batch_index,
+                    "result": payload,
+                    "packages": results,
+                }
+            batch_receipts.append(receipt)
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            batch_summaries.append(data.get("summary") if isinstance(data.get("summary"), dict) else {})
+            validation_outputs.extend(data.get("results") if isinstance(data.get("results"), list) else [])
+
+        package_receipt = batch_receipts[0]
+        contract_fingerprint = item["contract_fingerprint"]
+        if len(batch_receipts) > 1:
+            try:
+                package_receipt, aggregate_fingerprint = _write_package_validation_receipt(task_id, item, batch_receipts)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return {
+                    "code": 1,
+                    "error": "PACKAGE_VALIDATION_RECEIPT_INVALID",
+                    "success": False,
+                    "task_id": task_id,
+                    "failed_package": item["name"],
+                    "message": str(exc),
+                    "packages": results,
+                }
+            if aggregate_fingerprint != contract_fingerprint:
+                return {
+                    "code": 1,
+                    "error": "PACKAGE_CONTRACT_FINGERPRINT_MISMATCH",
+                    "success": False,
+                    "task_id": task_id,
+                    "failed_package": item["name"],
+                    "packages": results,
+                }
+        receipts.append(package_receipt)
         results.append({
             "name": item["name"],
-            "status": _payload_status(payload) or "completed",
+            "status": "completed",
             "formula_count": len(item["formulas"]),
             "begin_date": item["begin_date"],
-            "trace_id": trace_id or None,
-            "job_id": job_id or None,
-            "validation_receipt_file": receipt,
-            "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
-            "validation_outputs": data.get("results") if isinstance(data.get("results"), list) else [],
+            "batch_count": len(batches),
+            "trace_id": trace_ids[0] if len(trace_ids) == 1 else None,
+            "job_id": job_ids[0] if len(job_ids) == 1 else None,
+            "trace_ids": trace_ids,
+            "job_ids": job_ids,
+            "contract_fingerprint": contract_fingerprint,
+            "validation_receipt_file": package_receipt,
+            "batch_validation_receipt_files": batch_receipts,
+            "summary": batch_summaries[-1] if batch_summaries else {},
+            "batch_summaries": batch_summaries,
+            "validation_outputs": validation_outputs,
         })
     evidence_stats, evidence_warnings = _package_reply_evidence(
         call_script, env, task_id, user_query, str(params.get("template_ref") or ""), normalized, results
@@ -319,14 +501,12 @@ def _validate_package_set(call_script, params, env):
         "success": True,
         "task_id": task_id,
         "package_count": len(results),
-        "batch_count": len(results),
+        "batch_count": total_batch_count,
         "validation_receipt_files": receipts,
         "packages": results,
         "reply_evidence_stats": evidence_stats,
         "reply_evidence_warnings": evidence_warnings,
     }
-
-
 
 _DATA_ERROR_CODES = {
     "ASSET_NOT_FOUND",
@@ -343,7 +523,9 @@ _DATA_ERROR_CODES = {
 
 
 def _normalized_token(value):
-    return re.sub(r"[^0-9A-Z]+", "", str(value or "").upper())
+    # 必须保留 CJK：只留 [0-9A-Z] 会把「特斯拉」「贵州茅台」这类中文资产名归一成空串，
+    # 于是 _asset_matches 永远返回 False，所有中文名资产都被误判成 TARGET_ASSET_MISSING。
+    return re.sub(r"[^0-9A-Z\u3400-\u4dbf\u4e00-\u9fff]+", "", str(value or "").upper())
 
 
 def _is_meaningful_value(value):
@@ -509,14 +691,17 @@ def _evaluate_fast_query_result(asset, required_fields, optional_fields, result)
     if result.get("code") not in (0, None) or result.get("success") is False:
         error_class, error_code = _classify_route_error(result)
         return {"success": False, "error_class": error_class, "error_code": error_code, "missing_fields": required_fields, "warnings": []}
-    asset_errors = _matching_error_entries(result.get("asset_errors"), asset)
+    # fastQuery 的业务字段包在 {code, data:{...}} 信封里（与上面 stock_profile 评估器同款解包）；
+    # 不解包就永远读不到 results，任何资产都会被误判成 TARGET_ASSET_MISSING。
+    body = result.get("data") if isinstance(result.get("data"), dict) else result
+    asset_errors = _matching_error_entries(body.get("asset_errors"), asset)
     if asset_errors:
         error_class, error_code = _classify_route_error(asset_errors[0])
         return {"success": False, "error_class": error_class, "error_code": error_code or "ASSET_ERROR", "missing_fields": required_fields, "warnings": []}
-    row = _fast_query_target(result.get("results"), asset)
+    row = _fast_query_target(body.get("results"), asset)
     if row is None:
         return {"success": False, "error_class": "data", "error_code": "TARGET_ASSET_MISSING", "missing_fields": required_fields, "warnings": []}
-    field_errors = _field_error_names(result.get("field_errors"))
+    field_errors = _field_error_names(body.get("field_errors"))
     required_error_fields = [field for field in required_fields if field in field_errors]
     missing = [field for field in required_fields if field in required_error_fields or not _is_meaningful_value(row.get(field))]
     warnings = []
@@ -647,7 +832,9 @@ def _resolve_asset_data(call_script, params, env):
             "assets": [asset],
             "fields": fields,
             "query_type": role,
-            "result_mode": "inline",
+            # fastQuery 只接受 value/series；传 inline 会被 layer-1 判成 INVALID_RESULT_MODE，
+            # 使每个资产实时页探测都退化为 system 级 blocked，static 回退与 live 发布双双走不通。
+            "result_mode": "value",
         }
         result, error = _invoke_payload(call_script, "fast_query", query_payload, env)
         evaluation = _evaluate_fast_query_result(asset, required_by_role[role], optional_fields, error or result)
@@ -656,7 +843,7 @@ def _resolve_asset_data(call_script, params, env):
         if evaluation.get("success"):
             successful_required.add(role)
             attempts.append({"role": role, "route": route_name, "status": "success", "covered_fields": evaluation.get("covered_fields") or []})
-            contract_payload = {"assets": [asset], "fields": fields, "query_type": role, "result_mode": "inline"}
+            contract_payload = {"assets": [asset], "fields": fields, "query_type": role, "result_mode": "value"}
             contract = {"kind": "fast_query", "payload": contract_payload}
             fingerprint = FRC.contract_fingerprint(contract)
             receipt = _grant_validation_receipt(task_id, role, "fast_query", fingerprint)
@@ -870,6 +1057,11 @@ def main():
     if not session_key:
         print(json.dumps({"code": 1, "error": "INVALID_TASK_ID"}, ensure_ascii=False))
         return 1
+    context_params = {"task_id": task_id, "user_query": user_query}
+    if "agent_model" in params:
+        context_params["agent_model"] = params.get("agent_model")
+    agent_model = C.configure_trace_context(context_params).get("agent_model")
+
     env = dict(os.environ)
     env["QBS_SESSION_KEY"] = session_key
     env.setdefault("PYTHONUTF8", "1")
@@ -880,12 +1072,15 @@ def main():
     _forward_api_key(env)
 
     if not _session_ready(_session_path(qbs_root, session_key), task_id):
-        bootstrap = _invoke(call_script, "newSession", {
+        bootstrap_params = {
             "task_mode": "inherit",
             "task_id": task_id,
             "task_source": "quant-buddy-view",
             "user_query": user_query,
-        }, env)
+        }
+        if agent_model:
+            bootstrap_params["agent_model"] = agent_model
+        bootstrap = _invoke(call_script, "newSession", bootstrap_params, env)
         if bootstrap.returncode != 0:
             sys.stdout.buffer.write(bootstrap.stdout)
             sys.stderr.buffer.write(bootstrap.stderr)

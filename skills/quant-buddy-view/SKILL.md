@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.31
+version: 0.6.35
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
@@ -12,7 +12,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.31
+  version: 0.6.35
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -48,6 +48,10 @@ requiredEnvVars:
     required: false
     sensitive: true
     description: 可选。仅在 config.json / config.local.json 都没有 api_key、且没有更高优先级的 api_key/QBV_API_KEY 覆盖时才兜底生效，不是常规覆盖手段。多步任务里想让某次调用用别的 key，请用 api_key 参数或 QBV_API_KEY，不要指望设置这个环境变量会覆盖 config.json 已有的默认 key。
+  - name: QBV_AGENT_MODEL
+    required: false
+    sensitive: false
+    description: 可选。宿主明确知道当前 Agent 的真实运行模型时可注入；优先级低于调用参数里的 agent_model、高于 task-scoped Trace Context。拿不准时留空，禁止猜测，也不得为了补该字段询问用户或阻断活页流程。
 networkAccess: true
 networkEndpoints:
   - https://www.quantbuddy.cn/skill
@@ -81,8 +85,10 @@ runtimeRequirements:
 
 ```bash
 # 身份走环境变量（exec 日志里会脱敏）；不要把 key 拼进命令串，命令是原样记录的
-QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_query":"用户原始问题"}'
+QBV_API_KEY=<本次任务的 key> python scripts/trace_context.py begin '{"user_query":"用户原始问题","agent_model":"当前真实运行模型（明确知道时才传）"}'
 ```
+
+`agent_model` 是纯可选审计字段：明确知道当前 Agent 的真实运行模型时建议传入；不确定时直接省略，禁止猜测，也不要询问用户。宿主也可通过可选环境变量 `QBV_AGENT_MODEL` 注入。模型名按“显式参数 → `QBV_AGENT_MODEL` → 当前 `task_id` 的任务临时上下文 → 空”解析；缺失、纯空白或上下文读写失败都不得中断任务，非空值会通过 `x-agent-model` 自动贯穿后续命令与 QBS bridge。
 
 保存返回的 `task_id`，并把它加入本次任务后续每个 `static_page.py`、`formula_package.py`、`data_grant.py` 参数。脚本会通过 `x-task-id` 请求头透传，使后台能从提问一直聚合到最终活页链接。`new_asset_page` / `templates` / `upload` / `update` / `publish_final` / `publish_verified` 缺少 Trace Context 时必须停止执行。QBV 编排中的 quant-buddy-skill 工具统一通过 `scripts/qbs_bridge.py <tool> @params.json` 调用，并显式传同一 `task_id + user_query`；bridge 会用 task-scoped session 继承 task_id，禁止生成第二个 session id。
 
@@ -134,7 +140,7 @@ python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵
   （`chart_edit.py inspect` 判定，多为本次改动之前生成的老页面）或改动本质上要求整页重算/换版式，才落回
   下面的整页重建。
 - **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL；正式 update 应传具体 `change_note`，版式变化显式传 `change_aspect:"layout"`，其它类型可让服务端推断。
-- **用户可见链接策略**：普通渠道 direct 在 `templates` 命中后、下一次工具调用前发现成 URL，fork/unmatched 在 `new_page` 返回后立即发首链；`feishu-group` 看到 `delivery_policy.emit_intermediate_url=false` 后禁止发送任何非终态 URL，只在 validator 通过后发送 terminal contract 的 playground `public_url`。进度页仍用 `update_progress` 和 `publish_final` 更新同一 `page_id`。
+- **用户可见链接策略**：普通渠道 direct 在 `templates` 命中后、下一次工具调用前发现成 URL，fork/unmatched 在 `new_page` 返回后立即发首链；`feishu-group` 看到 `delivery_policy.emit_intermediate_url=false` 后禁止发送任何非终态 URL，只在 validator 通过后发送 terminal contract 的 playground `public_url`。进度页仍用 `update_progress` 和 `publish_final` 更新同一 `page_id`；未显式传 `change_note` 时，版本修改描述按“状态 + 中文阶段标题 + 用户可见 message”自动生成，正式发布版本默认记录“完成发布：正式活页内容已发布”。
 - **Agent 回复模板**：活页 metadata 可带 `agent_reply_template` 指向本技能 `reply-templates/` 下的回复骨架。`reply-templates/` 是 Agent 最终回复格式，不是活页 HTML 页面模板；不要和在线 `templates` / `template` API 混用。
 - 本 skill 不再内置本地页面样板，不能从本地历史样板目录或低质 HTML 骨架起步。
 

@@ -67,14 +67,16 @@ new_asset_page 参数：asset 必填（A 股名称或代码）；user_query / tt
 new_page 参数：title / message / current_step / page_status / steps / required_input 可选；正式 task 还必须在 templates(recommend="all") 后由 Agent 传 routing_decision：
     fork 用 {mode:"fork",source_template_id,reason_code}；unmatched 用 {mode:"unmatched",closest_template_id,reason_code,reason}。
     脚本核验候选属于本 task 并记录决定；默认接入公共 share shell，上传一个不自刷新的 iframe 活页进度页，并返回 page_id / url / progress。
-update_progress 参数：page_id 必填；title / message / current_step / page_status / steps / required_input 可选；
+update_progress 参数：page_id 必填；title / message / current_step / page_status / steps / required_input / change_note 可选；
     只 update 同一个 URL 的 HTML 内容；仅传 current_step 时会自动推导前序完成、当前进行中、后序待开始。
+    change_note 不传时按状态、中文阶段标题和用户可见 message 自动生成，最长 200 字；显式传入时优先。
     必须等用户决定时用 page_status=waiting_input + required_input{id,prompt,options?,resume_step}；
     用户回复后复用同一 task_id/page_id，以 page_status=running 恢复。
     message 是用户可见文案，避免 HTML / 公式包 / 本地浏览器验收 / page_id 等工程词。
     不在页面里写自动刷新、跳转或 parent 通信。
 publish_final 参数：同 update；推荐用于首链进度页的最终正式发布。
     会先把进度页推进到 final_publish；若正式 update 失败，会自动把同一 page_id 更新为 failed 进度页。
+    正式版本未传 change_note 时默认记录“完成发布：正式活页内容已发布”；进度快照另行自动生成阶段描述。
     会在任何网络写入前复核 new_page 的 routing_decision；已选 fork 却没有 fork_prepare binding 时返回 ROUTING_RECONFIRM_REQUIRED。
     确认模板确有实质能力缺口时可传 routing_override:{from_mode:"fork",to_mode:"unmatched",reason_code,reason} 显式改判；已完成 fork_prepare 后不允许改判。
     复用在线模板时传 source_template_id + fork_manifest_file；前者继承回复骨架，后者证明来源 HTML 已下载并声明 fork 门禁；page_context 必须按最终用户活页重新生成。
@@ -141,6 +143,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -151,6 +154,7 @@ import urllib.parse as _up
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 
 import compile_bespoke_page as CB
 import card_runtime_retrofit as CRT
@@ -159,6 +163,7 @@ import fork_runtime_contract as FRC
 import progress_page as PP
 import reply_data_evidence as RDE
 import reply_template_registry as RTR
+import share_shell_contract as SSC
 
 _PATH = {
     "upload":    "/skill/uploadStaticPage",
@@ -185,8 +190,10 @@ _DEFAULT_TIMEOUT = 60
 _MAX_HTML_BYTES = 2 * 1024 * 1024
 _MAX_PAGE_IMAGE_BYTES = 5 * 1024 * 1024
 _SHARE_POSTER_VERSION = "snapshot-tall-v1"
-_SHARE_SHELL_VERSION = "research-warehouse-v1"
-_SHARE_SHELL_MARKERS = ("CSS", "HEADER", "RESEARCH_WAREHOUSE", "FOOTER", "MODAL", "JS")
+_SHARE_SHELL_CONTRACT = SSC.load_contract()
+_SHARE_SHELL_VERSION = _SHARE_SHELL_CONTRACT["version"]
+_SHARE_SHELL_REVISION = _SHARE_SHELL_CONTRACT["revision"]
+_SHARE_SHELL_MARKERS = tuple(SSC.MARKERS)
 _FORK_MANIFEST_VERSION_V1 = "fork_manifest_v1"
 _FORK_MANIFEST_VERSION = FRC.MANIFEST_VERSION
 _SUPPORTED_FORK_MANIFEST_VERSIONS = {
@@ -997,6 +1004,13 @@ def _current_share_shell_fragments():
     }
 
 
+def _share_shell_artifact_hash_or_empty(html):
+    try:
+        return SSC.share_shell_artifact_hash(html)
+    except ValueError:
+        return ""
+
+
 def _refresh_share_shell_markers(html):
     fragments = _current_share_shell_fragments()
     for name in _SHARE_SHELL_MARKERS:
@@ -1020,6 +1034,7 @@ def _share_runtime_is_current(html):
     return (
         "QB_SHARE_POSTER_VERSION" in html and _SHARE_POSTER_VERSION in html
         and "QB_SHARE_SHELL_VERSION" in html and _SHARE_SHELL_VERSION in html
+        and "QB_SHARE_SHELL_REVISION" in html and f"REVISION = {_SHARE_SHELL_REVISION}" in html
     )
 
 
@@ -1361,6 +1376,8 @@ def _ensure_share_shell(html, params):
         "footer": True,
         "refreshed": refresh_share_shell,
         "version": _SHARE_SHELL_VERSION if refresh_share_shell or not had_shared_shell else None,
+        "revision": _SHARE_SHELL_REVISION if refresh_share_shell or not had_shared_shell else None,
+        "artifact_hash": _share_shell_artifact_hash_or_empty(html),
     }
 
 
@@ -1467,66 +1484,27 @@ def _iter_braced_blocks(text):
 
 
 def _extract_package_credentials(html):
-    pkg_re = re.compile(r'(?:["\']?(?:package_id|packageId)["\']?)\s*:\s*["\']([^"\']+)["\']')
-    sig_re = re.compile(r'(?:["\']?signature["\']?)\s*:\s*["\']([^"\']+)["\']')
-    short_pkg_re = re.compile(r'(?:["\']?id["\']?)\s*:\s*["\'](pkg_[^"\']+)["\']')
-    short_sig_re = re.compile(r'(?:["\']?sig["\']?)\s*:\s*["\']([^"\']+)["\']')
-    pairs = []
-    seen = set()
-    for block in _iter_braced_blocks(html):
-        long_packages = set(pkg_re.findall(block))
-        long_signatures = set(sig_re.findall(block))
-        short_packages = set(short_pkg_re.findall(block))
-        short_signatures = set(short_sig_re.findall(block))
-        candidates = []
-        if len(long_packages) == 1 and len(long_signatures) == 1:
-            candidates.append((next(iter(long_packages)), next(iter(long_signatures))))
-        if len(short_packages) == 1 and len(short_signatures) == 1:
-            candidates.append((next(iter(short_packages)), next(iter(short_signatures))))
-        for key in candidates:
-            if key not in seen:
-                seen.add(key)
-                pairs.append({"package_id": key[0], "signature": key[1]})
-    return pairs
+    return [
+        {"package_id": item["credential_id"], "signature": item["signature"]}
+        for item in FRC.discover_credential_pairs(html, reject_ambiguous=False)
+        if item.get("kind") == "package"
+    ]
 
 
 def _extract_grant_credentials(html):
-    grant_re = re.compile(r'(?:["\']?(?:grant_id|grantId)["\']?)\s*:\s*["\']([^"\']+)["\']')
-    sig_re = re.compile(r'(?:["\']?signature["\']?)\s*:\s*["\']([^"\']+)["\']')
-    short_grant_re = re.compile(r'(?:["\']?id["\']?)\s*:\s*["\']((?:dg|grant)_[^"\']+)["\']')
-    short_sig_re = re.compile(r'(?:["\']?sig["\']?)\s*:\s*["\']([^"\']+)["\']')
-    pairs = []
-    seen = set()
-    for match in grant_re.finditer(html or ""):
-        grant_id = match.group(1)
-        window = html[max(0, match.start() - 500): min(len(html), match.end() + 1500)]
-        sig_match = sig_re.search(window)
-        signature = sig_match.group(1) if sig_match else ""
-        key = (grant_id, signature)
-        if key not in seen:
-            seen.add(key)
-            pairs.append({"grant_id": grant_id, "signature": signature})
-    for obj_match in re.finditer(r"\{[^{}]{0,4000}\}", html or "", flags=re.S):
-        block = obj_match.group(0)
-        grant_match = short_grant_re.search(block)
-        sig_match = short_sig_re.search(block)
-        if not (grant_match and sig_match):
-            continue
-        key = (grant_match.group(1), sig_match.group(1))
-        if key not in seen:
-            seen.add(key)
-            pairs.append({"grant_id": key[0], "signature": key[1]})
-    return pairs
+    return [
+        {"grant_id": item["credential_id"], "signature": item["signature"]}
+        for item in FRC.discover_credential_pairs(html, reject_ambiguous=False)
+        if item.get("kind") == "grant"
+    ]
 
 
 def _signature_hashes(html):
-    signature_re = re.compile(r'(?:["\']?signature["\']?)\s*:\s*["\']([^"\']+)["\']')
     return sorted({
-        hashlib.sha256(match.group(1).encode("utf-8")).hexdigest()
-        for match in signature_re.finditer(html or "")
-        if match.group(1)
+        hashlib.sha256(item["signature"].encode("utf-8")).hexdigest()
+        for item in FRC.discover_credential_pairs(html, reject_ambiguous=False)
+        if item.get("signature")
     })
-
 
 def _unique_strings(values):
     if values is None:
@@ -2263,6 +2241,36 @@ def _progress_state_and_html(params):
     return state, PP.render_progress_html(render_params)
 
 
+_PROGRESS_CHANGE_NOTE_PREFIXES = {
+    "running": "进度更新",
+    "waiting_input": "等待输入",
+    "done": "进度完成",
+    "failed": "进度失败",
+}
+
+
+def _progress_change_note(state):
+    state = state if isinstance(state, dict) else {}
+    page_status = str(state.get("page_status") or "running").strip().lower()
+    current_step = str(state.get("current_step") or "").strip()
+    step_title = str(state.get("current_step_title") or current_step or "活页生成").strip()
+    message = str(state.get("message") or "").strip()
+
+    if current_step == "final_publish":
+        prefix = {
+            "running": "开始发布",
+            "done": "完成发布",
+            "failed": "发布失败",
+        }.get(page_status, _PROGRESS_CHANGE_NOTE_PREFIXES.get(page_status, "进度更新"))
+    else:
+        prefix = _PROGRESS_CHANGE_NOTE_PREFIXES.get(page_status, "进度更新")
+
+    note = f"{prefix}：{step_title}" if step_title else prefix
+    if message and message != step_title:
+        note += f"｜{message}"
+    return note[:200]
+
+
 def _validate_progress_params(params):
     if str((params or {}).get("page_status") or "running").strip().lower() != "waiting_input":
         return None
@@ -2314,7 +2322,7 @@ def _normalized_evidence_path(value):
 
 
 def _valid_formula_receipt(receipt, task_id):
-    return (
+    base_valid = (
         isinstance(receipt, dict)
         and receipt.get("version") == _VALIDATION_RECEIPT_VERSION
         and str(receipt.get("task_id") or "") == task_id
@@ -2322,7 +2330,48 @@ def _valid_formula_receipt(receipt, task_id):
         and receipt.get("success") is True
         and not receipt.get("failures")
     )
+    if not base_valid or "batch_receipts" not in receipt:
+        return base_valid
 
+    entries = receipt.get("batch_receipts")
+    if (
+        receipt.get("tool_name") != "validate_package_set"
+        or not str(receipt.get("contract_fingerprint") or "").strip()
+        or not isinstance(entries, list)
+        or not entries
+        or receipt.get("batch_count") != len(entries)
+    ):
+        return False
+
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        raw_path = str(entry.get("file") or "").strip()
+        expected_sha256 = str(entry.get("sha256") or "").strip().lower()
+        if not raw_path or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            return False
+        path_key = _normalized_evidence_path(raw_path)
+        if path_key in seen:
+            return False
+        seen.add(path_key)
+        child, error = _read_evidence_receipt(raw_path, "formula batch receipt")
+        if error or "batch_receipts" in child or not _valid_formula_receipt(child, task_id):
+            return False
+        try:
+            digest = hashlib.sha256(Path(_fork_path(raw_path)).read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if not secrets.compare_digest(digest, expected_sha256):
+            return False
+
+    outputs = receipt.get("outputs")
+    expected_outputs_sha256 = str(receipt.get("outputs_sha256") or "").strip().lower()
+    if not isinstance(outputs, list) or not re.fullmatch(r"[0-9a-f]{64}", expected_outputs_sha256):
+        return False
+    digest_source = json.dumps(outputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    actual_outputs_sha256 = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
+    return secrets.compare_digest(actual_outputs_sha256, expected_outputs_sha256)
 
 def _valid_grant_receipt(receipt, task_id):
     return (
@@ -2508,7 +2557,7 @@ def _validate_progress_evidence(params):
     return None
 
 
-def _progress_publish_payload(params, html, *, require_page_id=False):
+def _progress_publish_payload(params, html, *, require_page_id=False, state=None):
     payload = {"html": html}
     if require_page_id:
         payload["page_id"] = params.get("page_id")
@@ -2542,6 +2591,8 @@ def _progress_publish_payload(params, html, *, require_page_id=False):
         payload["description"] = params["description"]
     elif not require_page_id:
         payload["description"] = "活页生成进度，最终内容会在同一个链接显示。"
+    if require_page_id and params.get("change_note") is None:
+        payload["change_note"] = _progress_change_note(state or PP.build_state(params))
     return payload
 
 
@@ -2996,7 +3047,7 @@ def cmd_new_page(params):
     if validation_error:
         return validation_error
     state, html = _progress_state_and_html(params)
-    payload = _progress_publish_payload(params, html, require_page_id=False)
+    payload = _progress_publish_payload(params, html, require_page_id=False, state=state)
     out = cmd_upload(payload)
     if not (isinstance(out, dict) and out.get("code") == 0):
         return out
@@ -3021,7 +3072,7 @@ def cmd_update_progress(params):
     if evidence_error:
         return evidence_error
     state, html = _progress_state_and_html(params)
-    payload = _progress_publish_payload(params, html, require_page_id=True)
+    payload = _progress_publish_payload(params, html, require_page_id=True, state=state)
     out = cmd_update(payload)
     return _attach_progress_result(out, state, params)
 
@@ -3033,7 +3084,22 @@ def _publish_final_progress_params(params, *, page_status, message):
         "page_status": page_status,
         "message": message,
     }
-    for key in ("title", "theme", "steps", "ensure_share_shell", "page_context", "agent_reply_template", "task_id", "validation_receipt_files", "validation_not_required_reason"):
+    for key in (
+        "title",
+        "theme",
+        "steps",
+        "ensure_share_shell",
+        "page_context",
+        "agent_reply_template",
+        "task_id",
+        "live_data_mode",
+        "market_data_required",
+        "asset",
+        "route_receipt_file",
+        "validation_receipt_files",
+        "grant_validation_receipt_files",
+        "validation_not_required_reason",
+    ):
         if params.get(key) is not None:
             progress_params[key] = params[key]
     return progress_params
@@ -3337,7 +3403,10 @@ def cmd_publish_final(params):
         message=running_message,
     ))
 
-    update_out = cmd_update(params)
+    final_update_params = dict(params)
+    if final_update_params.get("change_note") is None:
+        final_update_params["change_note"] = "完成发布：正式活页内容已发布"
+    update_out = cmd_update(final_update_params)
     if isinstance(update_out, dict) and update_out.get("code") == 0:
         validation_error = _publish_final_validation_error(
             params,
@@ -5158,8 +5227,32 @@ def cmd_fork_prepare(params):
     context = record.get("page_context") if isinstance(record.get("page_context"), dict) else {}
     active_packages = [role for role in runtime["runtime_roles"] if role.get("kind") == "package"]
     active_grants = [role for role in runtime["runtime_roles"] if role.get("kind") == "grant"]
-    source_packages = _unique_strings(list(_unique_strings(record.get("package_ids"))) + runtime["source_package_ids"])
-    source_grants = _unique_strings(list(_unique_strings(record.get("grant_ids"))) + runtime["source_grant_ids"])
+    reduction_reason = str(params.get("credential_count_reduction_reason") or "").strip()
+    # record.get("package_ids"/"grant_ids") 是模板声明的完整凭证清单，可能包含这份来源 HTML
+    # 里根本没嵌入/没发现的凭证（模板元数据残留、或该页面变体没实际用到）。之前这里直接把
+    # 声明的清单和 runtime 实际发现的清单取并集写进 manifest，会掩盖"声明了但没找到"的差异，
+    # 让 agent 误以为凭证都拿到了，直到 publish_workflow 最后一步才因公式数超限报错。
+    undiscovered_packages = [
+        value for value in _unique_strings(record.get("package_ids"))
+        if value not in runtime["source_package_ids"]
+    ]
+    undiscovered_grants = [
+        value for value in _unique_strings(record.get("grant_ids"))
+        if value not in runtime["source_grant_ids"]
+    ]
+    if (undiscovered_packages or undiscovered_grants) and not reduction_reason:
+        return {
+            "code": 1,
+            "error": "SOURCE_PACKAGE_UNDISCOVERED",
+            "message": (
+                "模板声明的公式包/Grant 未在来源 HTML 中找到对应凭证，可能是模板元数据残留或该页面变体未实际使用。"
+                "若确认这些凭证本就不该随本次 fork 携带，请提供 credential_count_reduction_reason 后重试。"
+            ),
+            "undiscovered_package_ids": undiscovered_packages,
+            "undiscovered_grant_ids": undiscovered_grants,
+        }
+    source_packages = list(runtime["source_package_ids"])
+    source_grants = list(runtime["source_grant_ids"])
     source_h2 = [heading for heading in _html_headings(source_html, levels=(2,)) if heading not in ("分享海报",)]
     required_sections = _unique_strings(params.get("required_sections") or source_h2)
     runtime_required_outputs = [
@@ -5182,7 +5275,6 @@ def cmd_fork_prepare(params):
         return {"code": 1, "message": "fork_prepare 的 minimum_target_package_count/minimum_target_grant_count 必须是非负整数"}
     if minimum_target_package_count < 0 or minimum_target_grant_count < 0:
         return {"code": 1, "message": "fork_prepare 的 minimum_target_package_count/minimum_target_grant_count 必须是非负整数"}
-    reduction_reason = str(params.get("credential_count_reduction_reason") or "").strip()
     if (minimum_target_package_count < len(active_packages) or minimum_target_grant_count < len(active_grants)) and not reduction_reason:
         return {"code": 1, "message": "fork_prepare 下调最低凭证数量时必须提供 credential_count_reduction_reason"}
 
