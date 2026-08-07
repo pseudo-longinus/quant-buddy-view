@@ -9,6 +9,14 @@
 
 ---
 
+## [0.6.36] — 2026-08-06
+
+### 多轮追问 Turn 追踪
+
+- `trace_context.py` 新增 `beginTurn`；当前 `turn_id/user_query` 按 `task_id` 持久化，独立 Python 进程可恢复。
+- 公共请求自动发送 `x-turn-id`；`qbs_bridge` 复用同一 Task/Turn，并在追问切换后先同步 QBS `beginTurn`。
+- 同一 Session 的后续用户消息先创建 Turn；更新既有活页继续复用原 `page_id` 与公开 URL。
+
 ## [0.6.35] — 2026-08-05
 
 将活页页头升级为 Share Shell v2 能力契约：统一 Logo 鉴权后进入个人中心投研仓、投研仓收藏、移动端 75dvh“问一问” Web Agent、桌面端 Playground 跳转及 Agent 回答后的刷新/重载协议。新增 `assets/share-shell/contract.json`、revision 注入和六 Marker 标准化 SHA-256 工具；显式 `refresh_share_shell:true` 仍只替换 Share Shell 区块并保留正文、Data Kernel、实时取数与 Card Runtime。以后页头视觉或交互调整必须提升 revision、更新能力契约并通过刷新与通信回归测试。

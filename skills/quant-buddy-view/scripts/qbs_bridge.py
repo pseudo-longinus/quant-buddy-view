@@ -63,11 +63,16 @@ def _session_path(qbs_root, session_key):
     return qbs_root / "output" / f".session.{session_key}.json"
 
 
-def _session_ready(path, task_id):
+def _read_session(path):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
-        return False
+        return {}
+
+
+def _session_ready(path, task_id):
+    data = _read_session(path)
     return data.get("task_id") == task_id and data.get("task_id_locked") is True
 
 
@@ -1041,9 +1046,13 @@ def main():
         return 1
 
     task_id = str(params.get("task_id") or "").strip()
-    user_query = str(params.get("user_query") or "").strip()
-    if not task_id or not user_query:
-        missing = [key for key, value in (("task_id", task_id), ("user_query", user_query)) if not value]
+    context_params = dict(params)
+    context = C.configure_trace_context(context_params)
+    task_id = str(context.get("task_id") or task_id).strip()
+    turn_id = str(context.get("turn_id") or "").strip()
+    user_query = str(context.get("user_query") or "").strip()
+    if not task_id or not turn_id or not user_query:
+        missing = [key for key, value in (("task_id", task_id), ("turn_id", turn_id), ("user_query", user_query)) if not value]
         print(json.dumps({"code": 1, "error": "QBV_TRACE_CONTEXT_REQUIRED", "missing": missing}, ensure_ascii=False))
         return 1
 
@@ -1057,10 +1066,7 @@ def main():
     if not session_key:
         print(json.dumps({"code": 1, "error": "INVALID_TASK_ID"}, ensure_ascii=False))
         return 1
-    context_params = {"task_id": task_id, "user_query": user_query}
-    if "agent_model" in params:
-        context_params["agent_model"] = params.get("agent_model")
-    agent_model = C.configure_trace_context(context_params).get("agent_model")
+    agent_model = context.get("agent_model")
 
     env = dict(os.environ)
     env["QBS_SESSION_KEY"] = session_key
@@ -1071,11 +1077,13 @@ def main():
     # 桥接层是唯一同时知道两套变量名的地方，翻译责任在这里。
     _forward_api_key(env)
 
+    bootstrapped = False
     if not _session_ready(_session_path(qbs_root, session_key), task_id):
         bootstrap_params = {
             "task_mode": "inherit",
             "task_id": task_id,
             "task_source": "quant-buddy-view",
+            "turn_id": turn_id,
             "user_query": user_query,
         }
         if agent_model:
@@ -1085,8 +1093,24 @@ def main():
             sys.stdout.buffer.write(bootstrap.stdout)
             sys.stderr.buffer.write(bootstrap.stderr)
             return bootstrap.returncode or 1
+        bootstrapped = True
+
+    qbs_session = _read_session(_session_path(qbs_root, session_key))
+    if not bootstrapped and str(qbs_session.get("current_turn_id") or "") != turn_id:
+        sync_params = {
+            "task_id": task_id, "turn_id": turn_id, "user_query": user_query,
+            "parent_turn_id": context.get("previous_turn_id"),
+        }
+        sync_params = {key: value for key, value in sync_params.items() if value}
+        sync = _invoke(call_script, "beginTurn", sync_params, env)
+        if sync.returncode != 0:
+            sys.stdout.buffer.write(sync.stdout)
+            sys.stderr.buffer.write(sync.stderr)
+            return sync.returncode or 1
 
     params["task_id"] = task_id
+    params["turn_id"] = turn_id
+    params["user_query"] = user_query
     if tool_name == "validate_package_set":
         payload = _validate_package_set(call_script, params, env)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
