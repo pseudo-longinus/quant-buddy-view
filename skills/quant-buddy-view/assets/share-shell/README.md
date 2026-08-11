@@ -1,14 +1,14 @@
 # QuantBuddy Share Shell
 
-公共落地页组件，供 `quant-buddy-view` 的 bespoke 主体和 `build_dashboard.py` 标准页在构建期内联使用。它只提供固定页头、页尾、投研仓收藏弹层、分享弹层和运行时行为，不是页面模板；Agent 不应把这里的片段复制成完整页面起点。
+公共落地页组件，供 `quant-buddy-view` 的 bespoke 主体和 `build_dashboard.py` 标准页在构建期内联使用。它只提供官网页头 iframe 宿主、页尾、投研仓收藏弹层、分享弹层和 Parent Bridge 运行时行为，不是页面模板；Agent 不应把这里的片段复制成完整页面起点。
 
 ## 文件
 
 - `contract.json`：当前 Share Shell 的 `version`、`revision` 与必须能力清单，是构建、检测和后台策略同步的源契约。
-- `shell.html`：固定页头、页尾、投研仓/鉴权/Web Agent iframe 与分享海报弹层结构。
-- `shell.css`：暗色品牌外壳、白底 logo、页头按钮、弹层、移动端约束。
+- `shell.html`：官网页头 iframe Host、轻量 fallback、页尾、投研仓/鉴权/Web Agent iframe 与分享海报弹层结构。
+- `shell.css`：页头 Host/fallback、暗色品牌外壳、弹层和移动端约束；完整可见页头视觉在官网 endpoint 中维护。
 - `poster.js`：固定海报页头/页尾、大二维码、canvas 绘制；默认前端截取页面主体作为预览，失败时再程序化降级，宁缺毋滥。
-- `shell.js`：刷新、投研仓与鉴权通信、移动端 Web Agent 底部对话框、桌面端 Playground 跳转、分享弹层、复制链接、复制图片、下载 PNG 行为。
+- `shell.js`：官网页头 Parent Bridge、刷新、投研仓与鉴权通信、移动端 Web Agent 底部对话框、桌面端 Playground 跳转、分享弹层、复制链接、复制图片、下载 PNG 行为。
 
 ## 模板契约
 
@@ -40,11 +40,11 @@ load();
 
 ## 版本与 artifact 契约
 
-- 当前目标为 `share-shell-v2 / revision 2`，必须包含 `research_warehouse`、`brand_warehouse_navigation`、`mobile_web_agent_sheet`、`desktop_playground_navigation`、`agent_page_refresh` 五项能力。
+- 当前目标为 `share-shell-v2 / revision 3`，必须包含 `research_warehouse`、`brand_warehouse_navigation`、`mobile_web_agent_sheet`、`desktop_playground_navigation`、`agent_page_refresh`、`official_header_iframe` 六项能力。
 - 编译后的 HTML 注入 `QB_SHARE_SHELL_VERSION` 和 `QB_SHARE_SHELL_REVISION`，供服务端 fail-closed 检测；未识别版本或 revision 不得标记为 verified。
-- `scripts/share_shell_contract.py` 只提取 `QB_SHELL_CSS/HEADER/RESEARCH_WAREHOUSE/FOOTER/MODAL/JS` 六组 Marker，统一换行和区块首尾空白后计算 SHA-256。当前标准 artifact hash 为 `cc98771282a73ac7b2a8383260cdc6ffa03ea809eb0868e14a1d77c0bd2ecb6b`。
+- `scripts/share_shell_contract.py` 只提取 `QB_SHELL_CSS/HEADER/RESEARCH_WAREHOUSE/FOOTER/MODAL/JS` 六组 Marker，统一换行和区块首尾空白后计算 SHA-256。当前标准 artifact hash 为 `8d3463e9e96b6830958a04820da56f95352e99980cadb2010f0c6722ac507e88`。
 - `refresh_share_shell:true` 只能替换这六组 Marker；正文、Data Kernel、实时数据脚本和 Card Runtime 必须保持不变。
-- 以后任何页头视觉或交互调整都必须提升 `contract.json` 的 revision，并同步更新检测规则、后台目标策略和回归测试；不能靠逐页手工修改维持行为。
+- 完整可见页头由官网 `/embed/live-page-header` 托管：纯视觉与排版调整只更新官网 endpoint，不需要逐页刷新。只有 Parent Bridge、`qb-live-page-header-v1` 通信协议或能力契约变化才提升 `contract.json` revision，并同步检测规则、后台目标策略和回归测试。
 
 ## 海报策略
 

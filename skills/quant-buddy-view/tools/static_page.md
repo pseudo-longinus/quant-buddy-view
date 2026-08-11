@@ -22,7 +22,7 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 
 | 操作 | 方法 + 路径 |
 |------|-------------|
-| 单一 A 股快速页 | `POST /skill/newAssetPage`（脚本命令 `new_asset_page`；asset 必填，task_id 由请求体 / `x-task-id` 透传） |
+| 单一股票快速页 | `POST /skill/newAssetPage`（脚本命令 `new_asset_page`；支持 A 股、港股和美股，asset 必填，task_id 由请求体 / `x-task-id` 透传） |
 | 首链进度页 | 脚本包装：`new_page` 调 `uploadStaticPage`，`update_progress` 调 `updateStaticPage` |
 | 首链最终发布 | 脚本包装：`publish_final` 先调 `update_progress` 进入 `final_publish`，再调 `updateStaticPage` 写正式活页；失败时回写失败进度页 |
 | 分级验收发布 | 脚本包装：`publish_verified` 固定执行 `fork_validate → fork-local 浏览器门禁 → publish_final → public-smoke` |
@@ -43,8 +43,10 @@ python scripts/static_page.py image_list '{"page_id":"page_xxx"}'
 ## 调用方式
 
 ```bash
-# 简单分析一只 A 股并直接返回终态页面；先用 trace_context.py begin 获得 task_id
+# 简单分析一只 A 股、港股或美股并直接返回终态页面；先用 trace_context.py begin 获得 task_id
 python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵州茅台","user_query":"分析贵州茅台"}'
+python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"腾讯控股","user_query":"分析腾讯控股"}'
+python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"苹果公司","user_query":"分析苹果公司"}'
 
 # 首次会话创建活页进度页（返回 page_id + url + steps；普通渠道发送 url，feishu-group 只内部保留）
 python scripts/static_page.py new_page '{"title":"贵州茅台估值质量分析","message":"正在确认活页方案"}'
@@ -113,20 +115,20 @@ python scripts/static_page.py direct_finalize '{"task_id":"task_xxx","page_id":"
 python scripts/static_page.py verify_card_runtime '{"page_ids":["page_xxx","page_yyy"],"require_browser":true}'
 ```
 
-## 单一 A 股快速页（new_asset_page）
+## 单一股票快速页（new_asset_page）
 
-`new_asset_page` 面向“简单分析一只 A 股并给我页面”这类窄场景。先用 `trace_context.py begin` 建立 new session，再调用一次本命令；不查询 templates、不创建进度页、不执行 fork，也不要求 Agent 另跑 quant-buddy-skill 验证或自行注册 Grant。
+`new_asset_page` 面向“简单分析一只 A 股、港股或美股并给我页面”这类窄场景。先用 `trace_context.py begin` 建立 new session，再调用一次本命令；不查询 templates、不创建进度页、不执行 fork，也不要求 Agent 另跑 quant-buddy-skill 验证或自行注册 Grant。
 
 参数：
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `task_id` | ✅ | 本次 Trace task_id；CLI 同时通过 `x-task-id` 透传 |
-| `asset` | ✅ | 单只 A 股名称或代码，如 `贵州茅台` / `600519.SH` |
+| `asset` | ✅ | 单只 A 股、港股或美股名称或代码，如 `贵州茅台` / `600519.SH`、`腾讯控股` / `0700.HK`、`苹果公司` / `AAPL.O` |
 | `user_query` | ❌ | 用户原始问题；省略时复用 Trace Context 中的 user_query |
 | `ttl_days` | ❌ | 页面与固定 Data Grant 有效期 |
 
-适用边界：单一 A 股、简单综合分析/画像/行情估值财务概览、只需返回页面。若用户要求定制栏目或版式、指定额外指标/公式/图表、对比、多标的、指数、港美股、选股或回测，继续走 `templates → direct/fork/unmatched`。
+适用边界：单一 A 股、港股或美股的简单综合分析/画像/行情估值财务概览、只需返回页面。服务端只按 `tkrsInfo.market_id` 区分：`1/2` 为 A 股、`8` 为港股、`18/19` 为美股；其他 market_id 当前不支持，不使用代码格式或刷新字段兜底。金额按标的原币展示，港美股画像或部分字段稀疏时页面只展示可用模块。若用户要求定制栏目或版式、指定额外指标/公式/图表、对比、多标的、指数、期货、选股或回测，继续走 `templates → direct/fork/unmatched`。
 
 服务端固定生成 profile / market_series / financial_report 三份 Data Grant，并按 `(user, task_id, 标准标题)` 幂等。成功输出只保留公开页面字段并附加 `agent_reply_contract.terminal=true`；最终直接返回 contract 的 `public_url`。命令不会输出 HTML、grant_id、signature、package_id 或内部 `_profile`，也不要求生成回复模板正文或运行 `validate_agent_reply.py`。
 
@@ -288,7 +290,7 @@ python scripts/static_page.py autotag '{"html_file":"output/pages/dash.html"}'  
 ## 下载 / 取回 HTML 再编辑（`download`）
 
 把一份**已发布**的页面拉回本地再编辑，然后 `update` 同一个 `page_id` 覆盖。
-取数链路：脚本先调 `getStaticPage` 鉴权拿到公开 `url`，再**直连 OSS** 下载 HTML
+取数链路：脚本先调统一页面详情接口鉴权拿到公开 `download_url`，再**直连 OSS** 下载 HTML
 （OSS 对象 public-read）——字节**不经服务端**，因此不占服务端带宽。下载后会本地算一遍
 `sha256` 与服务端记录比对（`sha256_match`）。
 
@@ -353,7 +355,7 @@ python scripts/static_page.py update   '{"page_id":"page_other","html_file":"out
 官方精选 = 后台打了推荐标签 `recommend:官方精选` 的优质页面。接口沿用 `templates` / `template` 的历史命名，但发现口径已经是纯标签：不再要求 `is_template:true` 或 `template_status:published`。
 本 skill 侧的用法是「照着现成精选页做一份自己的页」。
 
-**1) 浏览**：`templates` 列出范式卡活页（官方精选，可选并入社区）
+**1) 浏览**：`templates` 调用统一 public 列表，一次列出范式卡活页（官方精选 + 社区）
 
 ```bash
 python scripts/static_page.py templates '{"page":1,"page_size":20}'
@@ -367,9 +369,7 @@ python scripts/static_page.py templates '{"include_community":true}'
 python scripts/static_page.py templates '{"recommend":"社区"}'
 ```
 
-不传 `recommend`/`include_community` 时仍限定 `recommend:官方精选`；`recommend:"all"` 或 `include_community:true` 合并官方精选 + 社区，
-`recommend:"社区"` 只看社区。`scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 仍作叠加标签过滤。
-> 说明：社区命中池依赖服务端接受 `recommend=社区` 的列表口径；若后台尚未放开，该项会退回官方精选并被去重，不影响官方精选命中。
+新版 `templates` 始终走统一 `mode=public` 列表，默认 `recommend:"all"`；服务端完成官方精选+社区的合并、去重、排序和分页。`recommend:"社区"` 可只看社区；`scene_tag_id` / `paradigm_tag_id` / `recommend_tag_id` 仍作叠加标签过滤。
 
 `templates` 需要 Trace Context（先 `trace_context.py begin` 拿到 `task_id` 并传入）。0.6.17 起顶层返回结构（不再原样打印完整候选）：
 
@@ -651,8 +651,8 @@ python scripts/static_page.py unpublish_community '{"page_id":"page_xxx"}'
 | code | 场景 |
 |---|---|
 | `NEW_ASSET_PAGE_PARAMS_REQUIRED` | new_asset_page 缺少 asset 或 task_id |
-| `ASSET_NOT_FOUND` / `ASSET_NOT_ASHARE` | new_asset_page 未识别到资产，或目标不是单只 A 股 |
-| `SOURCE_TAG_NOT_FOUND` / `SOURCE_PAGE_NOT_FOUND` | new_asset_page 正式环境未配置合法 `recommend:模板` 来源页 |
+| `ASSET_NOT_FOUND` / `ASSET_MARKET_UNSUPPORTED` | new_asset_page 未识别到资产，或其 `tkrsInfo.market_id` 不是当前允许的 `1/2/8/18/19` |
+| `SOURCE_TAG_NOT_FOUND` / `SOURCE_PAGE_NOT_FOUND` / `SOURCE_PAGE_MARKET_UNSUPPORTED` | new_asset_page 正式环境未配置合法 `recommend:模板` 来源页，或来源页未声明支持目标市场 |
 | `GRANT_REGISTER_FAILED` / `PAGE_UPLOAD_FAILED` | new_asset_page 固定授权注册或页面上传失败 |
 | `HTML_REQUIRED` / `EMPTY` / `NOT_HTML` / `TOO_LARGE` | 内容缺失 / 为空 / 非 HTML / 超 2MB |
 | `PAGE_LIMIT` | 活跃页达上限 |

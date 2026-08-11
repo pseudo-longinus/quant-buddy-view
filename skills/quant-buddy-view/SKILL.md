@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.36
+version: 0.6.37
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
@@ -12,7 +12,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.36
+  version: 0.6.37
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -69,7 +69,7 @@ runtimeRequirements:
 
 0. 在任何后端请求前运行 `scripts/trace_context.py begin`，保存唯一 `task_id` 并在后续命令中复用。这步本身就是后端写入调用，必须和后续命令带同一个身份（`QBV_API_KEY` 环境变量或参数里的 `api_key`），不带会被记成 skill 默认账号。
 1. 若用户只是要**简单分析一只 A 股并返回页面**，且没有定制栏目/版式、额外指标/公式/图表、对比或多标的要求，直接运行一次 `scripts/static_page.py new_asset_page`。成功的 `agent_reply_contract.terminal=true` 即为终态，直接返回其中的公开 URL，不再查 templates，也不另跑 QBS 验证或注册 Grant。
-2. 除上述快速场景外，运行一次 `scripts/static_page.py templates`，传 `recommend:"all"`，查询官方精选+社区命中池。
+2. 除上述快速场景外，运行一次 `scripts/static_page.py templates`，查询统一 public 命中池（服务端一次返回官方精选+社区）。
 3. direct 命中后，普通渠道先把列表返回的现成 URL 发给用户；`feishu-group` 不发链接，直接运行一次 `static_page.py direct_deliver` 完成模板详情、单次取数和终态确认。
 4. fork/unmatched 调用 `new_page` 时由 Agent 根据 `items_summary` 显式传 `routing_decision`，脚本校验并与同一 `page_id` 绑定；普通渠道立即发送首链，`feishu-group` 仅内部持有该链接，验证目标公式后继续注册、替换与 `publish_verified`。
 5. 除 `new_asset_page` 的单链接快速终态外，其余分支按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
@@ -107,7 +107,7 @@ python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵
 
 该命令直接调用服务端固定场景；Agent 不查 `templates`、不建进度页、不跑 QBS 预验证、不自行注册 Grant。成功时只使用 `agent_reply_contract.public_url` 返回页面链接；这是单链接快速终态，不生成七节 Markdown 分析，也不运行 `validate_agent_reply.py`。同一 task/资产重试由服务端幂等返回已有页面。后续若用户要改这张自有页面，继续使用 `update` 保持同一个 `page_id` / URL。
 
-不满足上述窄条件时，**只运行一次 `scripts/static_page.py templates`，参数传 `recommend:"all"`**。它会分别读取官方精选与社区并按 `page_id` 去重；这两次后端 `list_templates` 属于一次范式池查询，不要再手工重复调用。返回值是 `item_count` + 覆盖全部候选的 `items_summary`（不再是原始 items 全量打印），完整候选落盘在 `full_result_file`；正常路由判断只需要读 `items_summary`，不需要也不应该去读 `full_result_file`。
+不满足上述窄条件时，**只运行一次 `scripts/static_page.py templates`**。它调用统一 public 列表，由服务端完成官方精选+社区的去重、排序和分页；不要再手工重复调用。返回值是 `item_count` + 覆盖全部候选的 `items_summary`（不再是原始 items 全量打印），完整候选落盘在 `full_result_file`；正常路由判断只需要读 `items_summary`，不需要也不应该去读 `full_result_file`。
 
 - **① 直接命中**（范式匹配，且标的/股票池/指数/市场范围一致）：
   - `templates` 一旦给出精确命中，普通渠道的**下一条用户可见消息必须立即发送现成 `download_url/public_url`，中间不允许任何工具调用**。推荐文案：`已直接命中现成活页：[标题](URL)。我继续核对实时数据并补充分析。`；若 `agent_reply_hint.delivery_policy.emit_intermediate_url=false`（即 `feishu-group`），禁止发送该 URL，直接继续。
@@ -143,6 +143,7 @@ python scripts/static_page.py new_asset_page '{"task_id":"task_xxx","asset":"贵
   （`chart_edit.py inspect` 判定，多为本次改动之前生成的老页面）或改动本质上要求整页重算/换版式，才落回
   下面的整页重建。
 - **改造已发布/已生成页面**：优先 `scripts/retrofit_share_shell.py`，再 `static_page.py update` 保持同一个 `page_id` / URL；正式 update 应传具体 `change_note`，版式变化显式传 `change_aspect:"layout"`，其它类型可让服务端推断。
+- **Share Shell revision 3 页头边界**：可见页头由官网 `/embed/live-page-header` iframe 托管，活页 Parent Bridge 只执行刷新、收藏、分享、认证导航和移动 WebAgent 动作并校验 `qb-live-page-header-v1`；官网 WebAgent Preview 注入 `qb-live-page-embed-context=webagent-preview` 时不得加载页头或预加载收藏 iframe。官网只改页头视觉不要求逐页刷新；Parent Bridge、通信协议或能力契约变化才提升 revision。
 - **用户可见链接策略**：普通渠道 direct 在 `templates` 命中后、下一次工具调用前发现成 URL，fork/unmatched 在 `new_page` 返回后立即发首链；`feishu-group` 看到 `delivery_policy.emit_intermediate_url=false` 后禁止发送任何非终态 URL，只在 validator 通过后发送 terminal contract 的 playground `public_url`。进度页仍用 `update_progress` 和 `publish_final` 更新同一 `page_id`；未显式传 `change_note` 时，版本修改描述按“状态 + 中文阶段标题 + 用户可见 message”自动生成，正式发布版本默认记录“完成发布：正式活页内容已发布”。
 - **Agent 回复模板**：活页 metadata 可带 `agent_reply_template` 指向本技能 `reply-templates/` 下的回复骨架。`reply-templates/` 是 Agent 最终回复格式，不是活页 HTML 页面模板；不要和在线 `templates` / `template` API 混用。
 - 本 skill 不再内置本地页面样板，不能从本地历史样板目录或低质 HTML 骨架起步。

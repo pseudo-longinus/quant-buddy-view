@@ -1,11 +1,14 @@
 (function(){
   const VERSION = "share-shell-v2";
-  const REVISION = 2;
+  const REVISION = 3;
   const OFFICIAL_ORIGIN = "https://www.quantbuddy.cn";
   const PAGES_ORIGIN = "https://pages.quantbuddy.cn";
   const WAREHOUSE_CHANNEL = "qb-research-warehouse-v1";
   const AUTH_CHANNEL = "qb-auth-continue-v1";
   const WEB_AGENT_CHANNEL = "qb-web-agent-v1";
+  const HEADER_CHANNEL = "qb-live-page-header-v1";
+  const HEADER_PROTOCOL_VERSION = 1;
+  const HEADER_READY_TIMEOUT_MS = 4000;
   const AUTH_HELLO_MAX_ATTEMPTS = 75;
   const $ = id => document.getElementById(id);
   let state={};
@@ -24,11 +27,16 @@
   let webAgentHelloTimer=0;
   let webAgentHelloAttempts=0;
   let pendingWebAgentTrigger=null;
+  let headerReady=false;
+  let headerReadyTimer=0;
+  let favoriteState=false;
+  let refreshBusy=false;
   function callMaybe(v){ return typeof v === "function" ? v() : v; }
   function serviceOrigin(){
     try{
       const candidate=new URL(state.embedOrigin || OFFICIAL_ORIGIN);
-      if(candidate.protocol==="https:" || (candidate.protocol==="http:" && /^(127\.0\.0\.1|localhost)$/.test(candidate.hostname))) return candidate.origin;
+      if(candidate.origin===OFFICIAL_ORIGIN) return OFFICIAL_ORIGIN;
+      if((candidate.protocol==="http:" || candidate.protocol==="https:") && /^(127\.0\.0\.1|localhost)$/.test(candidate.hostname)) return candidate.origin;
     }catch(e){}
     return OFFICIAL_ORIGIN;
   }
@@ -56,11 +64,10 @@
   function setStatus(msg){ const el=$("sharePosterStatus"); if(el) el.textContent=msg; }
   function setBusy(busy){ ["copyPoster","downloadPoster"].forEach(id=>{ const el=$(id); if(el) el.disabled=!!busy; }); }
   function setRefreshBusy(busy,label){
-    const btn=$("refresh");
-    if(!btn) return;
-    const text=btn.querySelector(".action-label") || btn;
-    btn.disabled=!!busy;
-    if(label) text.textContent=label;
+    refreshBusy=!!busy;
+    const btn=$("qbHeaderFallbackRefresh");
+    if(btn){ btn.disabled=refreshBusy; btn.textContent=label || (refreshBusy ? "取数中" : "刷新数据"); }
+    postHeaderState("state");
   }
   async function runRefresh(){
     if(!state.onRefresh) return;
@@ -88,18 +95,112 @@
         playgroundUrl:playgroundUrl,
         embedUrl:embedOrigin+"/embed/research-warehouse?page_id="+encodeURIComponent(pageId),
         authEmbedUrl:embedOrigin+"/embed/auth-continue",
-        webAgentEmbedUrl:embedOrigin+"/embed/web-agent"
+        webAgentEmbedUrl:embedOrigin+"/embed/web-agent",
+        headerEmbedUrl:embedOrigin+"/embed/live-page-header"
       };
     }catch(e){ return null; }
   }
   function setFavoriteState(favorited){
-    const btn=$("favoriteBtn");
-    if(!btn) return;
-    btn.classList.toggle("is-favorited",!!favorited);
-    btn.setAttribute("aria-pressed",favorited ? "true" : "false");
-    const label=btn.querySelector(".action-label");
-    if(label) label.textContent=favorited ? "已收藏" : "收藏";
-    btn.title=favorited ? "管理投研仓收藏" : "收藏到投研仓";
+    favoriteState=!!favorited;
+    const btn=$("qbHeaderFallbackFavorite");
+    if(btn){
+      btn.classList.toggle("is-favorited",favoriteState);
+      btn.setAttribute("aria-pressed",favoriteState ? "true" : "false");
+      btn.textContent=favoriteState ? "已收藏" : "收藏";
+      btn.title=favoriteState ? "管理投研仓收藏" : "收藏到投研仓";
+    }
+    postHeaderState("state");
+  }
+  function isWebAgentPreviewContext(){
+    const meta=typeof document.querySelector==="function" ? document.querySelector('meta[name="qb-live-page-embed-context"]') : null;
+    return !!(meta && meta.getAttribute("content")==="webagent-preview");
+  }
+  function headerHost(){ return typeof document.querySelector==="function" ? document.querySelector("[data-qb-live-page-header-host]") : null; }
+  function headerFrame(){ return $("qbLivePageHeaderFrame"); }
+  function headerParentOrigin(){
+    try{
+      const origin=new URL(location.href).origin;
+      if(origin===PAGES_ORIGIN || (/^https?:$/.test(new URL(origin).protocol) && /^(127\.0\.0\.1|localhost)$/.test(new URL(origin).hostname))) return origin;
+    }catch(e){}
+    return PAGES_ORIGIN;
+  }
+  function buildHeaderMessage(type,extra){
+    if(!pageContext) return null;
+    return Object.assign({channel:HEADER_CHANNEL,version:HEADER_PROTOCOL_VERSION,type:type,page_id:pageContext.pageId},extra || {});
+  }
+  function postHeaderState(type){
+    const frame=headerFrame(), message=buildHeaderMessage(type || "state",{favorited:favoriteState,refresh_busy:refreshBusy});
+    if(!headerReady || !frame || !frame.contentWindow || !message) return false;
+    frame.contentWindow.postMessage(message,serviceOrigin());
+    return true;
+  }
+  function showHeaderFallback(){
+    const host=headerHost(), fallback=typeof document.querySelector==="function" ? document.querySelector("[data-qb-live-page-header-fallback]") : null;
+    if(host) host.classList.add("qb-header-fallback-visible");
+    if(fallback) fallback.setAttribute("aria-hidden","false");
+  }
+  function scheduleHeaderFallback(){
+    if(headerReady || headerReadyTimer) return;
+    headerReadyTimer=window.setTimeout(()=>{ headerReadyTimer=0; if(!headerReady) showHeaderFallback(); },HEADER_READY_TIMEOUT_MS);
+  }
+  function hideHeaderFallback(){
+    const host=headerHost(), fallback=typeof document.querySelector==="function" ? document.querySelector("[data-qb-live-page-header-fallback]") : null;
+    if(host) host.classList.remove("qb-header-fallback-visible");
+    if(fallback) fallback.setAttribute("aria-hidden","true");
+  }
+  function ensureHeaderFrame(){
+    if(isWebAgentPreviewContext()) return null;
+    const frame=headerFrame();
+    if(!frame || !pageContext) return null;
+    if(!frame.dataset.qbHeaderLoadBound){
+      frame.addEventListener("load",()=>{
+        headerReady=false;
+        scheduleHeaderFallback();
+      });
+      frame.dataset.qbHeaderLoadBound="1";
+    }
+    if(!frame.src){
+      const params="?page_id="+encodeURIComponent(pageContext.pageId)+"&page_url="+encodeURIComponent(pageContext.pageUrl)+"&parent_origin="+encodeURIComponent(headerParentOrigin());
+      frame.src=pageContext.headerEmbedUrl+params;
+    }
+    scheduleHeaderFallback();
+    return frame;
+  }
+  function isTrustedHeaderMessage(event,frame,context){
+    const data=event && event.data;
+    return !!(frame && context && event.origin===serviceOrigin() && event.source===frame.contentWindow && data && data.channel===HEADER_CHANNEL && data.version===HEADER_PROTOCOL_VERSION && data.page_id===context.pageId);
+  }
+  function routeHeaderAction(action){
+    if(action==="brand") return openAuthenticatedTarget(null,OFFICIAL_ORIGIN+"/dashboard?scope=favorited");
+    if(action==="refresh") return runRefresh();
+    if(action==="favorite") return openWarehouse();
+    if(action==="share") return openSharePoster();
+    if(action==="ask") return openAsk(null);
+    return false;
+  }
+  function onHeaderMessage(event){
+    const frame=headerFrame();
+    if(!isTrustedHeaderMessage(event,frame,pageContext)) return false;
+    const data=event.data;
+    if(data.type==="ready"){
+      headerReady=true;
+      window.clearTimeout(headerReadyTimer);
+      headerReadyTimer=0;
+      hideHeaderFallback();
+      postHeaderState("init");
+      return true;
+    }
+    if(data.type==="resize"){
+      const height=Number(data.height);
+      if(!Number.isFinite(height) || height<44 || height>120) return false;
+      frame.style.height=Math.round(height)+"px";
+      return true;
+    }
+    if(data.type==="action" && /^(brand|refresh|favorite|share|ask)$/.test(String(data.action || ""))){
+      routeHeaderAction(data.action);
+      return true;
+    }
+    return false;
   }
   function warehouseFrame(){ return $("researchWarehouseFrame"); }
   function buildWarehouseHello(context){
@@ -164,7 +265,7 @@
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden","true");
     document.documentElement.style.overflow="";
-    const btn=$("favoriteBtn"); if(btn) btn.focus();
+    const btn=$("qbHeaderFallbackFavorite") || headerFrame(); if(btn && typeof btn.focus==="function") btn.focus();
   }
   function isTrustedWarehouseMessage(event,frame,context){
     const data=event && event.data;
@@ -460,16 +561,14 @@
   function init(opts){
     state=Object.assign({},opts || {}); ensureCopyLinkButton();
     pageContext=derivePageContext(state.pageUrl || location.href);
-    const brand=document.querySelector(".qb-brand");
-    const start=$("startUsing");
-    if(start && pageContext) start.href=pageContext.playgroundUrl;
-    if(pageContext) ensureWarehouseFrame();
-    const refresh=$("refresh"), share=$("shareBtn"), favorite=$("favoriteBtn");
-    if(refresh && !refresh.dataset.qbBound){ refresh.addEventListener("click",runRefresh); refresh.dataset.qbBound="1"; }
-    if(share && !share.dataset.qbBound){ share.addEventListener("click",openSharePoster); share.dataset.qbBound="1"; }
-    if(favorite && !favorite.dataset.qbBound){ favorite.addEventListener("click",openWarehouse); favorite.dataset.qbBound="1"; }
-    if(brand && !brand.dataset.qbAuthBound){ brand.addEventListener("click",e=>openAuthenticatedTarget(e,OFFICIAL_ORIGIN+"/dashboard?scope=favorited")); brand.dataset.qbAuthBound="1"; }
-    if(start && !start.dataset.qbAuthBound){ start.addEventListener("click",openAsk); start.dataset.qbAuthBound="1"; }
+    const previewContext=isWebAgentPreviewContext();
+    if(pageContext && !previewContext){ ensureHeaderFrame(); ensureWarehouseFrame(); }
+    const fallbackBrand=$("qbHeaderFallbackBrand"), fallbackRefresh=$("qbHeaderFallbackRefresh"), fallbackFavorite=$("qbHeaderFallbackFavorite"), fallbackShare=$("qbHeaderFallbackShare"), fallbackAsk=$("qbHeaderFallbackAsk");
+    if(fallbackBrand && !fallbackBrand.dataset.qbBound){ fallbackBrand.addEventListener("click",()=>routeHeaderAction("brand")); fallbackBrand.dataset.qbBound="1"; }
+    if(fallbackRefresh && !fallbackRefresh.dataset.qbBound){ fallbackRefresh.addEventListener("click",runRefresh); fallbackRefresh.dataset.qbBound="1"; }
+    if(fallbackFavorite && !fallbackFavorite.dataset.qbBound){ fallbackFavorite.addEventListener("click",openWarehouse); fallbackFavorite.dataset.qbBound="1"; }
+    if(fallbackShare && !fallbackShare.dataset.qbBound){ fallbackShare.addEventListener("click",openSharePoster); fallbackShare.dataset.qbBound="1"; }
+    if(fallbackAsk && !fallbackAsk.dataset.qbBound){ fallbackAsk.addEventListener("click",openAsk); fallbackAsk.dataset.qbBound="1"; }
     const link=$("copyLink"), copy=$("copyPoster"), down=$("downloadPoster"), close=$("closePoster"), modal=$("sharePosterModal"), warehouseModal=$("researchWarehouseModal"), authModal=$("authContinueModal"), webAgentModal=$("webAgentModal");
     if(link && !link.dataset.qbBound){ link.addEventListener("click",copyShareLink); link.dataset.qbBound="1"; }
     if(copy && !copy.dataset.qbBound){ copy.addEventListener("click",copyPosterImage); copy.dataset.qbBound="1"; }
@@ -481,11 +580,11 @@
     if(webAgentModal && !webAgentModal.dataset.qbBound){ webAgentModal.addEventListener("click",e=>{ if(e.target===webAgentModal) closeWebAgent(true); }); webAgentModal.dataset.qbBound="1"; }
     if(!document.documentElement.dataset.qbShareEsc){
       document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closeSharePoster(); closeWarehouse(); closeAuthContinue(true); closeWebAgent(true); } });
-      window.addEventListener("message",e=>{ onWarehouseMessage(e); onAuthMessage(e); onWebAgentMessage(e); });
+      window.addEventListener("message",e=>{ onHeaderMessage(e); onWarehouseMessage(e); onAuthMessage(e); onWebAgentMessage(e); });
       document.documentElement.dataset.qbShareEsc="1";
     }
   }
   window.QB_SHARE_SHELL_VERSION=VERSION;
   window.QB_SHARE_SHELL_REVISION=REVISION;
-  window.QBShareShell={init:init, open:openSharePoster, close:closeSharePoster, refresh:runRefresh, setRefreshBusy:setRefreshBusy, normalizeOfficialTarget:normalizeOfficialTarget, derivePageContext:derivePageContext, buildWarehouseHello:buildWarehouseHello, isTrustedWarehouseMessage:isTrustedWarehouseMessage, openWarehouse:openWarehouse, closeWarehouse:closeWarehouse, buildAuthHello:buildAuthHello, isTrustedAuthReadyMessage:isTrustedAuthReadyMessage, isTrustedAuthMessage:isTrustedAuthMessage, openAuthenticatedTarget:openAuthenticatedTarget, closeAuthContinue:closeAuthContinue, buildWebAgentHello:buildWebAgentHello, isTrustedWebAgentMessage:isTrustedWebAgentMessage, isMobileAsk:isMobileAsk, openWebAgent:openWebAgent, closeWebAgent:closeWebAgent};
+  window.QBShareShell={init:init, open:openSharePoster, close:closeSharePoster, refresh:runRefresh, setRefreshBusy:setRefreshBusy, setFavoriteState:setFavoriteState, isWebAgentPreviewContext:isWebAgentPreviewContext, buildHeaderMessage:buildHeaderMessage, isTrustedHeaderMessage:isTrustedHeaderMessage, routeHeaderAction:routeHeaderAction, onHeaderMessage:onHeaderMessage, ensureHeaderFrame:ensureHeaderFrame, normalizeOfficialTarget:normalizeOfficialTarget, derivePageContext:derivePageContext, buildWarehouseHello:buildWarehouseHello, isTrustedWarehouseMessage:isTrustedWarehouseMessage, openWarehouse:openWarehouse, closeWarehouse:closeWarehouse, buildAuthHello:buildAuthHello, isTrustedAuthReadyMessage:isTrustedAuthReadyMessage, isTrustedAuthMessage:isTrustedAuthMessage, openAuthenticatedTarget:openAuthenticatedTarget, closeAuthContinue:closeAuthContinue, buildWebAgentHello:buildWebAgentHello, isTrustedWebAgentMessage:isTrustedWebAgentMessage, isMobileAsk:isMobileAsk, openWebAgent:openWebAgent, closeWebAgent:closeWebAgent};
 })();

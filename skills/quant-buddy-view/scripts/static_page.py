@@ -168,8 +168,8 @@ import share_shell_contract as SSC
 _PATH = {
     "upload":    "/skill/uploadStaticPage",
     "update":    "/skill/updateStaticPage",
-    "download":  "/skill/getStaticPage",
-    "list":      "/skill/listStaticPages",
+    "download":  "/skill/getPageDetail",
+    "list":      "/skill/listPages",
     "revoke":    "/skill/revokeStaticPage",
     "image_upload": "/skill/uploadPageImage",
     "image_list": "/skill/listPageImages",
@@ -177,8 +177,8 @@ _PATH = {
     "autotag":   "/skill/autoTagStaticPage",
     "publish_community":   "/skill/publishStaticPageToCommunity",
     "unpublish_community": "/skill/unpublishStaticPageFromCommunity",
-    "templates": "/skill/listTemplates",
-    "template":  "/skill/getTemplate",
+    "templates": "/skill/listPages",
+    "template":  "/skill/getPageDetail",
     "direct_finalize": "/skill/finalizeDirectPage",
     "new_asset_page": "/skill/newAssetPage",
 }
@@ -2993,7 +2993,7 @@ def cmd_new_asset_page(params):
         return {
             "code": 1,
             "error": "NEW_ASSET_PAGE_PARAMS_REQUIRED",
-            "message": "new_asset_page 需要 asset（要分析的 A 股名称或代码）",
+            "message": "new_asset_page 需要 asset（要分析的 A 股、港股或美股名称或代码）",
         }
 
     trace_context = C.current_trace_context()
@@ -3831,12 +3831,16 @@ def cmd_download(params):
     # 1) 服务端鉴权 → 拿到公开 url + 元信息（不含字节）
     qs_pairs = [(k, params[k]) for k in ("page_id", "url") if params.get(k)]
     meta_url = C.api_url(endpoint, _PATH["download"]) + "?" + _up.urlencode(qs_pairs)
-    meta = C.http_json("GET", meta_url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
-    if not (isinstance(meta, dict) and meta.get("code") == 0 and meta.get("url")):
-        return meta  # 透传服务端错误（FORBIDDEN / PAGE_NOT_FOUND / NOT_ACTIVE 等）
+    raw_meta = C.http_json("GET", meta_url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+    if not (isinstance(raw_meta, dict) and raw_meta.get("code") == 0 and isinstance(raw_meta.get("data"), dict)):
+        return raw_meta
+    meta = raw_meta["data"]
+    download_url = meta.get("download_url") or meta.get("public_url") or meta.get("url")
+    if not download_url:
+        return {"code": 1, "error": "PAGE_DOWNLOAD_URL_REQUIRED", "message": "页面详情未返回下载链接"}
 
     # 2) 客户端直连 OSS 下载 HTML（不经服务端，省带宽）
-    html, err = _fetch_oss(meta["url"])
+    html, err = _fetch_oss(download_url)
     if err:
         return err
 
@@ -3886,12 +3890,7 @@ def cmd_download(params):
 def cmd_list(params):
     cfg = C.load_config_require_key()
     endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
-    qs_pairs = [("page", params.get("page", 1)), ("page_size", params.get("page_size", 20))]
-    # scope=test_all（或 all=1）：仅 is_test 用户生效，列出全部 test 用户页面
-    if params.get("scope"):
-        qs_pairs.append(("scope", params["scope"]))
-    if params.get("all"):
-        qs_pairs.append(("all", params["all"]))
+    qs_pairs = [("mode", "mine"), ("page", params.get("page", 1)), ("page_size", params.get("page_size", 20))]
     url = C.api_url(endpoint, _PATH["list"]) + "?" + _up.urlencode(qs_pairs)
     return _normalize_cover_response(
         C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT),
@@ -4239,7 +4238,7 @@ def cmd_unpublish_community(params):
 
 
 def _templates_query(endpoint, api_key, params, recommend=None):
-    qs_pairs = [("page", params.get("page", 1)), ("page_size", params.get("page_size", 20))]
+    qs_pairs = [("mode", "public"), ("page", params.get("page", 1)), ("page_size", params.get("page_size", 20))]
     # 服务端默认限定 recommend:官方精选；*_tag_id / category / status 只做叠加筛选。
     for k in ("category", "status", "scene_tag_id", "paradigm_tag_id", "recommend_tag_id"):
         if params.get(k):
@@ -4315,7 +4314,8 @@ def _compact_template_item(item):
         "title": item.get("title"),
         "category": item.get("category"),
         "description": description,
-        "download_url": item.get("download_url"),
+        "download_url": item.get("download_url") or item.get("public_url") or item.get("url"),
+        "template_revision": item.get("template_revision"),
         "is_template": item.get("is_template"),
         "template_status": item.get("template_status"),
         "scene_tags": sorted(_tag_names(item.get("scene_tags"))),
@@ -4341,19 +4341,13 @@ def _extract_template_items(normalized):
 def cmd_templates(params):
     cfg = C.load_config_require_key()
     endpoint, api_key = C.endpoint_of(cfg), cfg.get("api_key", "")
-    # recommend 命中口径：不传 → 官方精选（服务端默认）；"社区" → 仅社区；
-    # "all"/"both" 或 include_community=true → 合并官方精选 + 社区（范式卡命中池）。
-    recommend = params.get("recommend")
-    rec_norm = str(recommend).strip().lower() if recommend else ""
-    include_community = bool(params.get("include_community")) or rec_norm in ("all", "both", "官方精选+社区")
-    if include_community:
-        base = _templates_query(endpoint, api_key, params)                       # 官方精选
-        community = _templates_query(endpoint, api_key, params, recommend="社区")  # 社区
-        merged = _merge_template_items(base, community)
-        normalized = _normalize_cover_response(merged, reply_mode="hint", resource_role="source_template")
-    else:
-        out = _templates_query(endpoint, api_key, params, recommend=(recommend if recommend else None))
-        normalized = _normalize_cover_response(out, reply_mode="hint", resource_role="source_template")
+    # 新版服务端一次完成官方精选和社区的联合查询、去重、排序与分页。
+    recommend = params.get("recommend") or "all"
+    normalized = _normalize_cover_response(
+        _templates_query(endpoint, api_key, params, recommend=recommend),
+        reply_mode="hint",
+        resource_role="source_template",
+    )
 
     # 查询本身失败（网络错误/后端非 0）：原样透传，不进入落盘改造，保持既有失败语义。
     if not (isinstance(normalized, dict) and normalized.get("code") == 0):
@@ -4377,14 +4371,9 @@ def cmd_templates(params):
             "message": f"范式候选完整结果落盘失败：{exc}；未落盘前禁止继续路由判断，也不要把完整结果直接打印",
         }
 
-    # 落盘范式路由凭据，供 new_page 门禁确认已查过完整范式池。include_community 时 scope=all
-    # （官方精选+社区合并）；单池查询记为 official/community，new_page 会要求改用 recommend="all"。
-    if include_community:
-        recommend_scope = "all"
-    elif rec_norm == "社区":
-        recommend_scope = "community"
-    else:
-        recommend_scope = "official"
+    # 只有未收窄的 public 全池可作为 fork/自建前置；单池浏览仍可用，但不能满足 routing gate。
+    rec_norm = str(recommend).strip().lower()
+    recommend_scope = "all" if rec_norm in ("", "all", "both", "官方精选+社区") else ("community" if rec_norm in ("社区", "community") else "official")
     _write_routing_credential(task_id, recommend_scope, len(items), sha256)
 
     items_summary = [_compact_template_item(it) for it in items]
@@ -4407,10 +4396,12 @@ def cmd_template(params):
     tid = params.get("template_id") or params.get("page_id")
     if not tid:
         return {"code": 1, "message": "template 需要 template_id 或 page_id"}
-    key = "template_id" if params.get("template_id") else "page_id"
-    url = C.api_url(endpoint, _PATH["template"]) + "?" + _up.urlencode([(key, tid)])
+    url = C.api_url(endpoint, _PATH["template"]) + "?" + _up.urlencode([("page_id", tid)])
+    raw = C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT)
+    if not (isinstance(raw, dict) and raw.get("code") == 0 and isinstance(raw.get("data"), dict)):
+        return raw
     return _normalize_cover_response(
-        C.http_json("GET", url, C.headers(api_key), timeout=_DEFAULT_TIMEOUT),
+        {"code": 0, **raw["data"]},
         reply_mode="hint",
         resource_role="source_template",
     )

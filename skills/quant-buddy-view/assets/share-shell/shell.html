@@ -1,24 +1,13 @@
 <!-- QB_SHELL_HEADER_START -->
-<header class="qb-head" data-qb-share-shell>
-  <div class="qb-head-in">
-    <a class="qb-brand" href="https://www.quantbuddy.cn/dashboard?scope=favorited" aria-label="前往个人中心投研仓">
-      <span class="qb-logo"><img src="__QB_LOGO_SRC__" alt="QuantBuddy" /></span>
-      <span class="qb-name">QuantBuddy · 宽宝</span>
-    </a>
-    <div class="qb-actions" aria-label="页面操作">
-      <button class="qb-action" id="refresh" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M3 12A9 9 0 0 1 18.3 5.6"/><path d="M18 2v4h4"/><path d="M6 22v-4H2"/></svg>
-        <span class="action-label">刷新数据</span>
-      </button>
-      <button class="qb-action" id="favoriteBtn" type="button" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.8A1.8 1.8 0 0 1 7.8 3h8.4A1.8 1.8 0 0 1 18 4.8V21l-6-3.8L6 21Z"/></svg>
-        <span class="action-label">收藏</span>
-      </button>
-      <button class="qb-action" id="shareBtn" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.8 15.4 6.2"/><path d="M8.6 13.2 15.4 17.8"/></svg>
-        <span class="action-label">分享</span>
-      </button>
-      <a class="qb-action primary" id="startUsing" href="https://www.quantbuddy.cn">问一问</a>
+<header class="qb-head" data-qb-live-page-header-host data-qb-share-shell>
+  <iframe id="qbLivePageHeaderFrame" title="QuantBuddy 活页页头" scrolling="no" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  <div class="qb-live-page-header-fallback" data-qb-live-page-header-fallback aria-hidden="true">
+    <button class="qb-header-fallback-brand" id="qbHeaderFallbackBrand" type="button">QuantBuddy · 宽宝</button>
+    <div class="qb-header-fallback-actions" aria-label="页面基本操作">
+      <button id="qbHeaderFallbackRefresh" type="button">刷新数据</button>
+      <button id="qbHeaderFallbackFavorite" type="button" aria-pressed="false">收藏</button>
+      <button id="qbHeaderFallbackShare" type="button">分享</button>
+      <button class="primary" id="qbHeaderFallbackAsk" type="button">问一问</button>
     </div>
   </div>
 </header>

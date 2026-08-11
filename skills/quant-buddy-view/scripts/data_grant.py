@@ -62,7 +62,7 @@ _PATH = {
 }
 
 _DEFAULT_TIMEOUT = 600
-_ALLOWED_KINDS = {"fast_query", "stock_profile", "composition_select"}
+_ALLOWED_KINDS = {"fast_query", "fast_query_minute", "stock_profile", "composition_select"}
 _CRED_DIR = os.path.join(SKILL_ROOT, "output", "data_grants")
 
 

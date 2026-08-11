@@ -2,15 +2,16 @@
 
 > 脚本 `scripts/data_grant.py` 已可用；`build_dashboard` 与 `assets/data-kernel.js` 已支持 grant 面板。服务端设计见 `skill_server/docs/dataGrant相关文档/数据授权-技术设计文档.md`（v0.2）。
 
-> 把一次 `fastQuery` / `stockProfile` / `selectByComposition` 请求在注册时**钉死**，得到 `grant_id` + `signature`；之后**无需 API Key**，页面凭这两个凭证就能反复取数。底层数据更新后，取数永远拿最新结果（钉死的是"查什么"，不是"某天的值"）。
+> 把一次 `fastQuery` / `fastQueryMinute` / `stockProfile` / `selectByComposition` 请求在注册时**钉死**，得到 `grant_id` + `signature`；之后**无需 API Key**，页面凭这两个凭证就能反复取数。底层数据更新后，取数永远拿最新结果（钉死的是"查什么"，不是"某天的值"）。
 >
 > 与公式任务包（`formula_package`）的关系：**同一套签名免 key 心智**。公式包钉死的是"一组公式 + 读取模式"；数据授权钉死的是"一次平台直取数请求"。**算出来的指标用公式包；平台白名单直取的行情/估值/画像/维度分 TopN 用数据授权**（取舍见 SKILL.md「数据授权 vs 公式包」）。
 
-## 三种 kind
+## 四种 kind
 
 | kind | 底层接口 | 钉死内容 | 页面拿到 |
 |------|---------|---------|---------|
 | `fast_query` | fastQuery | 一次快查请求（assets/query_type/fields…），字段须命中平台白名单 | 值 / 序列 |
+| `fast_query_minute` | fastQueryMinute | `{ asset, fields }`，单资产，字段限 OHLCVA；无历史/区间参数 | 共享 `dates` + 列式 `fields` 分钟数据 |
 | `stock_profile` | stockProfile | `{ asset, dimensions }` | 个股画像卡 |
 | `composition_select` | selectByComposition | 一次按权重选股/筛选请求（mode/universe/composition/screens/top_n…），indicator_id 须为已上线维度分 | TopN 榜单表 |
 
@@ -45,7 +46,7 @@ python scripts/data_grant.py refresh '{"grant_id":"dg_xxx","rotate_signature":tr
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `kind` | `string` | ✅ | `fast_query` / `stock_profile` / `composition_select` |
+| `kind` | `string` | ✅ | `fast_query` / `fast_query_minute` / `stock_profile` / `composition_select` |
 | `payload` | `object` | ✅ | 冻结的完整请求体，形状随 kind（见下） |
 | `ttl_days` | `number` | ❌ | 有效期（天），默认 365 |
 | `task_id` / `user_query` | `string` | ❌ | 随 audit 落库 |
@@ -55,6 +56,9 @@ python scripts/data_grant.py refresh '{"grant_id":"dg_xxx","rotate_signature":tr
 ```jsonc
 // fast_query —— 字段必须命中平台白名单（否则注册拒 FIELD_NOT_WHITELISTED）
 { "assets": ["600519.SH"], "query_type": "snapshot", "fields": ["收盘价","涨跌幅"] }
+
+// fast_query_minute —— 单资产、当前盘中或最近完整交易日；字段会规范为 open/high/low/close/volume/amount
+{ "asset": "600519.SH", "fields": ["收盘价", "最高价", "成交量"] }
 
 // stock_profile
 { "asset": "600519.SH", "dimensions": ["估值","财务质量"] }
@@ -75,6 +79,7 @@ python scripts/data_grant.py refresh '{"grant_id":"dg_xxx","rotate_signature":tr
 ## 取数返回（与在线接口同构，build_dashboard/data-kernel 据此渲染）
 
 - `fast_query`：与在线 fastQuery 同构的值/序列结构。
+- `fast_query_minute`：`data.dates` 为共享分钟时间轴，`data.fields.<field>` 为同索引值数组；自定义活页直接按该列式结构渲染。
 - `stock_profile`：与在线 stockProfile 同构的画像卡结构。
 - `composition_select`：TopN 表（排名/名称/代码/score）+ `composition_used` + `last_date`。
 

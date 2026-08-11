@@ -31,17 +31,18 @@ Templates must not fork private header/footer/share-modal implementations. If th
 
 ## Versioned Capability Contract
 
-`assets/share-shell/contract.json` is the source contract for the current managed shell. The current target is `share-shell-v2 / revision 2` with five required capabilities:
+`assets/share-shell/contract.json` is the source contract for the current managed shell. The current target is `share-shell-v2 / revision 3` with six required capabilities:
 
 - `research_warehouse`
 - `brand_warehouse_navigation`
 - `mobile_web_agent_sheet`
 - `desktop_playground_navigation`
 - `agent_page_refresh`
+- `official_header_iframe`
 
-Build output exposes `QB_SHARE_SHELL_VERSION` and `QB_SHARE_SHELL_REVISION`. `scripts/share_shell_contract.py` canonicalizes the six stable Marker regions (`CSS`, `HEADER`, `RESEARCH_WAREHOUSE`, `FOOTER`, `MODAL`, `JS`) and computes their SHA-256 artifact hash. The revision-2 artifact hash is `cc98771282a73ac7b2a8383260cdc6ffa03ea809eb0868e14a1d77c0bd2ecb6b`.
+Build output exposes `QB_SHARE_SHELL_VERSION` and `QB_SHARE_SHELL_REVISION`. `scripts/share_shell_contract.py` canonicalizes the six stable Marker regions (`CSS`, `HEADER`, `RESEARCH_WAREHOUSE`, `FOOTER`, `MODAL`, `JS`) and computes their SHA-256 artifact hash. The revision-3 artifact hash is `8d3463e9e96b6830958a04820da56f95352e99980cadb2010f0c6722ac507e88`.
 
-Any future header visual or interaction change is a managed artifact change: bump `revision`, update `contract.json`, update `skill_server` capability detection, update the `dunhe_backend` target policy, and extend regression tests. Do not patch published headers page by page. A shell-only refresh must preserve the page body, Data Kernel, live-data scripts, Card Runtime, `page_id`, and public URL.
+The complete visible header is hosted by the official `/embed/live-page-header` endpoint. Pure visual/layout changes belong to `quantbuddy-web` and do not require a shell revision or page-by-page refresh. Parent Bridge, `qb-live-page-header-v1` protocol, or capability-contract changes are managed artifact changes: bump `revision`, update `contract.json`, update `skill_server` detection, update the `dunhe_backend` target policy, and extend regression tests. A shell-only refresh must preserve the page body, Data Kernel, live-data scripts, Card Runtime, `page_id`, and public URL.
 
 ## Public Interface
 
@@ -68,8 +69,9 @@ QBShareShell.init({
 
 The shell owns:
 
-- header brand text: `QuantBuddy · 宽宝`;
-- header actions: `刷新数据 / 收藏 / 分享 / 问一问`;
+- official Header iframe Host plus a lightweight 4-second fallback;
+- Parent Bridge routing for header brand and `刷新数据 / 收藏 / 分享 / 问一问`;
+- Header protocol `qb-live-page-header-v1`: Header sends `ready/action/resize`, Parent sends `init/state`, and both sides validate origin, exact iframe source, channel, version, and matching `page_id`; resize is limited to 44–120px;
 - favorite state: the shell accepts only fixed-origin, exact-iframe-source, matching-channel and matching-`page_id` messages;
 - “问一问”: derive `/playground/<完整 owner path>/<page_id>` from the current `/pages/.../<page_id>.html` URL. At `680px` and narrower, keep the live page in place and open `/embed/web-agent` as a `75dvh` bottom sheet containing chat only; wider layouts keep the current-page `/embed/auth-continue` flow and navigate to Playground only after a trusted `authenticated:true` response;
 - header brand: use the same current-page authentication iframe, then enter `/dashboard?scope=favorited`;
@@ -146,7 +148,7 @@ The input HTML must already contain one complete set of the six stable markers. 
 
 Local previews may pass `pageUrl`, `embedOrigin`, and `navigationOrigin` to `QBShareShell.init()`; production pages omit them and derive the current public page URL directly.
 
-The 投研仓 iframe keeps its existing preload and new-window fallback behavior. The authentication iframe is not loaded or used for hidden session probing; it is created only after the user clicks the header brand or “问一问”. Both protocols validate the official origin, exact iframe source, channel, and request/page identifier. The static page never reads cookies or receives tokens, user identity, or folder details.
+The 投研仓 iframe keeps its existing preload and new-window fallback behavior on ordinary public pages. If `<meta name="qb-live-page-embed-context" content="webagent-preview">` is present, the Parent Bridge does not load the Header iframe or preload 投研仓; the official Preview HTML proxy also hides legacy `.qb-head` and revision-3 Header Host elements with `display:none` so no top gap remains. The authentication iframe is not loaded or used for hidden session probing; it is created only after the user clicks the header brand or “问一问”. Both protocols validate the official origin, exact iframe source, channel, and request/page identifier. The static page never reads cookies or receives tokens, user identity, or folder details.
 
 ## Retrofitting Old Pages
 
@@ -170,6 +172,8 @@ python scripts/retrofit_share_shell.py '{"page_id":"page_xxx","update":true,"the
 - Confirm generated HTML has no `QB_SHARED_`, `__PLACEHOLDER__`, `pkg_replace`, or `replace_with_signature` residue.
 - Verify desktop, 390px, and 320px widths have no horizontal overflow.
 - Verify header actions show `刷新数据 / 收藏 / 分享 / 问一问`.
+- Verify the Header iframe reaches trusted `ready`, receives `init/state`, routes all five actions, clamps resize to 44–120px, and yields to the lightweight fallback after 4 seconds without `ready`.
+- Verify WebAgent Preview has no header and no top gap, does not request Header/warehouse iframes under revision 3, while the public page still shows the Header iframe.
 - Verify 441px and narrower hide refresh/share labels, keep the 收藏 text visible through 320px, and have no horizontal overflow.
 - Verify the header brand stays on the current live page while `/embed/auth-continue` is authenticating and navigates only after a trusted success message. At mobile widths, verify “问一问” opens the `75dvh` chat-only `/embed/web-agent` sheet without navigation; at wider widths it keeps the Auth iframe → matching Playground path. Keep the 投研仓 iframe/new-window fallback on the same `page_id`.
 - Verify a trusted Web Agent `turn-complete` refreshes live data and `page-updated` reloads the current page; untrusted origin/source/channel/page messages do nothing.

@@ -9,6 +9,22 @@
 
 ---
 
+
+
+## [0.6.37] — 2026-08-11
+
+### 官网托管活页页头与 WebAgent Preview 隐藏
+
+- Share Shell 保持 `share-shell-v2`，revision 升至 `3`，新增 `official_header_iframe` 能力；整个可见页头改由官网 `/embed/live-page-header` iframe 托管，活页 Parent Bridge 继续执行刷新、收藏、分享、认证与移动 WebAgent 动作。
+- 新增 `qb-live-page-header-v1` 双向协议，严格校验官方 origin、精确 iframe source、channel、version 和 `page_id`；页头 4 秒未 ready 时显示轻量 fallback，resize 仅接受 44–120px。
+- 官网 WebAgent Preview 上下文不加载页头或预加载收藏 iframe；旧页头和 revision 3 Header Host 均可通过代理注入的 meta/style 从文档流中隐藏。
+- revision 3 canonical artifact hash：`8d3463e9e96b6830958a04820da56f95352e99980cadb2010f0c6722ac507e88`。正文、Data Kernel、实时取数、Card Runtime、`page_id` 与公开 URL 仍不属于 Shell-only 刷新范围。
+- 新版读取链统一为服务端 `listPages/getPageDetail`：`list/download` 固定 `mode=mine`，`templates/template` 固定 `mode=public`；旧服务端静态页/模板读取接口继续仅供旧 Skill 版本兼容。
+- 公共范式池由服务端一次完成官方精选与社区的联合分页；新版不再客户端双请求合并。
+- 公开详情统一提供下载链接、revision、公式包定义和安全 Data Grant 合同，供 direct/fork 使用。
+
+---
+
 ## [0.6.36] — 2026-08-06
 
 ### 多轮追问 Turn 追踪
