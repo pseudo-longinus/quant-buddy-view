@@ -9,7 +9,13 @@
 
 ---
 
+## [0.6.38] — 2026-08-12
 
+### Turn 追踪失败不再阻断活页流程
+
+- `trace_context.py begin/beginTurn` 在服务端 Turn 写入失败、响应异常或 task_id 不一致时，仍持久化本地 Task/Turn 上下文并返回 `code:0`。
+- 返回值新增 `tracking_recorded` 与 `tracking_error` 供诊断；QBV/QBS 后续建页、更新、取数和发布继续执行。
+- 本地 Trace Context 无法持久化仍保持硬失败，因为独立进程无法安全恢复后续业务上下文。
 
 ## [0.6.37] — 2026-08-11
 

@@ -2,7 +2,7 @@
 name: quant-buddy-view
 slug: quant-buddy-view
 author: guanzhao
-version: 0.6.37
+version: 0.6.38
 description: |
   QBV / quant-buddy-view（用户可能写成 /quant-buddy-view、/qbv、qbv 或 QBV）用于把量化数据做成「公开可分享、实时取数」的网页看板/落地页。
   Use this skill when the user asks to create, update, publish, verify, retrofit, or reuse a Quant Buddy dashboard/static page/template, including shareable pages, public URLs, formula packages, share shell, cover/essence cards, poster/share behavior, single-stock profile pages, valuation/financial profile pages, index-anomaly boards, multi-factor screeners, and commodity daily pages.
@@ -12,7 +12,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.37
+  version: 0.6.38
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -74,7 +74,7 @@ runtimeRequirements:
 4. fork/unmatched 调用 `new_page` 时由 Agent 根据 `items_summary` 显式传 `routing_decision`，脚本校验并与同一 `page_id` 绑定；普通渠道立即发送首链，`feishu-group` 仅内部持有该链接，验证目标公式后继续注册、替换与 `publish_verified`。
 5. 除 `new_asset_page` 的单链接快速终态外，其余分支按 `agent_reply_contract` 和回复模板生成草稿，再运行一次 `validate_agent_reply.py`。
 
-> **多轮追问**：首次用户消息运行 `scripts/trace_context.py begin`；同一 `task_id` 的每条后续用户消息先运行 `scripts/trace_context.py beginTurn`。一轮内所有 QBV/QBS 工具共享同一 `turn_id`。更新既有活页必须继续复用原 `page_id` 与公开 URL。
+> **多轮追问**：首次用户消息运行 `scripts/trace_context.py begin`；同一 `task_id` 的每条后续用户消息先运行 `scripts/trace_context.py beginTurn`。一轮内所有 QBV/QBS 工具共享同一 `turn_id`。Turn 是审计旁路：服务端记录失败会返回 `tracking_recorded:false`，但不得阻断建页、更新、取数或发布；本地上下文仍切换并继续。更新既有活页必须继续复用原 `page_id` 与公开 URL。
 
 
 ## 何时用本技能 vs quant-buddy-skill

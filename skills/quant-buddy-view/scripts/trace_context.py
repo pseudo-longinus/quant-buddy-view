@@ -68,28 +68,32 @@ def cmd_begin(params):
     C.configure_trace_context(context_params)
     agent_model = C.current_trace_context().get("agent_model")
     body = _turn_payload(params, task_id, turn_id, user_query)
-    out = C.http_json(
-        "POST", C.api_url(endpoint, "/skill/session/begin"), C.headers(api_key), body, timeout=30,
-    )
-    if not (isinstance(out, dict) and out.get("code") == 0 and out.get("success")):
-        _restore_process_context(previous_process_context)
-        return {
-            "code": 1, "error": "TRACE_BEGIN_FAILED",
-            "message": "服务端 Trace 上下文创建失败，未开始后续发布流程",
-            "server_response": out,
+    try:
+        out = C.http_json(
+            "POST", C.api_url(endpoint, "/skill/session/begin"), C.headers(api_key), body, timeout=30,
+        )
+    except Exception as exc:
+        out = {
+            "code": -1, "success": False,
+            "error": {"code": "TURN_TRACKING_REQUEST_FAILED", "message": str(exc)},
         }
-    if out.get("task_id") and out.get("task_id") != task_id:
-        _restore_process_context(previous_process_context)
-        return {"code": 1, "error": "TRACE_CONTEXT_MISMATCH", "server_response": out}
-    # message_id 幂等重试可能返回首次写入的 canonical turn_id。
-    turn_id = str(out.get("turn_id") or turn_id).strip()
+    tracking_recorded = bool(isinstance(out, dict) and out.get("code") == 0 and out.get("success"))
+    tracking_error = None
+    if tracking_recorded and out.get("task_id") in (None, "", task_id):
+        # message_id 幂等重试可能返回首次写入的 canonical turn_id。
+        turn_id = str(out.get("turn_id") or turn_id).strip()
+    else:
+        tracking_recorded = False
+        tracking_error = out
     task_root = C.task_temp_dir(task_id, create=True)
     if not _commit_context(task_id, turn_id, user_query, None, agent_model):
         _restore_process_context(previous_process_context)
         return {"code": 1, "error": "TRACE_CONTEXT_PERSIST_FAILED", "message": "服务端已创建 Turn，但本地上下文持久化失败"}
     return {
         "code": 0, "task_id": task_id, "turn_id": turn_id, "user_query": user_query,
-        "created": bool(out.get("created")), "task_temp_dir": str(task_root), "next_step": "templates",
+        "created": bool(out.get("created")) if tracking_recorded else False,
+        "tracking_recorded": tracking_recorded, "tracking_error": tracking_error,
+        "task_temp_dir": str(task_root), "next_step": "templates",
         "instruction": (
             "后续每个 quant-buddy-view 命令传入此 task_id；独立进程会自动恢复当前 turn_id。"
             "简单单一 A 股分析可直接 new_asset_page，跳过 templates/new_page；其余场景先 "
@@ -117,23 +121,31 @@ def cmd_begin_turn(params):
     C.configure_trace_context(context_params)
     agent_model = C.current_trace_context().get("agent_model")
     body = _turn_payload(params, task_id, turn_id, user_query, parent_turn_id)
-    out = C.http_json(
-        "POST", C.api_url(endpoint, "/skill/session/turn"), C.headers(api_key), body, timeout=30,
-    )
-    if not (isinstance(out, dict) and out.get("code") == 0 and out.get("success")):
-        _restore_process_context(previous_process_context)
-        return {"code": 1, "error": "TURN_BEGIN_FAILED", "server_response": out}
-    if out.get("task_id") and out.get("task_id") != task_id:
-        _restore_process_context(previous_process_context)
-        return {"code": 1, "error": "TRACE_CONTEXT_MISMATCH", "server_response": out}
-    # message_id 幂等重试可能返回首次写入的 canonical turn_id。
-    turn_id = str(out.get("turn_id") or turn_id).strip()
+    try:
+        out = C.http_json(
+            "POST", C.api_url(endpoint, "/skill/session/turn"), C.headers(api_key), body, timeout=30,
+        )
+    except Exception as exc:
+        out = {
+            "code": -1, "success": False,
+            "error": {"code": "TURN_TRACKING_REQUEST_FAILED", "message": str(exc)},
+        }
+    tracking_recorded = bool(isinstance(out, dict) and out.get("code") == 0 and out.get("success"))
+    tracking_error = None
+    if tracking_recorded and out.get("task_id") in (None, "", task_id):
+        # message_id 幂等重试可能返回首次写入的 canonical turn_id。
+        turn_id = str(out.get("turn_id") or turn_id).strip()
+    else:
+        tracking_recorded = False
+        tracking_error = out
     if not _commit_context(task_id, turn_id, user_query, parent_turn_id, agent_model):
         _restore_process_context(previous_process_context)
         return {"code": 1, "error": "TRACE_CONTEXT_PERSIST_FAILED"}
     return {
         "code": 0, "success": True, "task_id": task_id, "turn_id": turn_id,
-        "parent_turn_id": parent_turn_id, "user_query": user_query, "created": bool(out.get("created")),
+        "parent_turn_id": parent_turn_id, "user_query": user_query,
+        "created": bool(out.get("created")) if tracking_recorded else False,
+        "tracking_recorded": tracking_recorded, "tracking_error": tracking_error,
         "instruction": "本轮后续 QBV/QBS 工具会共享此 turn_id；更新既有页面时继续复用原 page_id/URL。",
     }
 
