@@ -514,6 +514,7 @@ def http_json(method, url, hdrs, body=None, timeout=600):
 SELF_UPDATE_SCRIPT = os.path.join(SCRIPT_DIR, "self_update.py")
 VERSION_CHECK_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".version_check_state.json")
 SELF_UPDATE_STATE_FILE = os.path.join(SKILL_ROOT, "output", ".self_update_state.json")
+MANAGED_INSTALL_FILE = os.path.join(SKILL_ROOT, ".managed-install.json")
 GITHUB_TAGS_API = "https://api.github.com/repos/pseudo-longinus/quant-buddy-view/tags"
 # 匿名 GitHub API 限流 60 次/小时/IP：默认 1 小时才检查一次
 VERSION_CHECK_TTL = int(os.environ.get("QBV_VERSION_CHECK_TTL_SECONDS", "3600") or "3600")
@@ -570,6 +571,15 @@ def _write_json_file(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def _is_qbs_managed_install() -> bool:
+    """Return whether this QBV directory is owned by the QBS companion manager."""
+    marker = _read_json_file(MANAGED_INSTALL_FILE)
+    return (
+        marker.get("manager") == "quant-buddy-skill"
+        and marker.get("channel") == "companion"
+    )
 
 
 def _in_dev_checkout() -> bool:
@@ -665,6 +675,10 @@ def maybe_check_update() -> None:
     """每次工具运行的入口钩子：静默检查 GitHub 新 tag，有则后台自更新。任何异常都吞掉。"""
     try:
         if _truthy_env("QBV_DISABLE_SELF_UPDATE"):
+            return
+        # Companion-managed installations are reconciled only by QBS during
+        # newSession. Do not race the standalone GitHub-tag updater.
+        if _is_qbs_managed_install():
             return
         if not SKILL_VERSION:
             return

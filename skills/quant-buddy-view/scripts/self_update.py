@@ -2,6 +2,7 @@
 """Self-update quant-buddy-view from a verified zip package."""
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -17,7 +18,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SKILL_ROOT = SCRIPT_DIR.parent
 SKILL_NAME = "quant-buddy-view"
-PRESERVE_NAMES = {"config.json", "config.local.json", "output", "logs"}
+PRESERVE_NAMES = {"config.json", "config.local.json", "output", "logs", ".managed-install.json"}
+MANAGED_MARKER = ".managed-install.json"
+SHARED_LOCK_FILENAME = ".quant-buddy-view.update.lock"
+LOCK_STALE_SECONDS = 2 * 60 * 60
 REQUIRED_PATHS = [
     "SKILL.md",
     "CHANGELOG.md",
@@ -36,6 +40,45 @@ def _json_exit(code, **payload):
     payload.setdefault("code", code)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     sys.exit(0 if code == 0 else 1)
+
+
+def _read_managed_marker(skill_root: Path) -> dict:
+    try:
+        payload = json.loads((skill_root / MANAGED_MARKER).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _is_qbs_managed_install(skill_root: Path) -> bool:
+    marker = _read_managed_marker(skill_root)
+    return (
+        marker.get("manager") == "quant-buddy-skill"
+        and marker.get("channel") == "companion"
+    )
+
+
+@contextlib.contextmanager
+def _exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.exists() and time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS:
+            path.unlink()
+    except OSError:
+        pass
+    try:
+        descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise RuntimeError(f"update lock is held: {path}") from exc
+    try:
+        os.write(descriptor, json.dumps({"pid": os.getpid(), "ts": int(time.time())}).encode("utf-8"))
+        os.close(descriptor)
+        yield
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _read_skill_version(skill_md: Path) -> str:
@@ -278,6 +321,19 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Validate only; do not replace files")
     args = parser.parse_args()
 
+    skill_root = Path(args.skill_root).resolve()
+    if not (skill_root / "SKILL.md").exists():
+        _json_exit(1, success=False, error=f"skill root does not contain SKILL.md: {skill_root}")
+
+    # QBS companion installations have one owner. Standalone updater exits
+    # successfully without touching the directory or requiring a download URL.
+    if _is_qbs_managed_install(skill_root):
+        _json_exit(
+            0, success=True, skipped=True, reason="managed_install_owned_by_qbs",
+            package_version=_read_skill_version(skill_root / "SKILL.md"),
+            skill_root=str(skill_root),
+        )
+
     sha512 = args.sha512.strip()
     if sha512:
         if not re.fullmatch(r"[0-9a-fA-F]{128}", sha512):
@@ -287,48 +343,50 @@ def main():
     if not args.url and not args.zip_path:
         _json_exit(1, success=False, error="one of --url or --zip-path is required")
 
-    skill_root = Path(args.skill_root).resolve()
-    if not (skill_root / "SKILL.md").exists():
-        _json_exit(1, success=False, error=f"skill root does not contain SKILL.md: {skill_root}")
     backup_root = Path(args.backup_root).resolve() if args.backup_root else _default_backup_root(skill_root).resolve()
+    shared_lock = skill_root.parent / SHARED_LOCK_FILENAME
 
-    # 防降级 / 幂等：目标不比当前新则直接跳过（去重态记 ok），避免重复下载覆盖。
-    current_version = _read_skill_version(skill_root / "SKILL.md")
-    if current_version and not _is_newer_version(args.version, current_version):
-        _finalize_dedup_state(skill_root, args.version, "ok")
-        _json_exit(
-            0, success=True, skipped=True,
-            reason=f"target {args.version} not newer than current {current_version}; skip to avoid downgrade.",
-            package_version=current_version, skill_root=str(skill_root),
-        )
+    try:
+        with _exclusive_lock(shared_lock):
+            # Re-read under the shared lock so a QBS update that won the race can
+            # never be overwritten by an older standalone target.
+            current_version = _read_skill_version(skill_root / "SKILL.md")
+            if current_version and not _is_newer_version(args.version, current_version):
+                _finalize_dedup_state(skill_root, args.version, "ok")
+                _json_exit(
+                    0, success=True, skipped=True,
+                    reason=f"target {args.version} not newer than current {current_version}; skip to avoid downgrade.",
+                    package_version=current_version, skill_root=str(skill_root),
+                )
 
-    with tempfile.TemporaryDirectory(prefix="qbv_self_update_") as tmp:
-        tmpdir = Path(tmp)
-        zip_path = Path(args.zip_path).resolve() if args.zip_path else tmpdir / "package.zip"
-        try:
-            if args.url:
-                _download(args.url, zip_path)
-            if sha512:
-                actual_sha = _sha512(zip_path)
-                if actual_sha.lower() != sha512.lower():
-                    _json_exit(1, success=False, error="zip sha512 mismatch", expected=sha512.lower(), actual=actual_sha.lower())
+            with tempfile.TemporaryDirectory(prefix="qbv_self_update_") as tmp:
+                tmpdir = Path(tmp)
+                zip_path = Path(args.zip_path).resolve() if args.zip_path else tmpdir / "package.zip"
+                if args.url:
+                    _download(args.url, zip_path)
+                if sha512:
+                    actual_sha = _sha512(zip_path)
+                    if actual_sha.lower() != sha512.lower():
+                        raise RuntimeError(
+                            f"zip sha512 mismatch: expected {sha512.lower()}, got {actual_sha.lower()}"
+                        )
 
-            staging = tmpdir / "staging"
-            staging.mkdir()
-            _safe_extract(zip_path, staging)
-            source = _find_skill_source(staging, args.zip_skill_path)
-            package_version = _validate_source(source, args.version)
+                staging = tmpdir / "staging"
+                staging.mkdir()
+                _safe_extract(zip_path, staging)
+                source = _find_skill_source(staging, args.zip_skill_path)
+                package_version = _validate_source(source, args.version)
 
-            if args.dry_run:
-                _json_exit(0, success=True, dry_run=True, trust_tls=bool(not sha512),
-                           package_version=package_version, source=str(source), skill_root=str(skill_root))
+                if args.dry_run:
+                    _json_exit(0, success=True, dry_run=True, trust_tls=bool(not sha512),
+                               package_version=package_version, source=str(source), skill_root=str(skill_root))
 
-            backup_path = _install(source, skill_root, backup_root)
-            _finalize_dedup_state(skill_root, args.version, "ok")
-            _json_exit(0, success=True, package_version=package_version, skill_root=str(skill_root), backup_path=str(backup_path))
-        except Exception as exc:
-            _finalize_dedup_state(skill_root, args.version, "failed", last_error=str(exc))
-            _json_exit(1, success=False, error=str(exc), skill_root=str(skill_root))
+                backup_path = _install(source, skill_root, backup_root)
+                _finalize_dedup_state(skill_root, args.version, "ok")
+                _json_exit(0, success=True, package_version=package_version, skill_root=str(skill_root), backup_path=str(backup_path))
+    except Exception as exc:
+        _finalize_dedup_state(skill_root, args.version, "failed", last_error=str(exc))
+        _json_exit(1, success=False, error=str(exc), skill_root=str(skill_root))
 
 
 if __name__ == "__main__":

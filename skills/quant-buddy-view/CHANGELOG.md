@@ -9,6 +9,12 @@
 
 ---
 
+## [0.6.39] — 2026-08-12
+
+- 增加 QBS companion 托管安装协调：检测到 `.managed-install.json` 且 manager/channel 为 `quant-buddy-skill/companion` 时，QBV 不再触发独立 GitHub tag 自更新，由 QBS 在 `newSession` 阶段统一管理。
+- standalone updater 与 QBS Companion Manager 共享 skills 根目录的 `.quant-buddy-view.update.lock`，并在锁内重新检查版本，避免并发覆盖和降级；托管安装调用 standalone updater 时返回 soft skip。
+- 自更新继续保留用户配置、输出和日志，并将 managed marker 纳入保护范围；新增 managed/standalone、共享锁与更新保留行为测试。
+
 ## [0.6.38] — 2026-08-12
 
 ### Turn 追踪失败不再阻断活页流程
