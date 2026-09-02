@@ -281,10 +281,10 @@ quant-buddy-view 的计费口径很简单：**托管免费，访问免费，只�
 
 - **Bug 或功能建议**：欢迎提交 [GitHub Issue](https://github.com/pseudo-longinus/quant-buddy-view/issues)。
 - **活页案例、接入与投研工作流讨论**：见 [官网](https://www.quantbuddy.cn)。
-- **实时交流群**：扫码添加微信或加入微信 / 飞书群（下方展开）。
+- **实时交流群**：扫码添加微信或加入微信群（下方展开）。
 
 <details>
-<summary>微信 / 飞书交流群二维码</summary>
+<summary>微信交流群二维码</summary>
 
 <p align="center">
   <table>
@@ -295,14 +295,9 @@ quant-buddy-view 的计费口径很简单：**托管免费，访问免费，只�
         <sub>个人微信</sub>
       </td>
       <td align="center">
-        <img src="assets/wechat_group_qr9.jpg" width="180" alt="微信交流群二维码" />
+        <img src="assets/wechat_group_qr10.png" width="180" alt="QuantBuddy投研科学讨论微信群二维码" />
         <br/>
-        <sub>微信群</sub>
-      </td>
-      <td align="center">
-        <img src="assets/feishu_group_qr2.png" width="180" alt="飞书群二维码" />
-        <br/>
-        <sub>飞书群</sub>
+        <sub>QuantBuddy 投研科学讨论群</sub>
       </td>
     </tr>
   </table>

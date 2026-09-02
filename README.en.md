@@ -227,7 +227,7 @@ quant-buddy-view has a simple billing model: **hosting is free, page visits are 
 
 ## Contact
 
-For more dashboard examples, integration questions, roadmap updates and real research workflows, scan the QR codes below to add WeChat or join the community groups.
+For more dashboard examples, integration questions, roadmap updates and real research workflows, scan the QR codes below to add WeChat or join the community group.
 
 <p align="center">
   <table>
@@ -238,14 +238,9 @@ For more dashboard examples, integration questions, roadmap updates and real res
         <sub>Personal WeChat</sub>
       </td>
       <td align="center">
-        <img src="assets/wechat_group_qr9.jpg" width="180" alt="WeChat group QR" />
+        <img src="assets/wechat_group_qr10.png" width="180" alt="QuantBuddy research discussion WeChat group QR code" />
         <br/>
-        <sub>WeChat group</sub>
-      </td>
-      <td align="center">
-        <img src="assets/feishu_group_qr2.png" width="180" alt="Feishu group QR" />
-        <br/>
-        <sub>Feishu group</sub>
+        <sub>QuantBuddy Research Discussion Group</sub>
       </td>
     </tr>
   </table>
