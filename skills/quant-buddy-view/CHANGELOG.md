@@ -7,7 +7,14 @@
 
 ## [0.6.95] — 2026-10-12
 
+- 参数转换收敛到skill_server：Celery沿用ticker/日期/slots/mode五字段，dataServer不加query_type；snapshot复用已有baselines按实际日分组补查原任务。
+- 新增option_contracts数据授权能力，payload使用query_option_contracts的snapshot/window参数合同。
+- 验证收据检查扁平合约记录、前序身份/日期与snapshot每槽唯一，空结果归为数据不可用；不增加服务器附加检查任务。
+- build_dashboard Python与浏览器同步将records归一为表格，沿用数据内核的授权加载/刷新；真实trade_date不改成查询日。
+- 维护新授权对接说明与回归测试；动态日期由服务端每次取数解析，未代表正式发布或生产部署。
+
 - `build_dashboard` 生成器对齐自建质量合同：number 开头的 spec 同样执行 evidence-first 重排（首屏最多四个关键值 + 主图先行，其余随主图后展开），修复 7+ 数字卡墙直通首屏的旁路。
+- evidence-first 重排增加作者布局边界：图表/表格开头的既有布局不再被重写；仅 number 卡墙和 text 导语场景进入默认重排，保持 chart_edit 增删改查的面板索引稳定。
 - text 面板新增 `hero: true`：渲染为页头主结论导语（`data-qb-conclusion`），自动附"研究快照 · 分析日"注脚，支持 `binding` 动态绑定；一页最多一个，与 `target_selector` 互斥。
 - 新增 `span: "half"`（6/12 两列）；默认布局非折叠折线/柱/雷达图超过 3 张时第 2 张起自动成对，与 0.6.94 的 full-width 纵堆验收上限对齐；首图保留全宽，显式 span 与 K 线/表格不覆盖。
 - 移动端（≤680）页头密度收紧：副标题 16px、hero 结论 18px、注脚与间距压缩，保障 320 首屏出现关键数字证据。

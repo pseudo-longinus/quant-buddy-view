@@ -380,6 +380,10 @@ function normalize(data) {
 function normalizeGrantData(kind, data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
   var k = (kind || '').toLowerCase();
+  if (k === 'option_contracts') {
+    if (!Array.isArray(data.records)) throw new Error('合约授权records格式错误');
+    return data.records;
+  }
   if (k === 'fast_query_minute_range') {
     return (data.rows || []).map(row => Object.fromEntries((data.columns || []).map((key, i) => [key, row[i]])));
   }
@@ -1400,6 +1404,9 @@ def _evidence_first_panels(spec, panels):
     """Keep the default first screen useful without rewriting inherited layouts."""
     if spec.get('layout_order') == 'authored' or any(p.get('target_selector') for p in panels):
         return panels
+    if not panels or panels[0].get('type') not in ('text', 'number'):
+        # 图表/表格开头的布局已经给出作者意图；仅修复 number 卡墙和 text 导语场景。
+        return panels
     remaining = list(panels)
     lead = []
     if remaining and remaining[0].get('type') == 'text' and not remaining[0].get('binding'):
@@ -1810,6 +1817,10 @@ def _normalize_grant_data(kind, data):
     if not isinstance(data, dict):
         return data
     k = (kind or "").lower()
+    if k == "option_contracts":
+        if not isinstance(data.get("records"), list):
+            raise ValueError("合约授权records格式错误")
+        return data["records"]
     if k == "fast_query_minute_range":
         return [dict(zip(data.get("columns") or [], row)) for row in data.get("rows") or []]
     if k == "fast_query_minute":

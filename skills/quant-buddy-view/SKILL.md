@@ -11,7 +11,7 @@ description: |
 runtime: python
 primaryCredential: quant-buddy API Key
 metadata:
-  version: 0.6.93
+  version: 0.6.95
   author: guanzhao
   category: quant-finance
   tags: [quant, dashboard, formula-package, static-page, publish, visualization]
@@ -364,6 +364,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 |---|---|---|
 | 算出来的指标 / 回测净值 / IC / rankIC / 时序 / 自定义公式口径 | **公式包** | `package_id` |
 | 平台白名单直取的行情 / 估值 / 财务 / 资金流（收盘价、涨跌幅、PE/PB…） | 数据授权 `fast_query` | `grant_id` |
+| 部分美股期权槽位当前合约 / 滚动窗口换约表 | 数据授权 `option_contracts`（snapshot/window，动态日期，真实trade_date） | `grant_id` |
 | 个股预计算画像卡（估值/财务质量等维度画像） | 数据授权 `stock_profile` | `grant_id` |
 | 已上线维度分的 TopN / 榜单 / 异动名单（动量反转、趋势结构…） | 数据授权 `composition_select` | `grant_id` |
 
@@ -405,7 +406,7 @@ npx skills update pseudo-longinus/quant-buddy-skills -y
 | 脚本 | 命令 | 作用 | 文档 |
 |---|---|---|---|
 | `scripts/formula_package.py` | `register` / `query` / `list` / `revoke` / `refresh` | 公式任务包：注册取数能力；query 支持 `outputs` 与 `result_mode=full|summary|last_values`，direct 使用 summary | [tools/formula_package.md](tools/formula_package.md) |
-| `scripts/data_grant.py` | `register` / `query` / `list` / `revoke` / `refresh` | 数据授权：把一次 fastQuery/stockProfile/selectByComposition 请求钉死成 `grant_id`+`signature`，页面免 key 直取有界数据（取舍见「数据授权 vs 公式包」） | [tools/data_grant.md](tools/data_grant.md) |
+| `scripts/data_grant.py` | `register` / `query` / `list` / `revoke` / `refresh` | 数据授权：把一次 fastQuery/stockProfile/selectByComposition/queryOptionContracts 请求规则钉死成 `grant_id`+`signature`，页面免 key 直取有界数据（取舍见「数据授权 vs 公式包」） | [tools/data_grant.md](tools/data_grant.md) |
 | `scripts/build_dashboard.py` | （单命令，`emit:"panel_block"` 走局部产出） | spec → live 实时取数看板 HTML；局部产出模式只生成带 marker 的图表 `<script>` 片段，供 bespoke 页面内嵌图表用 | [tools/build_dashboard.md](tools/build_dashboard.md) |
 | `scripts/stock_comparison.py` | `apply @params.json` | 为 `stock_analysis_instance_v1` 原生收盘价图并入基准序列、双 Y 轴和数据表；保持 `#priceChart` 单一 owner，拒绝用通用 panel 二次接管 | [tools/stock_comparison.md](tools/stock_comparison.md) |
 | `scripts/stock_window.py` | `apply @params.json` | 为 legacy `stock_analysis_instance_v1` 设置滚动展示窗口；生成受控 HTML 后必须浏览器预检并 update 原 `page_id` | [tools/stock_window.md](tools/stock_window.md) |
