@@ -5,6 +5,13 @@
 
 ---
 
+## [0.6.94] — 2026-10-12
+
+- 新增因子观察台页面形态：`assets/page-templates/commodity-factor-watch-v1.html` bespoke 骨架与 [guides/factor-watch-pages.md] 结构合同（结论前置、N 因子卡五件套、图表分组、数据节奏分层），「N 因子观察/涨跌怎么看」类需求不再落入通用 research-v1 数字卡墙。
+- `dashboard_design_checks.mjs` 增加因子页硬门槛：首屏主结论、N 组因子可见、实时指标自带数据日期、非折叠 full-width 图表超 3 张判失败、数据节奏分层声明；并新增全页通用的图表纵堆上限。
+- 明确 `public-smoke` 通过只是功能结构验收，不等价视觉质量通过；视觉结论必须来自 self-built/full/ui-refinement 三视口设计检查与截图审阅。
+- 新增 `tests/test_factor_watch_gates.py` 浏览器回归：合规因子页通过、退化形态被拦截、非因子页不受越界约束。
+
 ## [0.6.93] — 2026-10-12
 
 - 历史 Grant 校验统一读取紧凑 JSON 与 `fields[].series`，字段检查和范围检查复用同一解析结果，避免有效行情误报 `HISTORY_SCOPE_MISMATCH`。
