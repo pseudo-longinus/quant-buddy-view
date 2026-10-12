@@ -5,6 +5,21 @@
 
 ---
 
+## [0.6.95] — 2026-10-12
+
+- `build_dashboard` 生成器对齐自建质量合同：number 开头的 spec 同样执行 evidence-first 重排（首屏最多四个关键值 + 主图先行，其余随主图后展开），修复 7+ 数字卡墙直通首屏的旁路。
+- text 面板新增 `hero: true`：渲染为页头主结论导语（`data-qb-conclusion`），自动附"研究快照 · 分析日"注脚，支持 `binding` 动态绑定；一页最多一个，与 `target_selector` 互斥。
+- 新增 `span: "half"`（6/12 两列）；默认布局非折叠折线/柱/雷达图超过 3 张时第 2 张起自动成对，与 0.6.94 的 full-width 纵堆验收上限对齐；首图保留全宽，显式 span 与 K 线/表格不覆盖。
+- 移动端（≤680）页头密度收紧：副标题 16px、hero 结论 18px、注脚与间距压缩，保障 320 首屏出现关键数字证据。
+- 新增 `tests/test_build_dashboard_layout.py` 纯函数单测 13 例（重排/hero/成对/显式 span/边界），并用真实公式包构建回归 demo：同份 7 数字 + 5 图 spec 加 `hero:true` 后通用页 self-built 三视口 0 问题，自称"N 因子"的页面仍按门槛指引走 factor-watch bespoke 模板。
+
+## [0.6.94] — 2026-10-12
+
+- 新增因子观察台页面形态：`assets/page-templates/commodity-factor-watch-v1.html` bespoke 骨架与 [guides/factor-watch-pages.md] 结构合同（结论前置、N 因子卡五件套、图表分组、数据节奏分层），「N 因子观察/涨跌怎么看」类需求不再落入通用 research-v1 数字卡墙。
+- `dashboard_design_checks.mjs` 增加因子页硬门槛：首屏主结论、N 组因子可见、实时指标自带数据日期、非折叠 full-width 图表超 3 张判失败、数据节奏分层声明；并新增全页通用的图表纵堆上限。
+- 明确 `public-smoke` 通过只是功能结构验收，不等价视觉质量通过；视觉结论必须来自 self-built/full/ui-refinement 三视口设计检查与截图审阅。
+- 新增 `tests/test_factor_watch_gates.py` 浏览器回归：合规因子页通过、退化形态被拦截、非因子页不受越界约束。
+
 ## [0.6.93] — 2026-10-12
 
 - 历史 Grant 校验统一读取紧凑 JSON 与 `fields[].series`，字段检查和范围检查复用同一解析结果，避免有效行情误报 `HISTORY_SCOPE_MISMATCH`。
