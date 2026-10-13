@@ -87,6 +87,14 @@ def build_bundle(
     missing = [str(role) for role in coverage.get("missing_roles") or []]
     if not covered:
         reason = coverage.get("reason") or "required_roles_not_covered"
+        if reason in {"capsule_missing", "capsule_schema_unsupported", "capsule_lineage_mismatch"}:
+            return {
+                "version": VERSION, "task_id": task_id, "turn_id": turn_id,
+                "required_roles": requested, "covered_roles": [], "missing_roles": missing,
+                "snapshot_roles": [], "research_status": "unavailable",
+                "delivery_kind": "methodology", "generated_at": datetime.now(timezone.utc).isoformat(),
+                "coverage_reason": reason, "legacy_capsule": True,
+            }
         if reason == "data_reference_hash_mismatch":
             raise EP.PlanError("HANDOFF_REFERENCE_HASH_MISMATCH", "Handoff数据引用hash不一致",
                                missing_roles=missing)

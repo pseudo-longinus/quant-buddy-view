@@ -231,6 +231,13 @@ def recover(params):
     if snapshot_recovery:
         bundle=snapshot_recovery['bundle']
         if not bundle.get('snapshot_roles'):
+            if bundle.get('coverage_reason') not in (None, 'required_roles_not_covered') and not bundle.get('legacy_capsule'):
+                return {'code':1,'error':'HANDOFF_EVIDENCE_INVALID','terminal':False,
+                        'coverage_reason':bundle.get('coverage_reason'),
+                        'covered_roles':bundle.get('covered_roles') or [],
+                        'missing_roles':bundle.get('missing_roles') or [],
+                        'message':'Handoff capsule无效或证据不完整；不能自动降级为方法页',
+                        'next_action':{'command':'delivery_status','params':{'task_id':task}}}
             missing=bundle.get('missing_roles') or []
             if missing:
                 return {'code':1,'error':'HANDOFF_REQUIRED_ROLES_UNAVAILABLE','terminal':False,

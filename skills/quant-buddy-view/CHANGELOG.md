@@ -7,6 +7,8 @@
 
 ## [0.6.96] — 2026-10-13
 
+- 修复宿主快速通道发布投影：使用当前task/turn与已验证收据校验终答，避免模型成功补链但交付状态被误写为回复不匹配。
+
 - QBS Handoff已验证产出可经`handoff_snapshot_bridge.py`物化为不可变快照；恢复时优先保留partial/result数据，不再误降级为无数据方法页。
 - Compose布局借鉴不再继承来源模板runtime role；来源证据缺失返回`COMPOSE_ROLE_EVIDENCE_INCOMPLETE`，防止traceback和错误凭证进入目标计划。
 - 发布验收继续闭环QBS Job；页面候选增加`expected_rows`共同完整截面口径，分享标题必须与发布主标题一致，不足20行明确显示有效N/20。
