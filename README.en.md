@@ -233,9 +233,9 @@ For more dashboard examples, integration questions, roadmap updates and real res
   <table>
     <tr>
       <td align="center">
-        <img src="assets/wechat_qr3.png" width="180" alt="Personal WeChat QR" />
+        <img src="assets/wechat_qr3.png" width="180" alt="QuantBuddy WeCom QR" />
         <br/>
-        <sub>Personal WeChat</sub>
+        <sub>QuantBuddy WeCom</sub>
       </td>
       <td align="center">
         <img src="assets/wechat_group_qr10.png" width="180" alt="QuantBuddy research discussion WeChat group QR code" />
